@@ -267,8 +267,8 @@ async function runPi(
 	const runtime = await mkdtemp(path.join(realpathSync("/tmp"), "sr-"));
 	const sightreadBin = path.join(workDir, `${name}-bin`);
 	try {
+		mkdirSync(sightreadBin, { recursive: true });
 		if (sightread === "on") {
-			mkdirSync(sightreadBin, { recursive: true });
 			await symlink(
 				path.join(sightreadRoot(extension), "packages/sightread/src/cli.ts"),
 				path.join(sightreadBin, "sightread.ts"),
@@ -276,6 +276,14 @@ async function runPi(
 			writeFileSync(path.join(sightreadBin, "sightread"), '#!/bin/sh\nexec bun "$(dirname "$0")/sightread.ts" "$@"\n', {
 				mode: 0o755,
 			});
+		} else {
+			writeFileSync(
+				path.join(sightreadBin, "sightread"),
+				"#!/bin/sh\nprintf 'sightread: command not found\\n' >&2\nexit 127\n",
+				{
+					mode: 0o755,
+				},
+			);
 		}
 		const logFile = path.join(resultsRoot, `${name}.jsonl`);
 		const stderrFile = path.join(resultsRoot, `${name}.stderr.log`);
@@ -335,16 +343,13 @@ async function runPi(
 			"-p",
 			seeds ? "Continue with the task." : args.task!,
 		];
-		const inheritedPath = [
-			path.join(copy, "node_modules/.bin"),
-			...(process.env.PATH ?? "").split(path.delimiter),
-		].filter((directory) => directory && (sightread === "on" || !existsSync(path.join(directory, "sightread"))));
+		const inheritedPath = [path.join(copy, "node_modules/.bin"), ...(process.env.PATH ?? "").split(path.delimiter)];
 		const startedAt = performance.now();
 		const pi = Bun.spawn(command, {
 			cwd: copy,
 			env: {
 				...process.env,
-				PATH: [sightread === "on" ? sightreadBin : null, ...inheritedPath].filter(Boolean).join(path.delimiter),
+				PATH: [sightreadBin, ...inheritedPath].join(path.delimiter),
 				PI_CODING_AGENT_DIR: agentDir,
 				XDG_RUNTIME_DIR: runtime,
 			},

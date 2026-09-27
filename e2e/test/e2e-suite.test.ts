@@ -266,6 +266,65 @@ console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content
 	};
 }
 
+test("sightread off keeps other executables beside sightread on PATH", async () => {
+	const root = await directory();
+	const fixture = path.join(root, "fixture");
+	const results = path.join(root, "results");
+	const sharedBin = path.join(root, "shared-bin");
+	await materializeTask(allTasks[0]!, fixture);
+	await mkdir(sharedBin);
+	await writeFile(path.join(sharedBin, "peer-tool"), "#!/bin/sh\nprintf 'available\\n'\n");
+	await writeFile(path.join(sharedBin, "sightread"), "#!/bin/sh\nprintf 'original sightread ran\\n' >&2\n");
+	await Promise.all([chmod(path.join(sharedBin, "peer-tool"), 0o755), chmod(path.join(sharedBin, "sightread"), 0o755)]);
+	const env = await fakeEnvironment(root);
+	await writeFile(
+		path.join(root, "bin/pi"),
+		`#!/usr/bin/env bun
+import { writeFileSync } from "node:fs";
+const helper = Bun.spawnSync(["sh", "-c", "peer-tool"], { env: process.env });
+const sightread = Bun.spawnSync(["sh", "-c", "sightread"], { env: process.env });
+writeFileSync(process.env.FAKE_PROBE, JSON.stringify({
+  helper: { exit: helper.exitCode, stdout: helper.stdout.toString() },
+  sightread: { exit: sightread.exitCode, stderr: sightread.stderr.toString() },
+}));
+`,
+	);
+	await chmod(path.join(root, "bin/pi"), 0o755);
+	const child = Bun.spawn(
+		[
+			"bun",
+			path.resolve("e2e/run.ts"),
+			"--repo",
+			fixture,
+			"--task",
+			"Example",
+			"--setup",
+			"baseline",
+			"--sightread",
+			"off",
+			"--check",
+			"true",
+			"--results-dir",
+			results,
+		],
+		{
+			env: { ...env, PATH: `${env.PATH}${path.delimiter}${sharedBin}`, FAKE_PROBE: path.join(root, "probe.json") },
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
+	const [exit, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stderr).text(),
+		new Response(child.stdout).text(),
+	]);
+	expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+	expect(JSON.parse(await readFile(path.join(root, "probe.json"), "utf8"))).toEqual({
+		helper: { exit: 0, stdout: "available\n" },
+		sightread: { exit: 127, stderr: "sightread: command not found\n" },
+	});
+}, 20_000);
+
 test("sightread conditions set PATH and skill, record the dimension, and stop servers after passing and failing attempts", async () => {
 	const root = await directory();
 	const fixture = path.join(root, "fixture");
@@ -302,8 +361,8 @@ import { appendFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
 const args = process.argv.slice(2);
 const bin = process.env.PATH.split(path.delimiter).find(dir => existsSync(path.join(dir, "sightread")));
-appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args, bin, runtime: process.env.XDG_RUNTIME_DIR }) + "\\n");
-if (bin) Bun.spawnSync([path.join(bin, "sightread"), "start"], { env: process.env });
+const sightread = bin ? Bun.spawnSync([path.join(bin, "sightread"), "start"], { env: process.env }) : null;
+appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args, bin, sightreadExit: sightread?.exitCode, sightreadError: sightread?.stderr.toString(), runtime: process.env.XDG_RUNTIME_DIR }) + "\\n");
 process.exit(process.env.FAKE_FAIL === "1" ? 1 : 0);
 `,
 	);
@@ -348,7 +407,12 @@ process.exit(process.env.FAKE_FAIL === "1" ? 1 : 0);
 	expect(calls.length).toBe(8);
 	for (const call of calls) {
 		const on = call.args.some((arg: string) => arg.includes("sightread/skills/sightread"));
-		expect(Boolean(call.bin)).toBe(on);
+		expect(Boolean(call.bin)).toBe(true);
+		if (!on)
+			expect({ exit: call.sightreadExit, stderr: call.sightreadError }).toEqual({
+				exit: 127,
+				stderr: "sightread: command not found\n",
+			});
 		expect(call.args.includes("--skill")).toBe(on);
 		expect(call.runtime).toStartWith(realpathSync("/tmp") + "/");
 		expect(await Bun.file(path.join(call.runtime, "server")).exists()).toBe(false);

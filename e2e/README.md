@@ -158,8 +158,9 @@ suite shows an effect.
 | `--sightread` | `off,on` | `off`   |
 
 `on` provides the sightread CLI and skill, and advertises `graph.query` in shorthand; it also works with the `baseline` setup. Each attempt gets a separate runtime directory, and its servers are stopped when the attempt ends.
-`off` runs against a frozen copy of the extension with no `sightread` package, as if it weren't installed: the
-CLI isn't on `PATH`, `graph.query` isn't advertised, and a program can't reach the graph or import the package.
+`off` runs against a frozen copy of the extension with no `sightread` package, as if it weren't installed:
+`sightread` answers "command not found" (a stand-in placed first on `PATH`, so tools installed beside it stay
+available), `graph.query` isn't advertised, and a program can't reach the graph or import the package.
 
 | `--setups` value | Enabled tools                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------- |
