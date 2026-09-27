@@ -28,6 +28,31 @@ one task have differed by up to 92s, so small gaps are noise.
 
 The pilot and guidance suites verified every task in both conditions, with shorthand 9–76% slower.
 
+**These shorthand results need re-running.** Until 3aa9d94, the shorthand skill's examples mirrored benchmark
+tasks: retry limits moved into an options object (`options-migration`), `console.log` to `logger.info`
+(`logger-migration`), `formatPrice` gaining an argument (`rename-symbol`'s target), and `TableWriter.format`
+extracted into `renderTable` (the guidance suite's table extraction). Those rows may overstate shorthand.
+`move-module`, `move-declaration` and the pilot had no matching example. The examples now use names and
+changes no task uses.
+
+### sightread
+
+Latest runs, after the skills stopped mirroring tasks: `openai-codex/gpt-5.6-sol`, high reasoning, outcome
+prompts, two attempts per cell, `--skills shorthand`. Every attempt verified with zero drift. Times are means;
+two attempts are too few to separate gaps of a few seconds from noise.
+
+| Task               | Files | Stock | Stock + sightread | Shorthand | Shorthand + sightread |
+| ------------------ | ----: | ----: | ----------------: | --------: | --------------------: |
+| `impact-report`    |    10 |   19s |               18s |       29s |                   19s |
+| `method-migration` |    10 |   45s |               47s |       60s |                   44s |
+| `impact-report`    |   100 |   50s |               44s |       48s |                   41s |
+| `method-migration` |   100 |   67s |              134s |       71s |                   52s |
+
+The 10-file impact rows overlapped with another benchmark run on the same machine, so their times are rough.
+In the stock 100-file migration, agents script 115 edits and look for a TypeScript parser the fixture's
+TypeScript 7 doesn't provide; `references` has since added call and argument ranges for that, not yet
+re-measured. Earlier rounds, and what each change fixed, are in the commit history from 04f244d.
+
 ## Layout
 
 | Path                                             | Contents                                                              |
@@ -91,14 +116,15 @@ Every earlier study passed 100% in both stock and shorthand conditions, so pass 
 them. The `scale` suite generates seven task families, each across 10, 40 and 100 consumer files, e.g.
 `rename-symbol-40`:
 
-| Family              | Change                                                          | Decoys that must stay unchanged                                             |
-| ------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `rename-symbol`     | Rename an exported function, through a barrel and aliases       | Same-named legacy function and its importers, shadowing parameters, strings |
-| `options-migration` | Positional `request(url, retries, timeoutMs)` to options        | `cache.request`, file-local `request` functions, strings                    |
-| `move-module`       | Move a module, updating its own import, re-exports and imports  | Barrel importers and a same-named legacy module                             |
-| `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it     | `audit.log`, `Math.log`, strings                                            |
-| `impact-report`     | Report direct and transitive feature callers of `applyDiscount` | Legacy and local functions, class methods, strings                          |
-| `method-migration`  | Add `{ fresh: true }` to every `Row.get` call                   | Other `get` methods, local functions, strings                               |
+| Family              | Change                                                           | Decoys that must stay unchanged                                             |
+| ------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `rename-symbol`     | Rename an exported function, through a barrel and aliases        | Same-named legacy function and its importers, shadowing parameters, strings |
+| `options-migration` | Positional `request(url, retries, timeoutMs)` to options         | `cache.request`, file-local `request` functions, strings                    |
+| `move-module`       | Move a module, updating its own import, re-exports and imports   | Barrel importers and a same-named legacy module                             |
+| `move-declaration`  | Move `formatDate` out of `src/utils/date.ts`, keeping its barrel | A same-named legacy `formatDate` and its importer                           |
+| `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it      | `audit.log`, `Math.log`, strings                                            |
+| `impact-report`     | Report direct and transitive feature callers of `applyDiscount`  | Legacy and local functions, class methods, strings                          |
+| `method-migration`  | Add `{ fresh: true }` to every `Row.get` call                    | Other `get` methods, local functions, strings                               |
 
 Consumers vary call shape (multi-line calls, variables, `undefined` placeholders, dynamic levels) and directory
 depth. Evaluators check behaviour of every consumer, type-check the fixture, and require zero drift.
@@ -132,6 +158,8 @@ suite shows an effect.
 | `--sightread` | `off,on` | `off`   |
 
 `on` provides the sightread CLI and skill, and advertises `graph.query` in shorthand; it also works with the `baseline` setup. Each attempt gets a separate runtime directory, and its servers are stopped when the attempt ends.
+`off` runs against a frozen copy of the extension with no `sightread` package, as if it weren't installed: the
+CLI isn't on `PATH`, `graph.query` isn't advertised, and a program can't reach the graph or import the package.
 
 | `--setups` value | Enabled tools                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------- |
@@ -182,8 +210,11 @@ cloned once and a JavaScript package is prepared with `bun install`; use a prepa
 dependencies and revision precisely.
 
 For extension revision comparisons, add `--baseline-extension <path>` and `--candidate-extension <path>`.
-Extension source is copied to frozen paths before attempts begin. Installed dependencies are symlinked, so do
-not update them during an experiment. Model, reasoning, prompt, task/category IDs, enabled tools, documentation,
+Extension source is copied to frozen paths before attempts begin. Its workspace packages (`shorthand-code`,
+`sightread`, `pi-shorthand`) resolve to the frozen copy, including through `node_modules/.bin`, so editing the
+source during an experiment doesn't change what runs; freezing fails if a nested dependency links back into the
+source. Other installed dependencies are symlinked, so don't update them during an experiment. Attempts with
+`--sightread off` use a separate frozen copy without `sightread`. Model, reasoning, prompt, task/category IDs, enabled tools, documentation,
 skill choice, fixture fingerprint and extension identity are recorded in summaries.
 
 For a controlled recovery comparison, add `--seed-messages <file.json>`. The file maps extension labels
@@ -211,6 +242,11 @@ can overshoot. Costs depend on Pi's provider/model estimates, not invoices.
 - A `run` record in `summary.jsonl`; each experiment adds aggregates by condition, including failed-attempt cost
   in cost per verified completion. Task/category fields support later grouping across the suite.
 
+An attempt that the model provider ends with an error (for example, "Unable to verify model access") records
+`providerError`. It measures nothing about the tools, so it's left out of completion, latency, tool counts and
+drift and counted as `providerErrors`; its cost still counts, and its failed tool calls still count in
+`failedToolCalls`.
+
 Artifacts are captured **before** evaluator execution and relative to the recorded working tree, not HEAD.
 The JSON manifest preserves binary content (base64), permissions and symlink targets, including deletions and
 untracked additions. The patch is a readable content comparison; the manifest is authoritative for modes and
@@ -230,7 +266,7 @@ tool-call counts alone are not a fluency score.
 ## Local validation
 
 ```sh
-bun test test/e2e-harness.test.ts test/e2e-suite.test.ts test/scale-tasks.test.ts test/seed-session.test.ts
+bun test e2e/test
 npm run check
 ```
 
