@@ -273,7 +273,8 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 
 	// Every reference TypeScript resolves to the symbol `handle` names, with where it sits and the call it makes.
 	const collect = async (handle: string, includeDeclaration: boolean, paths: PathMapper, current?: Snapshot) => {
-		const ref = fromHandle(handle);
+		// Handles arrive relative to the project from requests, and relative to the repository from the walk.
+		const ref = fromHandle(paths.toProjectHandle(handle));
 		if (!ref) throw new Error(`${handle} not found`);
 		const active = current ?? (await refresh());
 		const file = resolve(project.root, ref.file);

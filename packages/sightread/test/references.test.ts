@@ -528,3 +528,31 @@ test("a reverse walk checks project file stamps only once", async () => {
 		fixture.cleanup();
 	}
 });
+
+test("a walk in a project below the repository root follows callers past the first level", async () => {
+	const repo = mkdtempSync(join(realpathSync("/tmp"), "sr-nested-"));
+	const client = join(repo, "client");
+	const nested: Record<string, string> = {
+		"tsconfig.json": '{"compilerOptions":{"strict":true,"module":"nodenext"}}\n',
+		"src/target.ts": "export function target() { return 1; }\n",
+		"src/a.ts": 'import { target } from "./target.ts";\nexport function a() { return target(); }\n',
+		"src/b.ts": 'import { a } from "./a.ts";\nexport function b() { return a(); }\n',
+	};
+	for (const [name, contents] of Object.entries(nested)) {
+		mkdirSync(dirname(join(client, name)), { recursive: true });
+		writeFileSync(join(client, name), contents);
+	}
+	Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+	const index = createReferenceIndex({ root: client, tsconfig: join(client, "tsconfig.json") });
+	try {
+		const result = await index.walk("client/src/target.ts#target:function", { maxNodes: 10 }, createPaths(client));
+		expect(result.nodes.map((node) => node.handle).toSorted()).toEqual([
+			"client/src/a.ts#a:function",
+			"client/src/b.ts#b:function",
+		]);
+		expect(result.skipped).toBe(0);
+	} finally {
+		await index.close();
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
