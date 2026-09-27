@@ -430,7 +430,8 @@ test("a mismatched global sightread version fails through the graph proxy", asyn
 	await Bun.write(join(fake, "bin/sightread"), "");
 	const locate = (strictVersion = false) =>
 		resolveSightread({ importer, executable: join(fake, "bin/sightread"), cache: false, strictVersion });
-	const message = "graph needs sightread 0.9.0 (found 0.8.0); npm i -g sightread@0.9.0";
+	const { version } = (await Bun.file(join(import.meta.dir, "../package.json")).json()) as { version: string };
+	const message = `graph needs sightread ${version} (found 0.8.0); npm i -g sightread@${version}`;
 	expect(await locate()).toBeUndefined();
 	await expect(locate(true)).rejects.toThrow(message);
 	const proxy = await openGraphProxy(directory, root, root, { resolve: () => locate(true) });
