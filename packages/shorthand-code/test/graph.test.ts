@@ -246,7 +246,7 @@ test("reference result nodes scope sg.find to their source coordinates", async (
 		`
 const refs = await graph.query({ type: "references", symbol: "Service.run" });
 console.log("nodes", refs.nodes.length, refs.nodes.every(n => n.ranges === null && n.line > 0));
-console.log("matches", JSON.stringify(sg.find({ rule: { kind: "property_identifier", regex: "^run$" } }, refs.nodes).map(m => [m.file.endsWith("/client/src/callers.ts"), m.line])));
+console.log("matches", JSON.stringify(sg.find({ rule: { kind: "property_identifier", regex: "^run$" } }, refs.nodes).map(m => [m.file.endsWith("src/callers.ts"), m.line])));
 `,
 	);
 	expect(outcome.exitCode).toBe(0);
