@@ -32,6 +32,7 @@ interface Ping {
 	project: string;
 	lastUsed: number;
 	startedAt: number;
+	active: number;
 }
 
 interface Response {
@@ -96,10 +97,10 @@ async function ping(paths: ServerPaths): Promise<Ping | undefined> {
 	}
 }
 
-async function stopAt(paths: ServerPaths): Promise<void> {
+async function stopAt(paths: ServerPaths, quietOnly = false): Promise<void> {
 	if (await ping(paths)) {
 		try {
-			await exchange(paths.socket, { type: "stop" }, 5_000);
+			if ((await exchange(paths.socket, { type: "stop", quietOnly }, 5_000)) === false) return;
 		} catch (error) {
 			if (error instanceof SocketTimeoutError) throw new ServerStopError(`server did not stop; see ${paths.log}`);
 			/* It may have exited already. */
@@ -165,7 +166,7 @@ async function evictQuiet(current: string): Promise<void> {
 	const maximum = Math.max(1, Number(process.env.SIGHTREAD_MAX_SERVERS) || 2);
 	const configured = Number(process.env.SIGHTREAD_QUIET_MS);
 	const quiet = process.env.SIGHTREAD_QUIET_MS && Number.isFinite(configured) ? configured : 5 * 60_000;
-	const servers: { paths: ServerPaths; lastUsed: number }[] = [];
+	const servers: { paths: ServerPaths; lastUsed: number; active: number }[] = [];
 	let reservations = 0;
 	for (const directory of await allStateDirectories()) {
 		if (directory === current) continue;
@@ -194,13 +195,14 @@ async function evictQuiet(current: string): Promise<void> {
 			// A daemon may replace its reservation while we inspect it.
 		}
 		const live = await ping(paths);
-		if (live) servers.push({ paths, lastUsed: live.lastUsed });
+		if (live) servers.push({ paths, lastUsed: live.lastUsed, active: live.active });
 		else if (state?.startedAt && Date.now() - state.startedAt < startTimeout && pidAlive(state.pid ?? 0))
 			reservations++;
 	}
 	const need = Math.max(0, servers.length + reservations - maximum + 1);
-	const idle = servers.filter((server) => Date.now() - server.lastUsed >= quiet);
-	for (const server of idle.toSorted((a, b) => a.lastUsed - b.lastUsed).slice(0, need)) await stopAt(server.paths);
+	const idle = servers.filter((server) => server.active === 0 && Date.now() - server.lastUsed >= quiet);
+	for (const server of idle.toSorted((a, b) => a.lastUsed - b.lastUsed).slice(0, need))
+		await stopAt(server.paths, true);
 }
 
 async function start(paths: ServerPaths, project: Project, signature: string): Promise<Ping> {

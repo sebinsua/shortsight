@@ -57,7 +57,7 @@ export async function runDiff(
 				file: paths.toRepositoryPath(node.file),
 				handle: paths.toRepositoryHandle(node.handle),
 			})),
-			notes: impact?.notes ?? matched.notes,
+			notes: [...(git.baseNote ? [git.baseNote] : []), ...(impact?.notes ?? matched.notes)],
 		};
 		return options.json
 			? JSON.stringify({ ...result, notes: formatDiffNotes(result.notes) })

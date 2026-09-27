@@ -37,7 +37,8 @@ export function formatDiffNotes(notes: string[]): string[] {
 	let extraOutside = 0;
 	for (const note of notes) {
 		const truncation = note.match(/^(.+): impact truncated at \d+ callers; reverse trace used$/);
-		if (truncation) truncated.push(truncation[1]);
+		if (note.startsWith("no default branch found")) groups[0].unshift(note);
+		else if (truncation) truncated.push(truncation[1]);
 		else if (note.endsWith(": not TypeScript")) nonTs.push(note.slice(0, -": not TypeScript".length));
 		else if (/^\.\.\. \d+ more non-TS files$/.test(note)) extraNonTs += Number(note.match(/\d+/)?.[0]);
 		else if (note.endsWith(": imports changed")) imports.push(note.slice(0, -": imports changed".length));
@@ -100,7 +101,11 @@ function lineRuns(lines: number[]): string {
 
 // Draw what reaches each changed declaration as a tree. A caller is expanded the first time it
 // appears and marked "shown above" after that, so shared callers are drawn once.
-function impactTrees(value: DiffResult, files: Map<string, GitFile>, color: boolean): string[] {
+function impactTrees(
+	value: DiffResult,
+	files: Map<string, GitFile>,
+	color: boolean,
+): { rows: string[]; shown: Set<string> } {
 	const nodes = new Map([...value.changed, ...value.callers].map((node) => [node.handle, node]));
 	const callersOf = new Map<string, Map<string, string>>();
 	for (const { handles, hops } of value.chains)
@@ -162,24 +167,38 @@ function impactTrees(value: DiffResult, files: Map<string, GitFile>, color: bool
 			else if (node.status !== "added") rows.push(`  ${dim("└─ no callers", color)}`);
 		}
 	}
-	return rows;
+	return { rows, shown };
+}
+
+function otherCallerRows(callers: DiffResult["callers"], shown: Set<string>, color: boolean): string[] {
+	const files = new Map<string, DiffResult["callers"]>();
+	for (const caller of callers) {
+		if (shown.has(caller.handle)) continue;
+		const group = files.get(caller.file) ?? [];
+		group.push(caller);
+		files.set(caller.file, group);
+	}
+	return [...files].flatMap(([file, nodes]) => [
+		bold(file, color),
+		...nodes.map((node) => `  ${dim(range(node), color)}  ${bold(node.name, color)}`),
+	]);
 }
 
 // Each test file, then one row per name it uses, with the lines.
 function testRows(value: DiffResult, color: boolean): string[] {
-	const files = new Map<string, Map<string, { lines: number[]; byName: boolean }>>();
+	const files = new Map<string, Map<string, { name: string; lines: number[]; byName: boolean }>>();
 	for (const node of value.tests) {
-		const names = files.get(node.file) ?? new Map<string, { lines: number[]; byName: boolean }>();
-		const group = names.get(node.name) ?? { lines: [], byName: true };
+		const names = files.get(node.file) ?? new Map<string, { name: string; lines: number[]; byName: boolean }>();
+		const key = JSON.stringify([node.name, !!node.byName]);
+		const group = names.get(key) ?? { name: node.name, lines: [], byName: !!node.byName };
 		if (node.site) group.lines.push(node.site.start);
-		group.byName &&= !!node.byName;
-		names.set(node.name, group);
+		names.set(key, group);
 		files.set(node.file, names);
 	}
 	return [...files].flatMap(([file, names]) => [
 		bold(file, color),
-		...[...names].map(
-			([name, { lines, byName }]) =>
+		...[...names.values()].map(
+			({ name, lines, byName }) =>
 				`  ${bold(name, color)}${lines.length ? ` on ${lines.length === 1 ? "line" : "lines"} ${lineRuns(lines)}` : ""}${byName ? dim("  (by name)", color) : ""}`,
 		),
 	]);
@@ -199,7 +218,9 @@ export function renderDiffText(value: DiffResult, files: Map<string, GitFile>, c
 	const section = (title: string, rows: string[]) => {
 		if (rows.length) lines.push("", title, ...rows);
 	};
-	lines.push(...impactTrees(value, files, color));
+	const trees = impactTrees(value, files, color);
+	lines.push(...trees.rows);
+	section("other callers", otherCallerRows(value.callers, trees.shown, color));
 	section("tests", testRows(value, color));
 	section(
 		"notes",

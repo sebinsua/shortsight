@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runDiff } from "../src/diff/index.ts";
+import { readGitChanges } from "../src/diff/git.ts";
 import { renderDiffText } from "../src/diff/render.ts";
 import { connect, stopAllServers, stopServer } from "../src/server/client.ts";
 
@@ -63,6 +64,39 @@ afterAll(async () => {
 	rmSync(runtime, { recursive: true, force: true });
 	if (originalRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
 	else process.env.XDG_RUNTIME_DIR = originalRuntime;
+});
+
+test("HEAD fallback warns when another local branch contains committed work", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "trunk");
+	git(f.repo, "checkout", "-qb", "feature");
+	f.put("client/src/api.ts", "export function value() { return 2; }\n");
+	git(f.repo, "add", ".");
+	git(f.repo, "commit", "-qm", "feature change");
+	const note =
+		"no default branch found; this compares against HEAD, so committed changes aren't included. Pass a base, like diff trunk, to compare a branch.";
+	expect((await readGitChanges(f.root)).baseNote).toBe(note);
+	const text = await runDiff(f.project, undefined, { json: false, color: false });
+	const json = JSON.parse(await runDiff(f.project, undefined, { json: true, color: false })) as { notes: string[] };
+	expect(text).toContain(`notes\n  ${note}`);
+	expect(json.notes).toContain(note);
+}, 30_000);
+
+test("HEAD fallback is quiet on the sole branch and on main", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "feature");
+	expect((await readGitChanges(f.root)).baseNote).toBeUndefined();
+	git(f.repo, "branch", "main");
+	git(f.repo, "checkout", "-q", "main");
+	expect((await readGitChanges(f.root)).baseNote).toBeUndefined();
+});
+
+test("HEAD fallback uses a base placeholder when several other branches exist", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "feature");
+	git(f.repo, "branch", "trunk");
+	git(f.repo, "branch", "release");
+	expect((await readGitChanges(f.root)).baseNote).toContain("like diff <base>, to compare a branch.");
 });
 
 test("an untracked realistic TSX component retains its entire range and new-file heading", async () => {
@@ -686,4 +720,43 @@ test("uses of one name across a test file render as one row of line runs", () =>
 	).toBe(
 		"diff against 123456789012 in client: 0 changed · used by 0 · tested by 2 files\n\ntests\nclient/src/api.test.ts\n  target on lines 4-6, 9, 12-13  (by name)\nclient/src/other.test.ts\n  target on line 7  (by name)",
 	);
+});
+
+test("caller count includes callers omitted from capped chains", () => {
+	const changed = {
+		handle: "src/api.ts#target:function",
+		name: "target",
+		kind: "function",
+		file: "src/api.ts",
+		ranges: [{ start: 1, end: 1 }],
+		status: "edited" as const,
+	};
+	const callers = Array.from({ length: 7 }, (_, index) => ({
+		handle: `src/use.ts#caller${index}:function`,
+		name: `caller${index}`,
+		kind: "function",
+		file: "src/use.ts",
+		ranges: [{ start: index + 2, end: index + 2 }],
+	}));
+	const chains = callers.slice(0, 5).map((caller) => ({
+		handles: [caller.handle, changed.handle],
+		hops: [{ from: caller.handle, to: changed.handle, kind: "calls" }],
+	}));
+	const text = renderDiffText(
+		{ base: "123456789012", project: ".", changed: [changed], callers, chains, tests: [], notes: [] },
+		new Map(),
+		false,
+	);
+	expect(text).toContain("used by 7");
+	expect(text).toContain("other callers\nsrc/use.ts\n  7-7  caller5\n  8-8  caller6");
+});
+
+test("test sites with and without name matching have separate rows", () => {
+	const tests = [testSite("src/api.test.ts", 4), { ...testSite("src/api.test.ts", 8), byName: undefined }];
+	const text = renderDiffText(
+		{ base: "123456789012", project: ".", changed: [], callers: [], chains: [], tests, notes: [] },
+		new Map(),
+		false,
+	);
+	expect(text).toContain("tests\nsrc/api.test.ts\n  target on line 4  (by name)\n  target on line 8");
 });

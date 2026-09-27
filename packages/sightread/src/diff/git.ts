@@ -39,6 +39,7 @@ export interface GitChanges {
 	repository: string;
 	base: string;
 	baseRef?: string;
+	baseNote?: string;
 	project: string;
 	files: GitFile[];
 	baseText(file: string): Promise<string | undefined>;
@@ -55,7 +56,7 @@ export interface GitChanges {
  * The fallbacks exist because a bare clone has no `refs/remotes/origin/*`, so worktrees made from
  * one never have `origin/HEAD`.
  */
-async function defaultBase(repository: string): Promise<{ revision: string; ref: string }> {
+async function defaultBase(repository: string): Promise<{ revision: string; ref: string; note?: string }> {
 	let remoteBranch: string | undefined;
 	try {
 		remoteBranch = (await git(repository, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
@@ -79,16 +80,34 @@ async function defaultBase(repository: string): Promise<{ revision: string; ref:
 			// Try the next local or offline ref.
 		}
 	}
-	// On the only branch, or on the default branch itself, the changes to show are the uncommitted ones.
-	return { revision: (await git(repository, ["rev-parse", "HEAD"])).trim(), ref: "HEAD" };
+	const branches = (await git(repository, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]))
+		.trim()
+		.split("\n")
+		.filter(Boolean);
+	const other = branches.filter((branch) => branch !== ownBranch);
+	const onDefault = ownBranch === "main" || ownBranch === "master" || remoteBranch === `origin/${ownBranch}`;
+	const example = other.length === 1 ? `diff ${other[0]}` : "diff <base>";
+	const note =
+		other.length && !onDefault
+			? `no default branch found; this compares against HEAD, so committed changes aren't included. Pass a base, like ${example}, to compare a branch.`
+			: undefined;
+	return { revision: (await git(repository, ["rev-parse", "HEAD"])).trim(), ref: "HEAD", note };
 }
 
 /** Resolve the revision and enumerate all paths, including untracked and renamed files. */
 export async function readGitChanges(projectRoot: string, base?: string): Promise<GitChanges> {
 	const repository = await realpath((await git(projectRoot, ["rev-parse", "--show-toplevel"])).trim());
 	const root = await realpath(projectRoot);
-	const { revision, ref: baseRef } = base
-		? { revision: (await git(repository, ["rev-parse", "--verify", `${base}^{commit}`])).trim(), ref: undefined }
+	const {
+		revision,
+		ref: baseRef,
+		note: baseNote,
+	} = base
+		? {
+				revision: (await git(repository, ["rev-parse", "--verify", `${base}^{commit}`])).trim(),
+				ref: undefined,
+				note: undefined,
+			}
 		: await defaultBase(repository);
 	const project = relative(repository, root).replaceAll(sep, "/") || ".";
 	const projectPath = (file: string) => {
@@ -134,6 +153,7 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 		repository,
 		base: revision,
 		baseRef,
+		baseNote,
 		project,
 		files,
 		projectPath,

@@ -380,6 +380,31 @@ test("server limit never stops a server in recent use", async () => {
 	}
 }, 45_000);
 
+test("a quiet timestamp cannot evict a server during a query", async () => {
+	await stopAllServers();
+	process.env.SIGHTREAD_MAX_SERVERS = "1";
+	process.env.SIGHTREAD_QUIET_MS = "0";
+	process.env.SIGHTREAD_DAEMON_QUERY_DELAY_MS = "3000";
+	try {
+		const firstServer = await connect(project(first.root));
+		const state = serverPaths(project(first.root)).state;
+		const before = (JSON.parse(await Bun.file(state).text()) as { lastUsed: number }).lastUsed;
+		await Bun.sleep(50);
+		const query = firstServer.query(lookup("greet"), {});
+		await until(async () => {
+			const live = JSON.parse(await Bun.file(state).text()) as { lastUsed: number };
+			return live.lastUsed > before;
+		});
+		const secondServer = await connect(project(second.root));
+		expect((await listServers()).map(({ pid }) => pid).toSorted()).toEqual(
+			[firstServer.pid, secondServer.pid].toSorted(),
+		);
+		expect(await query).toContain("greet  exported function");
+	} finally {
+		await stopAllServers();
+	}
+}, 45_000);
+
 test("concurrent cold starts over the limit don't wait for each other", async () => {
 	await stopAllServers();
 	const module = new URL("../src/server/client.ts", import.meta.url).href;

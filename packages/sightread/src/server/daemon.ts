@@ -20,6 +20,7 @@ interface Message {
 	in?: string;
 	color?: boolean;
 	cwd?: string;
+	quietOnly?: boolean;
 }
 
 function duration(name: string, fallback: number): number {
@@ -100,14 +101,19 @@ export async function runDaemon(project: Project): Promise<void> {
 		let stop = false;
 		try {
 			const message = JSON.parse(raw) as Message;
+			if (message.type !== "ping" && message.type !== "stop") {
+				lastUsed = Date.now();
+				await writeState();
+			}
 			let value: unknown;
 			switch (message.type) {
 				case "ping":
-					value = { signature, pid: process.pid, project: project.root, lastUsed, startedAt };
+					value = { signature, pid: process.pid, project: project.root, lastUsed, startedAt, active: active - 1 };
 					break;
 				case "stop":
-					value = null;
-					stop = true;
+					value = message.quietOnly && active > 1 ? false : null;
+					stop = value !== false;
+					if (!stop) break;
 					if (process.env.SIGHTREAD_DAEMON_STOP_DELAY_MS)
 						await Bun.sleep(duration("SIGHTREAD_DAEMON_STOP_DELAY_MS", 0));
 					break;
