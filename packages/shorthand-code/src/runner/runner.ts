@@ -594,11 +594,39 @@ async function runProgram(
 	const outcomeFile = await fs.open(outcomePath, "w");
 	const graphProxy = await openGraphProxy(tempDir, options.cwd, repo, {
 		delayMs: options.testHooks?.graphColdStartDelayMs,
-		resolve: options.graph === false ? async () => undefined : undefined,
+		disabled: options.graph === false,
 	});
 	try {
+		const graphImportBlocker = options.graph === false ? path.join(tempDir, "block-sightread.ts") : undefined;
+		if (graphImportBlocker) {
+			// Bun resolves package imports before onResolve runs, so match the resolved package path.
+			await Bun.write(
+				graphImportBlocker,
+				`import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+// Block the sightread package itself, wherever it's installed, not every path that mentions its name.
+const inSightread = (file) => {
+	for (let directory = dirname(file); directory !== dirname(directory); directory = dirname(directory)) {
+		const manifest = join(directory, "package.json");
+		if (existsSync(manifest)) return JSON.parse(readFileSync(manifest, "utf8")).name === "sightread";
+	}
+	return false;
+};
+Bun.plugin({ name: "block-sightread", setup(build) {
+	build.onResolve({ filter: /sightread/ }, (args) => {
+		if (inSightread(args.path)) throw new Error("Cannot find package 'sightread'");
+	});
+} });\n`,
+			);
+		}
 		const [command, ...args] = overlay.wrap(
-			[process.execPath, "--preload", executionPrelude, executionProgramPath],
+			[
+				process.execPath,
+				...(graphImportBlocker ? ["--preload", graphImportBlocker] : []),
+				"--preload",
+				executionPrelude,
+				executionProgramPath,
+			],
 			executionCwd,
 		);
 		if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");

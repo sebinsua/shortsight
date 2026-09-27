@@ -115,6 +115,7 @@ test("aggregate results charge failed attempts to verified completions", () => {
 		completionRate: 0.5,
 		budgetSeconds: 60,
 		totalCost: 3,
+		failedToolCalls: 0,
 		costPerVerifiedCompletion: 3,
 		meanLatencySeconds: 3,
 		meanToolCalls: 0,
@@ -137,7 +138,7 @@ test("an attempt the model provider ended is counted apart, not as the tool fail
 	).toBeUndefined();
 	const results = aggregateRuns(
 		[
-			{ verified: false, providerError: ended.providerError, seconds: 20, usage: usage(1) },
+			{ verified: false, providerError: ended.providerError, seconds: 20, usage: usage(1), failedTools: { code: 1 } },
 			{ verified: true, seconds: 4, usage: usage(2) },
 		],
 		60,
@@ -147,7 +148,11 @@ test("an attempt the model provider ended is counted apart, not as the tool fail
 		providerErrors: 1,
 		verifiedCompletions: 1,
 		completionRate: 1,
-		totalCost: 2,
+		totalCost: 3,
+		costPerVerifiedCompletion: 3,
+		failedToolCalls: 1,
+		meanLatencySeconds: 4,
+		meanToolCalls: 0,
 	});
 });
 
@@ -271,4 +276,28 @@ test("a frozen extension imports its own workspace packages, not the source's la
 		await realpath(path.join(source, "node_modules/@scope/dep")),
 	);
 	expect((await import(path.join(frozen.path, "node_modules/lib/index.js"))).default).toBe("frozen");
+});
+
+test("a frozen extension remaps workspace bins and rejects nested links into live workspace code", async () => {
+	const root = await mkdtemp(path.join(tmpdir(), "pi-shorthand-freeze-links-"));
+	temporary.push(root);
+	const source = path.join(root, "source");
+	await mkdir(path.join(source, "packages/tool"), { recursive: true });
+	await mkdir(path.join(source, "node_modules/.bin"), { recursive: true });
+	await mkdir(path.join(source, "node_modules/dep/node_modules"), { recursive: true });
+	await Bun.write(path.join(source, ".gitignore"), "node_modules\n");
+	await Bun.write(path.join(source, "packages/tool/cli.js"), "console.log('frozen');\n");
+	await symlink("../tool/cli.js", path.join(source, "node_modules/.bin/tool"));
+	await symlink("../packages/tool", path.join(source, "node_modules/tool"));
+	await symlink(path.join(source, "packages/tool"), path.join(source, "node_modules/dep/node_modules/tool"));
+	await $`git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm base`.cwd(source);
+	await expect(freezeExtension(source, path.join(root, "rejected"), "candidate")).rejects.toThrow(
+		"Nested dependency link points into the source workspace",
+	);
+	await rm(path.join(source, "node_modules/dep/node_modules/tool"));
+	const frozen = await freezeExtension(source, path.join(root, "frozen"), "candidate");
+	await Bun.write(path.join(source, "packages/tool/cli.js"), "console.log('edited later');\n");
+	const command = Bun.spawn(["bun", path.join(frozen.path, "node_modules/.bin/tool")], { stdout: "pipe" });
+	expect(await new Response(command.stdout).text()).toBe("frozen\n");
+	expect(await command.exited).toBe(0);
 });

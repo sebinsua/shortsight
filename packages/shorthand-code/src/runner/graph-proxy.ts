@@ -143,6 +143,7 @@ export function resolveSightread(options: ResolveOptions = {}) {
 
 export const GRAPH_INSTALL_MESSAGE =
 	"graph needs the sightread package; install it alongside shorthand-code (npm i -g sightread)";
+const GRAPH_DISABLED_MESSAGE = "graph.query isn't available in this session.";
 
 async function sourceHashes(value: unknown, repo: string): Promise<Record<string, string>> {
 	const results = Array.isArray(value) ? value : [value];
@@ -176,7 +177,7 @@ export async function openGraphProxy(
 	directory: string,
 	cwd: string,
 	repo: string,
-	options: { delayMs?: number; resolve?: () => Promise<GraphLibrary | undefined> } = {},
+	options: { delayMs?: number; disabled?: boolean; resolve?: () => Promise<GraphLibrary | undefined> } = {},
 ): Promise<{ path: string; close(): Promise<void> }> {
 	const socketPath = join(directory, "graph.sock");
 	let graph: Awaited<ReturnType<GraphLibrary["openGraph"]>> | undefined;
@@ -232,6 +233,7 @@ export async function openGraphProxy(
 					try {
 						const request = JSON.parse(line) as Record<string, unknown> | Record<string, unknown>[];
 						const handle = await (opening ??= (async () => {
+							if (options.disabled) throw new Error(GRAPH_DISABLED_MESSAGE);
 							if (options.delayMs) await Bun.sleep(options.delayMs);
 							return (options.resolve ?? (() => resolveSightread({ strictVersion: true })))();
 						})().then(async (found) => {

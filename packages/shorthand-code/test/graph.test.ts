@@ -1,6 +1,6 @@
 /** Real runner and graph integration, including repository-relative scopes from a nested project. */
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -262,13 +262,33 @@ test("a five-second graph cold start is excluded from the default timeout", asyn
 	expect(outcome.output).toContain("2");
 }, 45_000);
 
-test("a graph the caller doesn't offer is unavailable to the program, and explains how to install it", async () => {
+test("a graph the caller doesn't offer reports that it is disabled", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(cwd, 'await graph.query({ type: "lookup", query: "Service" });', {}, {}, false);
 	expect(outcome.exitCode).toBe(1);
-	expect(outcome.output).toContain(
-		"graph needs the sightread package; install it alongside shorthand-code (npm i -g sightread)",
-	);
+	expect(outcome.output).toContain("graph.query isn't available in this session.");
+}, 45_000);
+
+test("a program cannot import sightread when graph is disabled", async () => {
+	const { cwd } = await fixture();
+	await mkdir(join(cwd, "node_modules"));
+	await symlink(join(repoRoot, "packages/sightread"), join(cwd, "node_modules/sightread"));
+	const program = 'const sightread = await import("sightread"); console.log(typeof sightread.openGraph);';
+	const enabled = await run(cwd, program);
+	expect(enabled.output).toContain("function");
+	expect(enabled.exitCode).toBe(0);
+	const disabled = await run(cwd, program, {}, {}, false);
+	expect(disabled.exitCode).toBe(1);
+	expect(disabled.output).toContain("Cannot find package");
+}, 45_000);
+
+test("a disabled graph still lets a program import the repository's own folders named sightread", async () => {
+	const { cwd } = await fixture();
+	await mkdir(join(cwd, "sightread"));
+	await writeFile(join(cwd, "sightread/value.ts"), "export const value = 42;\n");
+	const outcome = await run(cwd, 'console.log((await import("./sightread/value.ts")).value);', {}, {}, false);
+	expect(outcome.exitCode).toBe(0);
+	expect(outcome.output).toContain("42");
 }, 45_000);
 
 const importer = (specifier: string) =>

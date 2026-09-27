@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readdir, readFile, readlink, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, symlink } from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { Drift } from "./tasks/drift.ts";
@@ -44,6 +44,7 @@ export interface RunMeasurement {
 	seconds: number;
 	usage: UsageTotals;
 	tools?: Record<string, number>;
+	failedTools?: Record<string, number>;
 	drift?: Drift | null;
 }
 
@@ -198,7 +199,11 @@ const mean = (values: number[]) => (values.length ? values.reduce((sum, value) =
 export function aggregateRuns(all: RunMeasurement[], budgetSeconds: number) {
 	const runs = all.filter((run) => !run.providerError);
 	const completed = runs.filter((run) => run.verified);
-	const totalCost = runs.reduce((sum, run) => sum + run.usage.cost.total, 0);
+	const totalCost = all.reduce((sum, run) => sum + run.usage.cost.total, 0);
+	const failedToolCalls = all.reduce(
+		(sum, run) => sum + Object.values(run.failedTools ?? {}).reduce((count, failures) => count + failures, 0),
+		0,
+	);
 	const measured = runs.flatMap((run) => (run.drift ? [run.drift] : []));
 	return {
 		attempts: runs.length,
@@ -207,6 +212,7 @@ export function aggregateRuns(all: RunMeasurement[], budgetSeconds: number) {
 		completionRate: runs.length ? completed.length / runs.length : 0,
 		budgetSeconds,
 		totalCost,
+		failedToolCalls,
 		costPerVerifiedCompletion: completed.length ? totalCost / completed.length : null,
 		meanLatencySeconds: mean(runs.map((run) => run.seconds)),
 		meanToolCalls: mean(runs.map((run) => Object.values(run.tools ?? {}).reduce((sum, calls) => sum + calls, 0))),
@@ -225,21 +231,49 @@ export function aggregateRuns(all: RunMeasurement[], budgetSeconds: number) {
 
 // Share installed dependencies with the source, but point workspace packages at the frozen copy,
 // so a run imports the code it froze rather than whatever the source working tree holds later.
-async function linkDependencies(from: string, to: string, root: string): Promise<void> {
+async function checkNestedDependencies(directory: string, root: string, seen: Set<string>): Promise<void> {
+	const actual = await realpath(directory);
+	if (seen.has(actual)) return;
+	seen.add(actual);
+	const modules = path.join(directory, "node_modules");
+	if (!(await lstat(modules).catch(() => null))) return;
+	for (const name of await readdir(modules)) {
+		const entry = path.join(modules, name);
+		const info = await lstat(entry);
+		if (name.startsWith("@") && info.isDirectory()) {
+			for (const scoped of await readdir(entry)) {
+				await checkNestedDependencies(path.join(entry, scoped), root, seen);
+			}
+			continue;
+		}
+		if (info.isSymbolicLink()) {
+			const target = await realpath(entry);
+			const local = path.relative(root, target);
+			if (local !== ".." && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local)) {
+				throw new Error(`Nested dependency link points into the source workspace: ${entry} -> ${target}`);
+			}
+		}
+		if (info.isDirectory()) await checkNestedDependencies(entry, root, seen);
+	}
+}
+
+async function linkDependencies(from: string, to: string, root: string, frozenRoot: string): Promise<void> {
 	if (!(await lstat(from).catch(() => null))) return;
 	await mkdir(to, { recursive: true });
 	for (const name of (await readdir(from)).toSorted()) {
 		const entry = path.join(from, name);
 		const info = await lstat(entry);
-		if (name.startsWith("@") && info.isDirectory()) {
-			await linkDependencies(entry, path.join(to, name), root);
+		if ((name.startsWith("@") || name === ".bin") && info.isDirectory()) {
+			await linkDependencies(entry, path.join(to, name), root, frozenRoot);
 			continue;
 		}
-		const target = info.isSymbolicLink() ? path.resolve(from, await readlink(entry)) : undefined;
+		if (info.isDirectory() || (info.isSymbolicLink() && name !== ".bin")) {
+			await checkNestedDependencies(entry, root, new Set());
+		}
+		const target = info.isSymbolicLink() ? await realpath(entry) : undefined;
 		const local = target ? path.relative(root, target) : "..";
 		const workspace = !local.startsWith("..") && !path.isAbsolute(local) && !local.startsWith("node_modules");
-		// The copy mirrors the source's layout, so a link relative to the source resolves inside the copy.
-		await symlink(workspace ? path.relative(from, target!) : entry, path.join(to, name));
+		await symlink(workspace ? path.relative(to, path.join(frozenRoot, local)) : entry, path.join(to, name));
 	}
 }
 
@@ -252,7 +286,12 @@ export async function freezeExtension(source: string, destination: string, label
 	const files = listed.stdout.toString().split("\0").filter(Boolean).toSorted();
 	const fingerprint = await fingerprintFiles(source, files);
 	for (const file of files) await copyEntry(path.join(source, file), path.join(destination, file));
-	await linkDependencies(path.join(source, "node_modules"), path.join(destination, "node_modules"), source);
+	await linkDependencies(
+		path.join(source, "node_modules"),
+		path.join(destination, "node_modules"),
+		await realpath(source),
+		destination,
+	);
 	if ((await fingerprintFiles(destination, files)) !== fingerprint) {
 		throw new Error(`Frozen extension differs from its source: ${source}`);
 	}
