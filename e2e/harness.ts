@@ -242,31 +242,53 @@ async function checkNestedDependencies(directory: string, root: string, seen: Se
 		const info = await lstat(entry);
 		if (name.startsWith("@") && info.isDirectory()) {
 			for (const scoped of await readdir(entry)) {
-				await checkNestedDependencies(path.join(entry, scoped), root, seen);
+				await checkNestedDependency(path.join(entry, scoped), root, seen);
 			}
 			continue;
 		}
-		if (info.isSymbolicLink()) {
-			const target = await realpath(entry);
-			const local = path.relative(root, target);
-			if (local !== ".." && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local)) {
-				throw new Error(`Nested dependency link points into the source workspace: ${entry} -> ${target}`);
-			}
-		}
-		if (info.isDirectory()) await checkNestedDependencies(entry, root, seen);
+		await checkNestedDependency(entry, root, seen);
 	}
 }
 
-async function linkDependencies(from: string, to: string, root: string, frozenRoot: string): Promise<void> {
+async function checkNestedDependency(entry: string, root: string, seen: Set<string>): Promise<void> {
+	const info = await lstat(entry);
+	if (info.isSymbolicLink()) {
+		const target = await realpath(entry);
+		const local = path.relative(root, target);
+		if (local !== ".." && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local)) {
+			throw new Error(`Nested dependency link points into the source workspace: ${entry} -> ${target}`);
+		}
+	}
+	if (info.isDirectory()) await checkNestedDependencies(entry, root, seen);
+}
+
+async function isSightreadDependency(entry: string): Promise<boolean> {
+	let directory = await realpath(entry);
+	if (!(await lstat(directory)).isDirectory()) directory = path.dirname(directory);
+	for (; directory !== path.dirname(directory); directory = path.dirname(directory)) {
+		const manifest = await readFile(path.join(directory, "package.json"), "utf8").catch(() => null);
+		if (manifest) return (JSON.parse(manifest) as { name?: string }).name === "sightread";
+	}
+	return false;
+}
+
+async function linkDependencies(
+	from: string,
+	to: string,
+	root: string,
+	frozenRoot: string,
+	sightread: "on" | "off",
+): Promise<void> {
 	if (!(await lstat(from).catch(() => null))) return;
 	await mkdir(to, { recursive: true });
 	for (const name of (await readdir(from)).toSorted()) {
 		const entry = path.join(from, name);
 		const info = await lstat(entry);
 		if ((name.startsWith("@") || name === ".bin") && info.isDirectory()) {
-			await linkDependencies(entry, path.join(to, name), root, frozenRoot);
+			await linkDependencies(entry, path.join(to, name), root, frozenRoot, sightread);
 			continue;
 		}
+		if (sightread === "off" && (name === "sightread" || (await isSightreadDependency(entry)))) continue;
 		if (info.isDirectory() || (info.isSymbolicLink() && name !== ".bin")) {
 			await checkNestedDependencies(entry, root, new Set());
 		}
@@ -278,7 +300,12 @@ async function linkDependencies(from: string, to: string, root: string, frozenRo
 }
 
 /** Copies tracked, dirty and untracked source files once, so later source edits cannot mix revisions. */
-export async function freezeExtension(source: string, destination: string, label: string): Promise<FrozenExtension> {
+export async function freezeExtension(
+	source: string,
+	destination: string,
+	label: string,
+	sightread: "on" | "off" = "on",
+): Promise<FrozenExtension> {
 	source = path.resolve(source);
 	await mkdir(destination, { recursive: true });
 	const listed = await $`git ls-files -z --cached --others --exclude-standard`.cwd(source).nothrow().quiet();
@@ -291,6 +318,7 @@ export async function freezeExtension(source: string, destination: string, label
 		path.join(destination, "node_modules"),
 		await realpath(source),
 		destination,
+		sightread,
 	);
 	if ((await fingerprintFiles(destination, files)) !== fingerprint) {
 		throw new Error(`Frozen extension differs from its source: ${source}`);

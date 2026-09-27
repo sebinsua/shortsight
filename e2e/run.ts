@@ -116,6 +116,7 @@ type Condition = {
 	sightread: Sightread;
 	extension?: FrozenExtension;
 };
+type ExtensionCopies = { on: FrozenExtension; off?: FrozenExtension };
 const paired = Boolean(args["baseline-extension"] || args["candidate-extension"]);
 if (paired && (!args["baseline-extension"] || !args["candidate-extension"])) {
 	throw new Error("Paired mode requires both --baseline-extension and --candidate-extension");
@@ -145,16 +146,16 @@ try {
 					skill: "none",
 					sightread,
 				}))
-			: extensions.flatMap((extension) =>
+			: extensions.flatMap((copies) =>
 					selectedDocumentation.flatMap((docs) =>
 						selectedSightread.flatMap((sightread) =>
 							skills.map((skill) => ({
-								id: `${setup}-${extension.label}-${docs}-${skill}-sightread-${sightread}`,
+								id: `${setup}-${copies.on.label}-${docs}-${skill}-sightread-${sightread}`,
 								setup,
 								documentation: docs,
 								skill,
 								sightread,
-								extension,
+								extension: sightread === "on" ? copies.on : copies.off!,
 							})),
 						),
 					),
@@ -226,18 +227,22 @@ try {
 	await rm(workDir, { recursive: true, force: true });
 }
 
-async function prepareExtensions(workDirectory: string): Promise<FrozenExtension[]> {
+async function prepareExtensions(workDirectory: string): Promise<ExtensionCopies[]> {
 	if (selectedSetups.every((setup) => setup === "baseline")) return [];
 	const extensionDirectory = path.join(workDirectory, "extensions");
+	const freezeCopies = async (source: string, label: string): Promise<ExtensionCopies> => ({
+		on: await freezeExtension(source, path.join(extensionDirectory, label), label),
+		...(selectedSightread.includes("off")
+			? { off: await freezeExtension(source, path.join(extensionDirectory, `${label}-off`), label, "off") }
+			: {}),
+	});
 	if (paired) {
 		return Promise.all([
-			freezeExtension(args["baseline-extension"]!, path.join(extensionDirectory, "baseline"), "baseline"),
-			freezeExtension(args["candidate-extension"]!, path.join(extensionDirectory, "candidate"), "candidate"),
+			freezeCopies(args["baseline-extension"]!, "baseline"),
+			freezeCopies(args["candidate-extension"]!, "candidate"),
 		]);
 	}
-	return [
-		await freezeExtension(args.extension ?? extensionRoot, path.join(extensionDirectory, "candidate"), "candidate"),
-	];
+	return [await freezeCopies(args.extension ?? extensionRoot, "candidate")];
 }
 
 /** A local path retains its dirty/untracked state; a URL is cloned once and then treated as the recorded fixture. */
@@ -405,6 +410,7 @@ async function runPi(
 			runOrder,
 			budgetSeconds,
 			extension: extension ?? null,
+			extensionCopy: extension?.path ?? null,
 			startingFixture,
 			seed: seedRecord,
 			seconds: durationMs / 1000,

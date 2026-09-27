@@ -372,6 +372,11 @@ process.exit(process.env.FAKE_FAIL === "1" ? 1 : 0);
 				item.conditions.every((condition: { sightread: string }) => ["on", "off"].includes(condition.sightread)),
 			),
 	).toBe(true);
+	const extensionRuns = summaries.filter((item) => item.kind === "run" && item.setup === "code");
+	for (const item of extensionRuns) {
+		expect(path.basename(item.extension.path)).toBe(item.sightread === "off" ? "candidate-off" : "candidate");
+		expect(item.extensionCopy).toBe(item.extension.path);
+	}
 }, 20_000);
 
 test("runner compares conditions from identical fixtures and saves independent review artifacts without a model", async () => {
