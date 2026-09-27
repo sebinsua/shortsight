@@ -14,6 +14,8 @@ import {
 	isInterfaceDeclaration,
 	isMethodDeclaration,
 	isMethodSignatureDeclaration,
+	isModuleBlock,
+	isModuleDeclaration,
 	isNewExpression,
 	isPropertyAccessExpression,
 	isPropertyDeclaration,
@@ -30,7 +32,7 @@ import {
 import { fromHandle, type GraphEdge, type GraphNode, type GraphResult } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
 import { projectFiles, type Project } from "./project.ts";
-import { hasModifier, listedExports } from "./ranges.ts";
+import { graphKind, hasModifier, listedExports } from "./ranges.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
@@ -39,7 +41,7 @@ export interface ReferenceIndex {
 		start: string,
 		limits: { maxNodes: number; maxDepth?: number },
 		paths: PathMapper,
-	): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean }>;
+	): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean; skipped: number }>;
 	close(): Promise<void>;
 }
 
@@ -88,6 +90,7 @@ function declarationName(node: Node): string | undefined {
 		isGetAccessorDeclaration(parent) ||
 		isSetAccessorDeclaration(parent);
 	if (!named) return undefined;
+	let name = node.text;
 	if (
 		isMethodDeclaration(parent) ||
 		isMethodSignatureDeclaration(parent) ||
@@ -98,16 +101,27 @@ function declarationName(node: Node): string | undefined {
 	) {
 		const owner = parent.parent;
 		if (isClassDeclaration(owner) || isInterfaceDeclaration(owner))
-			return `${owner.name?.text ?? "default"}.${node.text}`;
+			name = `${owner.name?.text ?? "default"}.${node.text}`;
 	}
-	return node.text;
+	for (let ancestor = parent.parent; ancestor; ancestor = ancestor.parent)
+		if (isModuleDeclaration(ancestor)) name = `${ancestor.name.getText()}.${name}`;
+	return name;
 }
 
-function findDeclaration(source: SourceFile, name: string): Node | undefined {
+function findDeclaration(source: SourceFile, name: string, kind: string): Node | undefined {
 	let found: Node | undefined;
 	const visit = (node: Node): void => {
 		if (found) return;
-		if (declarationName(node) === name) {
+		if (
+			declarationName(node) === name ||
+			(isConstructorDeclaration(node) &&
+				isClassDeclaration(node.parent) &&
+				`${node.parent.name?.text ?? "default"}.__constructor` === name) ||
+			(name === "default" &&
+				!(node as { name?: Node }).name &&
+				hasModifier(node, SyntaxKind.DefaultKeyword) &&
+				((kind === "function" && isFunctionDeclaration(node)) || (kind === "class" && isClassDeclaration(node))))
+		) {
 			found = node;
 			return;
 		}
@@ -130,17 +144,23 @@ function enclosingCall(reference: Node): Node | undefined {
 // top-level function, class, variable or type. Imports, re-exports and module-level statements have none.
 function containerOf(reference: Node, source: SourceFile, file: string): Container | undefined {
 	let member: Node | undefined;
+	let namespaceMember: Node | undefined;
+	const namespaces: string[] = [];
 	let top: Node | undefined;
 	for (let node = reference.parent; node; node = node.parent) {
 		const owner = node.parent;
+		if (!namespaceMember && owner && isModuleBlock(owner)) namespaceMember = node;
+		if (isModuleDeclaration(node)) namespaces.unshift(node.name.getText(source));
 		if (
 			!member &&
 			owner &&
-			isClassDeclaration(owner) &&
+			(isClassDeclaration(owner) || isInterfaceDeclaration(owner)) &&
 			(isMethodDeclaration(node) ||
+				isMethodSignatureDeclaration(node) ||
 				isGetAccessorDeclaration(node) ||
 				isSetAccessorDeclaration(node) ||
 				isPropertyDeclaration(node) ||
+				isPropertySignatureDeclaration(node) ||
 				isConstructorDeclaration(node))
 		)
 			member = node;
@@ -164,13 +184,19 @@ function containerOf(reference: Node, source: SourceFile, file: string): Contain
 		...span(node),
 		...(exports ? exported(name) : {}),
 	});
-	if (isFunctionDeclaration(top) && top.name) return named(top.name.text, "function", top);
-	if (isClassDeclaration(top) && top.name) {
-		if (!member) return named(top.name.text, "class", top);
+	if (isFunctionDeclaration(top) && (top.name || hasModifier(top, SyntaxKind.DefaultKeyword)))
+		return named(top.name?.text ?? "default", "function", top);
+	if (isClassDeclaration(top) && (top.name || hasModifier(top, SyntaxKind.DefaultKeyword))) {
+		if (!member) return named(top.name?.text ?? "default", "class", top);
 		const name = isConstructorDeclaration(member)
 			? "__constructor"
 			: (member as unknown as { name: Node }).name.getText(source);
-		return named(`${top.name.text}.${name}`, isPropertyDeclaration(member) ? "property" : "method", member, false);
+		return named(
+			`${top.name?.text ?? "default"}.${name}`,
+			graphKind(isPropertyDeclaration(member) ? "property" : "method"),
+			member,
+			false,
+		);
 	}
 	if (isVariableStatement(top)) {
 		const declaration = top.declarationList.declarations.find(
@@ -178,7 +204,21 @@ function containerOf(reference: Node, source: SourceFile, file: string): Contain
 		);
 		return declaration && isIdentifier(declaration.name) ? named(declaration.name.text, "variable", top) : undefined;
 	}
-	if (isInterfaceDeclaration(top)) return named(top.name.text, "interface", top);
+	if (isInterfaceDeclaration(top)) {
+		if (!member) return named(top.name.text, "interface", top);
+		const name = (member as unknown as { name: Node }).name.getText(source);
+		return named(
+			`${top.name.text}.${name}`,
+			graphKind(isPropertySignatureDeclaration(member) ? "property" : "method"),
+			member,
+			false,
+		);
+	}
+	if (isModuleDeclaration(top) && namespaceMember) {
+		const name = namespaces.join(".");
+		if (isFunctionDeclaration(namespaceMember) && namespaceMember.name)
+			return named(`${name}.${namespaceMember.name.text}`, "function", namespaceMember, false);
+	}
 	if (isTypeAliasDeclaration(top)) return named(top.name.text, "type", top);
 	if (isEnumDeclaration(top)) return named(top.name.text, "enum", top);
 	return undefined;
@@ -232,19 +272,20 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 	};
 
 	// Every reference TypeScript resolves to the symbol `handle` names, with where it sits and the call it makes.
-	const collect = async (handle: string, includeDeclaration: boolean, paths: PathMapper) => {
+	const collect = async (handle: string, includeDeclaration: boolean, paths: PathMapper, current?: Snapshot) => {
 		const ref = fromHandle(handle);
 		if (!ref) throw new Error(`${handle} not found`);
-		const current = await refresh();
+		const active = current ?? (await refresh());
 		const file = resolve(project.root, ref.file);
 		const local = relative(project.root, file);
 		if (local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) throw new Error(`${handle} not found`);
-		const home = await current.getDefaultProjectForFile(file);
+		const home = await active.getDefaultProjectForFile(file);
 		const source = await home?.program.getSourceFile(file);
-		const declaration = source && findDeclaration(source, ref.name);
+		const declaration = source && findDeclaration(source, ref.name, ref.kind);
 		if (!home || !source || !declaration) throw new Error(`${handle} not found`);
 		const start = declaration.getStart(source);
-		const entries = await home.checker.getReferencedSymbolsForNode(getTouchingPropertyName(source, start), start);
+		const subject = isConstructorDeclaration(declaration) ? declaration : getTouchingPropertyName(source, start);
+		const entries = await home.checker.getReferencedSymbolsForNode(subject, start);
 		const found: Found[] = [];
 		const seen = new Set<string>();
 		const lines = new Map<string, string[]>();
@@ -257,11 +298,8 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 			if (!reference) continue;
 			const origin = reference.getSourceFile();
 			const offset = reference.getStart(origin);
-			if (
-				declarationName(reference) &&
-				(!includeDeclaration || origin.fileName !== source.fileName || offset !== start)
-			)
-				continue;
+			const declaredName = declarationName(reference);
+			if (declaredName && (!includeDeclaration || declaredName !== ref.name)) continue;
 			const path = relative(project.root, origin.fileName);
 			if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) continue;
 			const key = `${origin.fileName}:${offset}:${reference.end}`;
@@ -338,16 +376,25 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 			}),
 		walk: (start, limits, paths) =>
 			serially(async () => {
+				const current = await refresh();
 				const nodes = new Map<string, GraphNode>();
 				const edges = new Map<string, GraphEdge>();
 				const depth = new Map([[start, 0]]);
 				const queue = [start];
 				let truncated = false;
+				let skipped = 0;
 				while (queue.length) {
 					const target = queue.shift()!;
 					const level = depth.get(target)!;
 					if (limits.maxDepth !== undefined && level >= limits.maxDepth) continue;
-					const { found } = await collect(target, false, paths);
+					let found: Found[];
+					try {
+						({ found } = await collect(target, false, paths, current));
+					} catch (error) {
+						if (!(error instanceof Error) || error.message !== `${target} not found`) throw error;
+						skipped++;
+						continue;
+					}
 					for (const item of found) {
 						const container = item.container;
 						if (!container || container.handle === target) continue;
@@ -380,8 +427,9 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 				}
 				return {
 					nodes: [...nodes.values()],
-					edges: [...edges.values()].filter((edge) => nodes.has(edge.from)),
+					edges: [...edges.values()].filter((edge) => nodes.has(edge.from) || edge.from === start),
 					truncated,
+					skipped,
 				};
 			}),
 		close: () =>

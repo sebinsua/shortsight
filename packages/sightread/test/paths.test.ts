@@ -151,6 +151,14 @@ test("upstream project-relative paths ignore colliding repository files", () => 
 	expect(paths.toProjectPath("src/a.ts")).toBe("src/a.ts");
 });
 
+test("handle conversion keeps hashes in nested project file names", () => {
+	writeFileSync(join(project, "src/a#b.ts"), "export function foo() {}\n");
+	const paths = createPaths(project);
+	expect(paths.toRepositoryHandle("src/a#b.ts#foo:function")).toBe("client/src/a#b.ts#foo:function");
+	expect(paths.toProjectHandle("client/src/a#b.ts#foo:function")).toBe("src/a#b.ts#foo:function");
+	expect(paths.inputToProjectHandle("client/src/a#b.ts#foo:function")).toBe("src/a#b.ts#foo:function");
+});
+
 test("near misses suggest names and unrelated misses stay quiet", async () => {
 	const graph = await openGraph({ cwd: project });
 	try {

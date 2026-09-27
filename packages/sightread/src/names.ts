@@ -72,11 +72,21 @@ export async function resolveNamesSettled(
 			names.flatMap((given) => {
 				const name = qualified(given)?.[1] ?? given;
 				const last = name.split(".").at(-1)!;
-				return [name, last, last.slice(0, 3)];
+				return [...(qualified(given) ? [given] : []), name, last, last.slice(0, 3)];
 			}),
 		),
 	];
-	const lookups = await client.batch(queries.map((query) => ({ type: "lookup", query, limit: 10 })));
+	const qualifiedQueries = new Set(
+		names.flatMap((given) => {
+			const name = qualified(given)?.[1];
+			if (!name) return [];
+			const last = name.split(".").at(-1)!;
+			return [given, name, last, last.slice(0, 3)];
+		}),
+	);
+	const lookups = await client.batch(
+		queries.map((query) => ({ type: "lookup", query, limit: qualifiedQueries.has(query) ? 200 : 10 })),
+	);
 	const hitsFor = (query: string): string[] => {
 		const result = object(object(lookups[queries.indexOf(query)].value)?.result);
 		const hits = Array.isArray(result?.hits) ? result.hits : [];
@@ -93,7 +103,7 @@ export async function resolveNamesSettled(
 			file === undefined ||
 			fromHandle(paths?.toRepositoryHandle(handle) ?? handle)?.file === file ||
 			fromHandle(handle)?.file === file;
-		const handles = hitsFor(name).filter(inFile);
+		const handles = hitsFor(file === undefined ? name : given).filter(inFile);
 		const exact = handles.filter((handle) => {
 			const parsed = fromHandle(handle);
 			return parsed?.name === name || parsed?.name.split(".").at(-1) === name;
@@ -110,7 +120,13 @@ export async function resolveNamesSettled(
 			);
 		else if (!exact.length) {
 			const last = name.split(".").at(-1)!;
-			const candidates = handles.length ? handles : hitsFor(last).length ? hitsFor(last) : hitsFor(last.slice(0, 3));
+			const candidates =
+				[
+					handles,
+					hitsFor(name).filter(inFile),
+					hitsFor(last).filter(inFile),
+					hitsFor(last.slice(0, 3)).filter(inFile),
+				].find((items) => items.length) ?? (hitsFor(last).length ? hitsFor(last) : hitsFor(last.slice(0, 3)));
 			const nearest = candidates.filter((id) => closeName(name, fromHandle(id)!.name));
 			resolved.set(
 				given,

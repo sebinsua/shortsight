@@ -184,6 +184,26 @@ test("unknown names in an empty project have no empty nearest suffix", async () 
 	}
 });
 
+test("file-qualified names resolve past ten matches and suggest from their own file", async () => {
+	const files: Record<string, string> = {};
+	for (let index = 0; index < 15; index++)
+		files[`src/${index.toString().padStart(2, "0")}.ts`] = "export class C { get() {} }\n";
+	files["src/14.ts"] = "export class C { get() {} getter() {} }\n";
+	const wide = createFixtureProject(files);
+	const graph = await startGraphClient({ root: wide.root, tsconfig: join(wide.root, "tsconfig.json") });
+	try {
+		expect((await resolveNames(graph, [{ type: "trace", from: "src/14.ts#C.get" }]))[0].from).toBe(
+			"src/14.ts#C.get:method",
+		);
+		await expect(resolveNames(graph, [{ type: "trace", from: "src/14.ts#C.gett" }])).rejects.toThrow(
+			"nearest: src/14.ts#C.get:method",
+		);
+	} finally {
+		await graph.close();
+		wide.cleanup();
+	}
+});
+
 test("repository lookup has exact full text", async () => {
 	const repo = join(import.meta.dir, "../../..");
 	const project = { root: repo, tsconfig: join(repo, "tsconfig.json") };

@@ -89,12 +89,21 @@ async function completeTrace(
 	paths: ReturnType<typeof createPaths> | undefined,
 ): Promise<void> {
 	if (model.error || model.type !== "trace" || model.raise !== "trace.maxNodes") return;
-	const asked = typeof request.maxNodes === "number" ? request.maxNodes : 0;
-	if (request.direction === "reverse" && request.to === undefined && context.references && paths) {
+	const asked = typeof request.maxNodes === "number" ? request.maxNodes : undefined;
+	if (request.direction === "reverse" && request.to === undefined && asked !== undefined && asked <= GRAPH_TRACE_LIMIT)
+		return;
+	if (
+		request.direction === "reverse" &&
+		request.to === undefined &&
+		context.references &&
+		paths &&
+		(asked === undefined || asked > GRAPH_TRACE_LIMIT)
+	) {
 		const start = String(model.sections.start);
+		const limit = asked ?? WALK_LIMIT;
 		const walked = await context.references.walk(
 			start,
-			{ maxNodes: WALK_LIMIT, ...(typeof request.maxDepth === "number" ? { maxDepth: request.maxDepth } : {}) },
+			{ maxNodes: limit, ...(typeof request.maxDepth === "number" ? { maxDepth: request.maxDepth } : {}) },
 			paths,
 		);
 		model.nodes = [...model.nodes.filter((node) => node.handle === start), ...walked.nodes];
@@ -107,10 +116,12 @@ async function completeTrace(
 		};
 		model.shown = walked.nodes.length;
 		delete model.raise;
-		model.note = walked.truncated
-			? `stopped at ${WALK_LIMIT} symbols; trace from a narrower symbol`
-			: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through compiler references`;
-	} else if (asked >= GRAPH_TRACE_LIMIT || model.shown >= GRAPH_TRACE_LIMIT) {
+		model.note = `${
+			walked.truncated
+				? `stopped at ${limit} symbols; trace from a narrower symbol`
+				: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through compiler references`
+		}${walked.skipped ? `; ${walked.skipped} ${walked.skipped === 1 ? "symbol" : "symbols"} skipped` : ""}`;
+	} else if ((asked !== undefined && asked >= GRAPH_TRACE_LIMIT) || model.shown >= GRAPH_TRACE_LIMIT) {
 		delete model.raise;
 		model.note = `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`;
 	}

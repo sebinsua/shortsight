@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import { runQuery } from "../src/query.ts";
 import type { RangeIndex } from "../src/ranges.ts";
+import type { ReferenceIndex } from "../src/references.ts";
 import type { GraphClient, QueryResult } from "../src/upstream.ts";
 
 const values = [{ result: { type: "lookup", hits: [] }, audit: "keep" }, [{ type: "text", text: "second" }]];
@@ -49,4 +50,50 @@ test("JSON prints models and raw preserves upstream values", async () => {
 test("unchanged input is byte deterministic", async () => {
 	const first = await runQuery({ client, ranges }, requests, { mode: "text" });
 	expect(await runQuery({ client, ranges }, requests, { mode: "text" })).toBe(first);
+});
+
+test("reverse trace honors explicit maxNodes and reports skipped symbols", async () => {
+	const calls: number[] = [];
+	const traceClient: GraphClient = {
+		...client,
+		query: async () => ({
+			value: { result: { type: "trace", start: { id: "src/a.ts#target:function" }, reached: [], truncated: true } },
+			isError: false,
+		}),
+	};
+	const references: ReferenceIndex = {
+		query: async () => {
+			throw new Error("unexpected references query");
+		},
+		walk: async (_start, limits) => {
+			calls.push(limits.maxNodes);
+			return { nodes: [], edges: [], truncated: false, skipped: 2 };
+		},
+		close: async () => {},
+	};
+	const context = { client: traceClient, ranges, references, root: "/tmp" };
+	const ask = async (maxNodes?: number) =>
+		(
+			JSON.parse(
+				await runQuery(
+					context,
+					[
+						{
+							type: "trace",
+							from: "src/a.ts#target:function",
+							direction: "reverse",
+							...(maxNodes === undefined ? {} : { maxNodes }),
+						},
+					],
+					{ mode: "json" },
+				),
+			) as Array<{ note?: string; raise?: string }>
+		)[0];
+	expect((await ask(8)).raise).toBe("trace.maxNodes");
+	expect((await ask(32)).raise).toBe("trace.maxNodes");
+	expect(calls).toEqual([]);
+	expect((await ask(45)).note).toContain("2 symbols skipped");
+	expect(calls).toEqual([45]);
+	await ask();
+	expect(calls).toEqual([45, 1000]);
 });

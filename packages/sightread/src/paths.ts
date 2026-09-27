@@ -10,7 +10,7 @@ const inside = (root: string, path: string) => {
 	return local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
 };
 const convertHandle = (value: string, convert: (path: string) => string) => {
-	const separator = value.indexOf("#");
+	const separator = value.lastIndexOf("#");
 	return separator < 0 ? value : `${convert(value.slice(0, separator))}${value.slice(separator)}`;
 };
 

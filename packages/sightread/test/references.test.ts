@@ -1,9 +1,13 @@
 // Exercise compiler-resolved references through the CLI and a real graph server.
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { GraphResult } from "../src/model.ts";
+import { createPaths } from "../src/paths.ts";
+import { createReferenceIndex } from "../src/references.ts";
 import { renderText } from "../src/render.ts";
+import { createFixtureProject } from "./fixture.ts";
 
 const repository = mkdtempSync(join(realpathSync("/tmp"), "sr-ref-"));
 const root = join(repository, "client");
@@ -44,6 +48,29 @@ const files: Record<string, string> = {
 		"    {items.map((item) => <article key={item.id}><h2>{item.id}</h2><p>{String(item.value)}</p></article>)}",
 		"  </section></main>;",
 		"}",
+	].join("\n"),
+	"src/containers.ts": [
+		"export function target() { return 1; }",
+		"export class Base {}",
+		"export class Holder {",
+		"  field = target;",
+		"  constructor() { target(); }",
+		"}",
+		"export interface Face {",
+		"  prop: typeof target;",
+		"  method(): typeof target;",
+		"}",
+		"export namespace N { export function inner() { target(); } }",
+	].join("\n"),
+	"src/default-function.ts": 'import { target } from "./containers.ts";\nexport default function() { target(); }',
+	"src/default-class.ts":
+		'import { Base, target } from "./containers.ts";\nexport default class extends Base { method() { target(); } }',
+	"src/overloads.ts": [
+		"export function overloaded(value: string): string;",
+		"export function overloaded(value: number): number;",
+		"export function overloaded(value: string | number) { return value; }",
+		"export interface Merged { first: string; }",
+		"export interface Merged { second: number; }",
 	].join("\n"),
 };
 mkdirSync(root);
@@ -368,4 +395,136 @@ test("a forward trace at the graph's limit says so instead of advising a raise",
 	) as Array<{ raise?: string; note?: string }>;
 	expect(result.raise).toBeUndefined();
 	expect(result.note).toBe("truncated at the graph's 32-symbol limit; trace again from the symbols at its edge");
+});
+
+test("constructor callers do not abort a complete reverse walk", async () => {
+	const index = createReferenceIndex({ root, tsconfig: join(root, "tsconfig.json") });
+	try {
+		const result = await index.walk("src/containers.ts#target:function", { maxNodes: 20 }, createPaths(root));
+		expect(result.nodes.map((node) => node.handle)).toContain("src/containers.ts#Holder.__constructor:method");
+		expect(result.skipped).toBe(0);
+	} finally {
+		await index.close();
+	}
+});
+
+test("reference containers use the graph's class and interface member handles", () => {
+	const [references] = JSON.parse(
+		run("--json", JSON.stringify({ type: "references", symbol: "src/containers.ts#target:function" })).out,
+	) as Array<{ nodes: Array<{ line: number; in?: { handle: string } }> }>;
+	for (const [line, name] of [
+		[4, "Holder.field"],
+		[8, "Face.prop"],
+		[9, "Face.method"],
+	] as const) {
+		const [lookup] = JSON.parse(
+			run("--json", JSON.stringify({ type: "lookup", query: name, limit: 20 })).out,
+		) as Array<{
+			nodes: Array<{ handle: string; name: string }>;
+		}>;
+		const handle = lookup.nodes.find((node) => node.name === name)?.handle;
+		expect(handle).toBeDefined();
+		expect(references.nodes.find((node) => node.line === line)?.in?.handle).toBe(handle);
+	}
+});
+
+test("anonymous default declarations are containers with graph handles", () => {
+	const [functionReferences] = JSON.parse(
+		run("--json", JSON.stringify({ type: "references", symbol: "src/containers.ts#target:function" })).out,
+	) as Array<{ nodes: Array<{ file: string; in?: { handle: string } }> }>;
+	const [classReferences] = JSON.parse(
+		run("--json", JSON.stringify({ type: "references", symbol: "src/containers.ts#Base:class" })).out,
+	) as Array<{ nodes: Array<{ file: string; in?: { handle: string } }> }>;
+	for (const [file, kind] of [
+		["src/default-function.ts", "function"],
+		["src/default-class.ts", "class"],
+	] as const) {
+		const [lookup] = JSON.parse(
+			run("--json", JSON.stringify({ type: "lookup", query: "default", limit: 20 })).out,
+		) as Array<{
+			nodes: Array<{ handle: string }>;
+		}>;
+		const handle = `${file}#default:${kind}`;
+		expect(lookup.nodes.map((node) => node.handle)).toContain(handle);
+		const references = kind === "class" ? classReferences : functionReferences;
+		expect(references.nodes.find((node) => node.file === file && node.in)?.in?.handle).toBe(handle);
+	}
+});
+
+test("namespace function containers use the graph's qualified handle", () => {
+	const [lookup] = JSON.parse(run("--json", JSON.stringify({ type: "lookup", query: "N.inner" })).out) as Array<{
+		nodes: Array<{ handle: string; name: string }>;
+	}>;
+	const handle = lookup.nodes.find((node) => node.name === "N.inner")?.handle;
+	expect(handle).toBe("src/containers.ts#N.inner:function");
+	const [references] = JSON.parse(
+		run("--json", JSON.stringify({ type: "references", symbol: "src/containers.ts#target:function" })).out,
+	) as Array<{ nodes: Array<{ line: number; in?: { handle: string } }> }>;
+	expect(references.nodes.find((node) => node.line === 11)?.in?.handle).toBe(handle);
+});
+
+test("an unresolvable caller is skipped without stopping the walk", async () => {
+	const fixture = createFixtureProject({
+		"target.ts": "export function target() {}\nexport class C { ['odd']() { target(); } }\n",
+	});
+	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
+	try {
+		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
+		expect(result.skipped).toBe(1);
+		expect(result.nodes.map((node) => node.handle)).toContain("target.ts#C.['odd']:method");
+	} finally {
+		await index.close();
+		fixture.cleanup();
+	}
+});
+
+test("includeDeclaration includes every overload of the same symbol", () => {
+	const [result] = JSON.parse(
+		run(
+			"--json",
+			JSON.stringify({ type: "references", symbol: "src/overloads.ts#overloaded:function", includeDeclaration: true }),
+		).out,
+	) as Array<{ nodes: Array<{ file: string; line: number }> }>;
+	expect(result.nodes.filter((node) => node.file === "src/overloads.ts").map((node) => node.line)).toEqual([1, 2, 3]);
+	const [merged] = JSON.parse(
+		run(
+			"--json",
+			JSON.stringify({ type: "references", symbol: "src/overloads.ts#Merged:interface", includeDeclaration: true }),
+		).out,
+	) as Array<{ nodes: Array<{ file: string; line: number }> }>;
+	expect(merged.nodes.filter((node) => node.file === "src/overloads.ts").map((node) => node.line)).toEqual([4, 5]);
+});
+
+test("cycles retain the edge from the start symbol", async () => {
+	const fixture = createFixtureProject({
+		"target.ts": "export function target() { a(); }\nexport function a() { target(); }\n",
+	});
+	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
+	try {
+		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
+		expect(result.edges.map(({ from, to }) => [from, to])).toEqual([
+			["target.ts#a:function", "target.ts#target:function"],
+			["target.ts#target:function", "target.ts#a:function"],
+		]);
+	} finally {
+		await index.close();
+		fixture.cleanup();
+	}
+});
+
+test("a reverse walk checks project file stamps only once", async () => {
+	const fixture = createFixtureProject({
+		"target.ts": "export function target() {}\nexport function a() { target(); }\nexport function b() { a(); }\n",
+	});
+	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
+	const stat = spyOn(fsPromises, "stat");
+	try {
+		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
+		expect(result.nodes.map((node) => node.name)).toEqual(["a", "b"]);
+		expect(stat.mock.calls.filter(([path]) => path === join(fixture.root, "target.ts"))).toHaveLength(1);
+	} finally {
+		stat.mockRestore();
+		await index.close();
+		fixture.cleanup();
+	}
 });
