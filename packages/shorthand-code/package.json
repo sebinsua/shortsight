@@ -19,7 +19,7 @@
 		"directory": "packages/shorthand-code"
 	},
 	"bin": {
-		"shorthand": "./src/cli/shorthand.ts"
+		"shorthand": "src/cli/shorthand.ts"
 	},
 	"files": [
 		"src",

@@ -17,7 +17,7 @@
 		"directory": "packages/sightread"
 	},
 	"bin": {
-		"sightread": "./src/cli.ts"
+		"sightread": "src/cli.ts"
 	},
 	"files": [
 		"src",
