@@ -1,6 +1,6 @@
 // Run one working-tree diff with one parser and the existing graph daemon.
 import { projectFiles, type Project } from "../project.ts";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { createPaths } from "../paths.ts";
 import { createDeclarationParser } from "../ranges.ts";
 import { matchChanges } from "./changes.ts";
@@ -20,8 +20,15 @@ export async function runDiff(
 	try {
 		const matched = await matchChanges(git, project.root, parser);
 		const files = await projectFiles(project);
-		const outside = matched.changed.filter(({ node }) => !files.has(resolve(project.root, node.file)));
-		matched.changed = matched.changed.filter(({ node }) => files.has(resolve(project.root, node.file)));
+		const inProject = ({ node, file }: (typeof matched.changed)[number]) =>
+			files.has(resolve(project.root, node.file)) ||
+			// A deleted file isn't on disk to check against the config, so count it if it was inside the project.
+			(file.status === "deleted" &&
+				!node.file.startsWith("../") &&
+				!isAbsolute(node.file) &&
+				!node.file.split("/").includes("node_modules"));
+		const outside = matched.changed.filter((change) => !inProject(change));
+		matched.changed = matched.changed.filter(inProject);
 		if (outside.length)
 			matched.notes.push(
 				`${outside.length} changed declarations outside the graphed project (${project.tsconfig.slice(project.root.length + 1).replaceAll("\\", "/")})`,

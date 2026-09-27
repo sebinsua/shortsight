@@ -119,7 +119,7 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 			? { outside: true }
 			: { path: local, outside: false };
 	};
-	const names = (await git(repository, ["diff", "--name-status", "-z", "-M", "-w", revision, "--"])).split("\0");
+	const names = (await git(repository, ["diff", "--name-status", "-z", "-M", revision, "--"])).split("\0");
 	const files: GitFile[] = [];
 	for (let index = 0; index < names.length && names[index];) {
 		const status = names[index++];
@@ -134,7 +134,7 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 	)) {
 		if (file && !tracked.has(file)) files.push({ path: path(file), status: "untracked", hunks: [] });
 	}
-	const patch = await git(repository, ["diff", "-U0", "-M", "-w", revision, "--", ...types]);
+	const patch = await git(repository, ["diff", "-U0", "-M", revision, "--", ...types]);
 	let current: GitFile | undefined;
 	for (const line of patch.split("\n")) {
 		if (line.startsWith("+++ b/") || line.startsWith('+++ "b/'))

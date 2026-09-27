@@ -134,6 +134,24 @@ test("references are exact identifiers across aliased imports and TSX", async ()
 	);
 }, 45_000);
 
+test("bracket-access references rewrite the string contents alongside dot access", async () => {
+	const { cwd } = await fixture();
+	await Bun.write(
+		join(cwd, "src/bracket.ts"),
+		'import { Row } from "./row";\nexport function use(row: Row) { return row.get(1) + row["get"](2); }\n',
+	);
+	const outcome = await run(
+		cwd,
+		'const refs = (await refactor.references({ file: "client/src/row.ts", symbol: "Row.get" })).filter(m => m.file === "client/src/bracket.ts"); console.log(JSON.stringify(refs.map(m => m.text))); console.log("rewritten", sg.rewrite(refs, () => "renamed"));',
+	);
+	expect(outcome.exitCode).toBe(0);
+	expect(outcome.output).toContain('["get","get"]');
+	expect(outcome.output).toContain("rewritten 2");
+	expect(outcome.changes.find((change) => change.path === "src/bracket.ts")?.patch).toContain(
+		'row.renamed(1) + row["renamed"](2)',
+	);
+}, 45_000);
+
 test("an imported alias contributes its binding and every resolved use", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(

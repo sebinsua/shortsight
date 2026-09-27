@@ -56,6 +56,10 @@ export interface GraphNode {
 	ranges: { start: number; end: number }[] | null;
 	site?: { start: number; end: number };
 	exact?: true;
+	line?: number;
+	col?: number;
+	endLine?: number;
+	endCol?: number;
 }
 
 export interface GraphEdge {
@@ -442,7 +446,7 @@ function scopeRanges(helper: string, files: FileScope): Map<string, ScopeRange[]
 	for (const item of Array.isArray(files) ? files : [files]) {
 		const file = scopedPath(item, helper);
 		const key = resolve(file);
-		if (isGraphNode(item) && !item.site && !item.ranges?.length)
+		if (isGraphNode(item) && !isGraphSite(item) && !item.site && !item.ranges?.length)
 			throw new Error(
 				`graph node ${item.handle} has no line ranges, so it can't limit sg to that symbol; pass node.file to search the whole file`,
 			);
@@ -916,6 +920,7 @@ function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 						"property_identifier",
 						"shorthand_property_identifier",
 						"shorthand_property_identifier_pattern",
+						"string_fragment",
 					].map((kind) => ({ kind })),
 				},
 			})

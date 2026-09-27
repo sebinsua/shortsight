@@ -173,6 +173,31 @@ test("deleted function finds a live caller by name", async () => {
 	);
 }, 30_000);
 
+test("a deleted source file keeps its declaration and live caller", async () => {
+	const f = fixture({
+		"client/src/api.ts": "export function removed() { return 1; }\n",
+		"client/src/use.ts": "import { removed } from './api';\nexport function use() { return removed(); }\n",
+	});
+	rmSync(join(f.repo, "client/src/api.ts"));
+	const value = JSON.parse(await f.run(true));
+	expect(value.changed.map((node: { name: string; status: string }) => [node.name, node.status])).toEqual([
+		["removed", "deleted"],
+	]);
+	expect(value.callers.map((node: { name: string }) => node.name)).toEqual(["use"]);
+	expect(value.notes).not.toContain("1 changed declarations outside the graphed project (tsconfig.json)");
+}, 30_000);
+
+test("whitespace removed inside a string literal is an edit", async () => {
+	const f = fixture({ "client/src/api.ts": 'export function greeting() { return "hello world"; }\n' });
+	f.put("client/src/api.ts", 'export function greeting() { return "helloworld"; }\n');
+	const changes = await readGitChanges(f.root, "HEAD");
+	expect(changes.files.map(({ path, status }) => [path, status])).toEqual([["client/src/api.ts", "edited"]]);
+	const value = JSON.parse(await f.run(true));
+	expect(value.changed.map((node: { name: string; status: string }) => [node.name, node.status])).toEqual([
+		["greeting", "edited"],
+	]);
+}, 30_000);
+
 test("a pure deletion inside a method selects the method", async () => {
 	const f = fixture({
 		"client/src/box.ts": "export class Box {\n\tvalue() {\n\t\tconst a = 1;\n\t\tconst b = 2;\n\t\treturn a;\n\t}\n}\n",

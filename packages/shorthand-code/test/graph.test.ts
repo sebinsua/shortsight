@@ -239,6 +239,21 @@ console.log("line only", sg.find("service.run($N)", { file: site.file, line: 1 }
 	expect(outcome.output).toContain("line only 2");
 }, 45_000);
 
+test("reference result nodes scope sg.find to their source coordinates", async () => {
+	const { cwd } = await fixture();
+	const outcome = await run(
+		cwd,
+		`
+const refs = await graph.query({ type: "references", symbol: "Service.run" });
+console.log("nodes", refs.nodes.length, refs.nodes.every(n => n.ranges === null && n.line > 0));
+console.log("matches", JSON.stringify(sg.find({ rule: { kind: "property_identifier", regex: "^run$" } }, refs.nodes).map(m => [m.file.endsWith("/client/src/callers.ts"), m.line])));
+`,
+	);
+	expect(outcome.exitCode).toBe(0);
+	expect(outcome.output).toContain("nodes 2 true");
+	expect(outcome.output).toContain("[[true,3],[true,4]]");
+}, 45_000);
+
 test("a program without graph leaves no sightread state", async () => {
 	const { cwd } = await fixture();
 	const emptyRuntime = await mkdtemp("/tmp/sr-no-");
