@@ -5,6 +5,7 @@ import { rename, writeFile, unlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join, relative, sep } from "node:path";
 import { nestedProjects, projectFiles, type Project } from "../project.ts";
+import { createPaths } from "../paths.ts";
 import { runQuery } from "../query.ts";
 import { createRangeIndex } from "../ranges.ts";
 import { createReferenceIndex } from "../references.ts";
@@ -36,7 +37,8 @@ export async function runDaemon(project: Project): Promise<void> {
 	const paths = serverPaths(project);
 	const signature = await projectSignature(project);
 	const client = await startGraphClient(project, { stderr: 2, cacheDirectory: join(paths.directory, "ttsc-cache") });
-	const ranges = createRangeIndex(project.root);
+	// The graph covers sibling packages in the same repository, so their ranges are read too.
+	const ranges = createRangeIndex(project.root, { within: createPaths(project.root).repository });
 	const fileCount = projectFiles(project).then((files) => files.size);
 	const references = createReferenceIndex(project);
 	const nested = nestedProjects(project);

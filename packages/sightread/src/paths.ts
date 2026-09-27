@@ -45,9 +45,10 @@ export function createPaths(projectRoot: string, knownRepository?: string): Path
 	}
 	roots.set(project, repository);
 	const prefix = slash(relative(repository, project));
+	// Resolved rather than prefixed, so a sibling package's `../element/x.ts` becomes `packages/element/x.ts`.
 	const toRepositoryPath = (path: string) => {
 		if (isAbsolute(path)) return inside(project, path) ? slash(relative(repository, path)) : path;
-		return prefix ? `${prefix}/${path}` : path;
+		return prefix ? slash(relative(repository, resolve(project, path))) : path;
 	};
 	const toProjectPath = (path: string) => {
 		if (isAbsolute(path)) return inside(project, path) ? slash(relative(project, path)) : path;

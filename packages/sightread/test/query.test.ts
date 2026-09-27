@@ -22,6 +22,7 @@ const client: GraphClient = {
 	close: async () => {},
 };
 const requests = [{ type: "lookup" }, { type: "escape" }];
+const callerHandle = (index: number) => `src/a.ts#caller${index}:function`;
 
 test("batch returns input order with numbered headers", async () => {
 	expect(await runQuery({ client, ranges }, requests, { json: false })).toBe(
@@ -52,27 +53,133 @@ test("unchanged input is byte deterministic", async () => {
 	expect(await runQuery({ client, ranges }, requests, { mode: "text" })).toBe(first);
 });
 
-test("reverse trace honors explicit maxNodes and reports skipped symbols", async () => {
-	const calls: number[] = [];
+test("complete reverse trace follows graph handles, edges, and cycles", async () => {
+	const target = "src/a.ts#target:function";
+	const nested = "src/a.ts#createRouterInner.step:function";
+	const override = "src/a.ts#Child.run:method";
+	const seen: string[] = [];
 	const traceClient: GraphClient = {
 		...client,
-		query: async () => ({
-			value: { result: { type: "trace", start: { id: "src/a.ts#target:function" }, reached: [], truncated: true } },
-			isError: false,
-		}),
+		query: async (request) => {
+			const from = String(request.from);
+			if (request.maxDepth !== 1)
+				return {
+					value: {
+						result: {
+							type: "trace",
+							start: { id: target, name: "target", file: "src/a.ts", kind: "function" },
+							reached: [],
+							truncated: true,
+						},
+					},
+					isError: false,
+				};
+			seen.push(from);
+			const callers = from === target ? [nested, override] : from === nested ? [target] : [];
+			return {
+				value: {
+					result: {
+						type: "trace",
+						start: { id: from, name: from.split("#")[1].split(":")[0], file: "src/a.ts", kind: from.split(":")[1] },
+						reached: callers.map((id) => ({
+							id,
+							name: id.split("#")[1].split(":")[0],
+							file: "src/a.ts",
+							kind: id.split(":")[1],
+						})),
+						hops: callers.map((caller) => ({
+							from: caller,
+							to: from,
+							kind: caller === override ? "overrides" : "calls",
+							evidence: { file: "src/a.ts", startLine: 2, startCol: 1, endLine: 2, endCol: 5 },
+						})),
+						truncated: false,
+					},
+				},
+				isError: false,
+			};
+		},
+	};
+	const [result] = JSON.parse(
+		await runQuery(
+			{ client: traceClient, ranges, root: "/tmp" },
+			[{ type: "trace", from: target, direction: "reverse" }],
+			{ mode: "json" },
+		),
+	) as Array<{
+		shown: number;
+		raise?: string;
+		note?: string;
+		nodes: Array<{ handle: string }>;
+		edges: Array<{ from: string; to: string; kind: string }>;
+	}>;
+	expect(result.raise).toBeUndefined();
+	expect(result.shown).toBe(2);
+	expect(result.nodes.map((node) => node.handle)).toContain(nested);
+	expect(result.nodes.map((node) => node.handle)).toContain(override);
+	expect(result.edges.map((edge) => [edge.from, edge.to, edge.kind])).toContainEqual([nested, target, "calls"]);
+	expect(result.edges.map((edge) => [edge.from, edge.to, edge.kind])).toContainEqual([override, target, "overrides"]);
+	expect(result.edges.map((edge) => [edge.from, edge.to, edge.kind])).toContainEqual([target, nested, "calls"]);
+	expect(seen).toEqual([target, nested, override]);
+	expect(result.note).toContain("complete");
+});
+
+test("reverse trace honors maxNodes, maxDepth, and counts unresolved symbols", async () => {
+	const target = "src/a.ts#target:function";
+	const missing = "src/a.ts#missing:function";
+	const calls: string[] = [];
+	const traceClient: GraphClient = {
+		...client,
+		query: async (request) => {
+			if (request.maxDepth !== 1)
+				return {
+					value: {
+						result: {
+							type: "trace",
+							start: { id: target, name: "target", file: "src/a.ts", kind: "function" },
+							reached: [],
+							truncated: true,
+						},
+					},
+					isError: false,
+				};
+			const from = String(request.from);
+			calls.push(from);
+			if (from === missing) throw new Error("symbol not found");
+			if (from.includes("#leaf"))
+				return { value: { result: { type: "trace", reached: [], hops: [] } }, isError: false };
+			const index = from === target ? -1 : Number(/caller(\d+)/.exec(from)?.[1]);
+			const next = index < 39 ? [callerHandle(index + 1)] : [];
+			// The target is a hub: forty leaf callers besides the chain, so the node limit can be reached.
+			if (from === target)
+				next.push(missing, ...Array.from({ length: 40 }, (_, leaf) => `src/a.ts#leaf${leaf}:function`));
+			return {
+				value: {
+					result: {
+						type: "trace",
+						start: { id: from, name: from.split("#")[1].split(":")[0], file: "src/a.ts", kind: "function" },
+						reached: next.map((id) => ({
+							id,
+							name: id.split("#")[1].split(":")[0],
+							file: "src/a.ts",
+							kind: "function",
+						})),
+						hops: next.map((caller) => ({ from: caller, to: from, kind: "calls" })),
+						truncated: false,
+					},
+				},
+				isError: false,
+			};
+		},
 	};
 	const references: ReferenceIndex = {
 		query: async () => {
 			throw new Error("unexpected references query");
 		},
-		walk: async (_start, limits) => {
-			calls.push(limits.maxNodes);
-			return { nodes: [], edges: [], truncated: false, skipped: 2 };
-		},
 		close: async () => {},
 	};
 	const context = { client: traceClient, ranges, references, root: "/tmp" };
-	const ask = async (maxNodes?: number) =>
+	const ask = async (maxNodes?: number, maxDepth?: number) =>
 		(
 			JSON.parse(
 				await runQuery(
@@ -80,20 +187,27 @@ test("reverse trace honors explicit maxNodes and reports skipped symbols", async
 					[
 						{
 							type: "trace",
-							from: "src/a.ts#target:function",
+							from: target,
 							direction: "reverse",
 							...(maxNodes === undefined ? {} : { maxNodes }),
+							...(maxDepth === undefined ? {} : { maxDepth }),
 						},
 					],
 					{ mode: "json" },
 				),
-			) as Array<{ note?: string; raise?: string }>
+			) as Array<{ shown: number; note?: string; raise?: string }>
 		)[0];
 	expect((await ask(8)).raise).toBe("trace.maxNodes");
 	expect((await ask(32)).raise).toBe("trace.maxNodes");
 	expect(calls).toEqual([]);
-	expect((await ask(45)).note).toContain("2 symbols skipped");
-	expect(calls).toEqual([45]);
-	await ask();
-	expect(calls).toEqual([45, 1000]);
+	expect((await ask(35)).shown).toBe(35);
+	expect((await ask(35)).note).toContain("stopped at 35 symbols");
+	// One level: the chain's first caller, the missing symbol and the forty leaves.
+	expect((await ask(undefined, 1)).shown).toBe(42);
+	expect((await ask(undefined, 2)).shown).toBe(43);
+	// Like the graph's own trace, three levels by default and never more than eight.
+	const complete = await ask();
+	expect(complete.shown).toBe(44);
+	expect(complete.note).toContain("1 symbol skipped");
+	expect((await ask(undefined, 20)).shown).toBe(49);
 });

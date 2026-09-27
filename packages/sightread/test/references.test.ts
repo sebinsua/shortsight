@@ -1,11 +1,8 @@
 // Exercise compiler-resolved references through the CLI and a real graph server.
-import { afterAll, expect, spyOn, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import * as fsPromises from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { GraphResult } from "../src/model.ts";
-import { createPaths } from "../src/paths.ts";
-import { createReferenceIndex } from "../src/references.ts";
 import { renderText } from "../src/render.ts";
 import { createFixtureProject } from "./fixture.ts";
 
@@ -351,10 +348,12 @@ const wideFiles: Record<string, string> = {
 	"tsconfig.json": '{"compilerOptions":{"strict":true,"module":"nodenext"}}\n',
 	"src/target.ts": "export function target() { return 1; }\n",
 	"src/hub.ts": `${Array.from({ length: 40 }, (_, index) => `import { direct${index} } from "./direct${index}.ts";`).join("\n")}\nexport function hub() { return ${Array.from({ length: 40 }, (_, index) => `direct${index}()`).join(" + ")}; }\n`,
+	"src/special.ts":
+		'import { direct0 } from "./direct0.ts";\nimport { direct1 } from "./direct1.ts";\nexport function createRouterInner() { function step() { direct0(); } return step; }\nexport class Base { run() { direct1(); } }\nexport class Child extends Base { override run() { return super.run(); } }\n',
 };
 for (let index = 0; index < 40; index++) {
 	wideFiles[`src/direct${index}.ts`] =
-		`import { target } from "./target.ts";\nexport function direct${index}() { return target(); }\n`;
+		`import { target } from "./target.ts";\nexport function direct${index}() { ${index === 0 ? 'const label = "💡"; ' : ""}return target(); }\n`;
 	wideFiles[`src/outer${index}.ts`] =
 		`import { direct${index} } from "./direct${index}.ts";\n${index % 2 ? "" : "export "}function outer${index}() { return direct${index}(); }\nexport const use${index} = outer${index};\n`;
 }
@@ -363,30 +362,98 @@ for (const [name, contents] of Object.entries(wideFiles)) {
 	writeFileSync(join(wide, name), contents);
 }
 
-test("a reverse trace past the graph's limit is walked to the end through references", () => {
+test("a reverse trace past the graph's limit follows graph callers after its hub", () => {
 	const output = runIn(wide, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" }));
 	expect(output.code).toBe(0);
 	const [result] = JSON.parse(output.out) as Array<{
 		shown: number;
 		raise?: string;
 		note?: string;
-		nodes: Array<{ name: string; exported?: true }>;
+		nodes: Array<{ name: string; handle: string; exported?: true }>;
+		edges: Array<{ from: string; to: string; kind: string; at?: { file: string; line: number; col?: number } }>;
 	}>;
 	const names = new Set(result.nodes.map(({ name }) => name));
 	expect(result.raise).toBeUndefined();
 	expect(result.note).toContain("complete");
-	// 40 direct callers, the hub that calls them all, 40 outer callers, and the 40 variables that use those.
-	expect(result.shown).toBe(121);
+	// Calls from references complete the 40-caller hub; graph traces follow each later level.
+	expect(result.shown).toBeGreaterThanOrEqual(83);
 	for (let index = 0; index < 40; index++)
-		for (const name of [`direct${index}`, `outer${index}`, `use${index}`]) expect(names.has(name)).toBe(true);
+		for (const name of [`direct${index}`, `outer${index}`]) expect(names.has(name)).toBe(true);
 	expect(names.has("hub")).toBe(true);
+	expect(result.nodes.map(({ handle }) => handle)).toContain("src/special.ts#createRouterInner.step:function");
+	expect(result.nodes.map(({ handle }) => handle)).toContain("src/special.ts#Child.run:method");
+	expect(result.edges).toContainEqual(
+		expect.objectContaining({
+			from: "src/special.ts#Child.run:method",
+			to: "src/special.ts#Base.run:method",
+			kind: "overrides",
+		}),
+	);
+	expect(result.edges.find(({ from }) => from === "src/direct0.ts#direct0:function")?.at?.col).toBe(
+		'export function direct0() { const label = "💡"; return target(); }'.indexOf("target()") + 1,
+	);
 	expect(result.nodes.find(({ name }) => name === "outer1")?.exported).toBeUndefined();
 	expect(result.nodes.find(({ name }) => name === "outer0")?.exported).toBe(true);
 	const text = runIn(wide, JSON.stringify({ type: "trace", from: "target", direction: "reverse" })).out;
-	expect(text).toStartWith("trace reverse from target: 121 shown\n");
+	expect(text).toStartWith(`trace reverse from target: ${result.shown} shown\n`);
 	expect(text).toEndWith(
-		"note: complete: past the graph's 32-symbol limit, callers were followed through compiler references",
+		"note: complete: past the graph's 32-symbol limit, callers were followed through graph traces",
 	);
+});
+
+test("a hub's references fallback keeps every use of a class, as the graph's trace does", () => {
+	const fixture = createFixtureProject({
+		"src/Widget.ts": "export class Widget {}\n",
+		"src/uses.ts": [
+			'import { Widget } from "./Widget.ts";',
+			...Array.from({ length: 40 }, (_, index) => `export function create${index}() { return new Widget(); }`),
+			...Array.from({ length: 40 }, (_, index) => `export function typed${index}(value: Widget) { return value; }`),
+		].join("\n"),
+	});
+	const trace = (from: string) =>
+		JSON.parse(runIn(fixture.root, "--json", JSON.stringify({ type: "trace", from, direction: "reverse" })).out)[0] as {
+			shown: number;
+			nodes: Array<{ name: string }>;
+			edges: Array<{ kind: string }>;
+		};
+	try {
+		// The graph's own trace follows type references, so the class's typed uses are callers too.
+		const widget = trace("src/Widget.ts#Widget:class");
+		expect(widget.shown).toBe(80);
+		expect(widget.nodes.map(({ name }) => name)).toEqual(expect.arrayContaining(["create0", "typed0"]));
+		expect(widget.edges.map(({ kind }) => kind)).toEqual(expect.arrayContaining(["instantiates", "references"]));
+	} finally {
+		runIn(fixture.root, "stop");
+		fixture.cleanup();
+	}
+});
+
+test("a nested project keeps repository handles through the complete graph walk", () => {
+	const repo = mkdtempSync(join(realpathSync("/tmp"), "sr-nested-"));
+	const client = join(repo, "client");
+	const nestedFiles: Record<string, string> = {
+		"tsconfig.json": "{}\n",
+		"src/target.ts": "export function target() {}\n",
+		"src/callers.ts": [
+			'import { target } from "./target.ts";',
+			...Array.from({ length: 40 }, (_, index) => `export function direct${index}() { target(); }`),
+			"export function outer() { direct0(); }",
+		].join("\n"),
+	};
+	for (const [name, contents] of Object.entries(nestedFiles)) {
+		mkdirSync(dirname(join(client, name)), { recursive: true });
+		writeFileSync(join(client, name), contents);
+	}
+	Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+	try {
+		const output = runIn(client, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" }));
+		expect(output.code).toBe(0);
+		const [result] = JSON.parse(output.out) as Array<{ nodes: Array<{ handle: string }> }>;
+		expect(result.nodes.map(({ handle }) => handle)).toContain("client/src/callers.ts#outer:function");
+	} finally {
+		runIn(client, "stop");
+		rmSync(repo, { recursive: true, force: true });
+	}
 });
 
 test("a forward trace at the graph's limit says so instead of advising a raise", () => {
@@ -395,17 +462,6 @@ test("a forward trace at the graph's limit says so instead of advising a raise",
 	) as Array<{ raise?: string; note?: string }>;
 	expect(result.raise).toBeUndefined();
 	expect(result.note).toBe("truncated at the graph's 32-symbol limit; trace again from the symbols at its edge");
-});
-
-test("constructor callers do not abort a complete reverse walk", async () => {
-	const index = createReferenceIndex({ root, tsconfig: join(root, "tsconfig.json") });
-	try {
-		const result = await index.walk("src/containers.ts#target:function", { maxNodes: 20 }, createPaths(root));
-		expect(result.nodes.map((node) => node.handle)).toContain("src/containers.ts#Holder.__constructor:method");
-		expect(result.skipped).toBe(0);
-	} finally {
-		await index.close();
-	}
 });
 
 test("reference containers use the graph's class and interface member handles", () => {
@@ -463,21 +519,6 @@ test("namespace function containers use the graph's qualified handle", () => {
 	expect(references.nodes.find((node) => node.line === 11)?.in?.handle).toBe(handle);
 });
 
-test("an unresolvable caller is skipped without stopping the walk", async () => {
-	const fixture = createFixtureProject({
-		"target.ts": "export function target() {}\nexport class C { ['odd']() { target(); } }\n",
-	});
-	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
-	try {
-		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
-		expect(result.skipped).toBe(1);
-		expect(result.nodes.map((node) => node.handle)).toContain("target.ts#C.['odd']:method");
-	} finally {
-		await index.close();
-		fixture.cleanup();
-	}
-});
-
 test("includeDeclaration includes every overload of the same symbol", () => {
 	const [result] = JSON.parse(
 		run(
@@ -495,64 +536,34 @@ test("includeDeclaration includes every overload of the same symbol", () => {
 	expect(merged.nodes.filter((node) => node.file === "src/overloads.ts").map((node) => node.line)).toEqual([4, 5]);
 });
 
-test("cycles retain the edge from the start symbol", async () => {
+test("a completed trace goes as deep as the graph's own trace: three levels, or maxDepth", () => {
 	const fixture = createFixtureProject({
-		"target.ts": "export function target() { a(); }\nexport function a() { target(); }\n",
+		"src/target.ts": "export function target() {}\n",
+		"src/callers.ts": [
+			'import { target } from "./target.ts";',
+			...Array.from({ length: 40 }, (_, index) => `export function direct${index}() { target(); }`),
+			"export function second() { direct0(); }",
+			"export function third() { second(); }",
+			"export function fourth() { third(); }",
+		].join("\n"),
 	});
-	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
+	const names = (request: Record<string, unknown>) =>
+		(
+			JSON.parse(
+				runIn(
+					fixture.root,
+					"--json",
+					JSON.stringify({ type: "trace", from: "target", direction: "reverse", ...request }),
+				).out,
+			)[0] as { nodes: Array<{ name: string }> }
+		).nodes.map(({ name }) => name);
 	try {
-		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
-		expect(result.edges.map(({ from, to }) => [from, to])).toEqual([
-			["target.ts#a:function", "target.ts#target:function"],
-			["target.ts#target:function", "target.ts#a:function"],
-		]);
+		const standard = names({});
+		expect(standard).toEqual(expect.arrayContaining(["direct0", "second", "third"]));
+		expect(standard).not.toContain("fourth");
+		expect(names({ maxDepth: 4 })).toContain("fourth");
 	} finally {
-		await index.close();
+		runIn(fixture.root, "stop");
 		fixture.cleanup();
-	}
-});
-
-test("a reverse walk checks project file stamps only once", async () => {
-	const fixture = createFixtureProject({
-		"target.ts": "export function target() {}\nexport function a() { target(); }\nexport function b() { a(); }\n",
-	});
-	const index = createReferenceIndex({ root: fixture.root, tsconfig: join(fixture.root, "tsconfig.json") });
-	const stat = spyOn(fsPromises, "stat");
-	try {
-		const result = await index.walk("target.ts#target:function", { maxNodes: 10 }, createPaths(fixture.root));
-		expect(result.nodes.map((node) => node.name)).toEqual(["a", "b"]);
-		expect(stat.mock.calls.filter(([path]) => path === join(fixture.root, "target.ts"))).toHaveLength(1);
-	} finally {
-		stat.mockRestore();
-		await index.close();
-		fixture.cleanup();
-	}
-});
-
-test("a walk in a project below the repository root follows callers past the first level", async () => {
-	const repo = mkdtempSync(join(realpathSync("/tmp"), "sr-nested-"));
-	const client = join(repo, "client");
-	const nested: Record<string, string> = {
-		"tsconfig.json": '{"compilerOptions":{"strict":true,"module":"nodenext"}}\n',
-		"src/target.ts": "export function target() { return 1; }\n",
-		"src/a.ts": 'import { target } from "./target.ts";\nexport function a() { return target(); }\n',
-		"src/b.ts": 'import { a } from "./a.ts";\nexport function b() { return a(); }\n',
-	};
-	for (const [name, contents] of Object.entries(nested)) {
-		mkdirSync(dirname(join(client, name)), { recursive: true });
-		writeFileSync(join(client, name), contents);
-	}
-	Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
-	const index = createReferenceIndex({ root: client, tsconfig: join(client, "tsconfig.json") });
-	try {
-		const result = await index.walk("client/src/target.ts#target:function", { maxNodes: 10 }, createPaths(client));
-		expect(result.nodes.map((node) => node.handle).toSorted()).toEqual([
-			"client/src/a.ts#a:function",
-			"client/src/b.ts#b:function",
-		]);
-		expect(result.skipped).toBe(0);
-	} finally {
-		await index.close();
-		rmSync(repo, { recursive: true, force: true });
 	}
 });

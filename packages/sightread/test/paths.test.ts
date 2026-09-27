@@ -1,7 +1,7 @@
 // Check repository-relative graph paths against a nested Git project.
 import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openGraph } from "../src/index.ts";
@@ -170,3 +170,41 @@ test("near misses suggest names and unrelated misses stay quiet", async () => {
 		await graph.close();
 	}
 }, 30_000);
+
+test("a sibling package's paths, ranges and references resolve within the repository", async () => {
+	const monorepo = mkdtempSync(join(realpathSync("/tmp"), "sr-sib-"));
+	const files: Record<string, string> = {
+		"packages/app/tsconfig.json":
+			'{"compilerOptions":{"strict":true,"module":"nodenext"},"include":["src","../lib/src"]}\n',
+		"packages/app/src/use.ts":
+			'import { shared } from "../../lib/src/shared.ts";\nexport function use() { return shared(); }\n',
+		"packages/lib/src/shared.ts":
+			"// shared\n\nexport function shared() { return 1; }\nexport function viaLib() { return shared(); }\n",
+	};
+	for (const [name, contents] of Object.entries(files)) {
+		mkdirSync(join(monorepo, name, ".."), { recursive: true });
+		writeFileSync(join(monorepo, name), contents);
+	}
+	execFileSync("git", ["init", "-q"], { cwd: monorepo });
+	const app = join(monorepo, "packages/app");
+	const paths = createPaths(app);
+	expect(paths.toRepositoryPath("../lib/src/shared.ts")).toBe("packages/lib/src/shared.ts");
+	expect(paths.inputToProjectPath("packages/lib/src/shared.ts")).toBe("../lib/src/shared.ts");
+	const graph = await openGraph({ cwd: app });
+	try {
+		const [lookup] = await graph.query([{ type: "lookup", query: "shared" }]);
+		const node = lookup.nodes.find(({ name }) => name === "shared");
+		expect(node?.file).toBe("packages/lib/src/shared.ts");
+		expect(node?.ranges).toEqual([{ start: 3, end: 3 }]);
+		const [references] = await graph.query([{ type: "references", symbol: "packages/lib/src/shared.ts#shared" }]);
+		expect(references.nodes.map(({ file, in: container }) => `${file} ${container?.name}`).toSorted()).toEqual([
+			"packages/app/src/use.ts undefined",
+			"packages/app/src/use.ts use",
+			"packages/lib/src/shared.ts viaLib",
+		]);
+	} finally {
+		await graph.close();
+		await stopServer({ root: app, tsconfig: join(app, "tsconfig.json") });
+		rmSync(monorepo, { recursive: true, force: true });
+	}
+});

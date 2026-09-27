@@ -91,6 +91,40 @@ test("HEAD fallback is quiet on the sole branch and on main", async () => {
 	expect((await readGitChanges(f.root)).baseNote).toBeUndefined();
 });
 
+test("a local main warns when origin's known default is trunk but its ref is unavailable", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "trunk");
+	git(f.repo, "checkout", "-qb", "main");
+	git(f.repo, "branch", "feature");
+	git(f.repo, "branch", "-D", "trunk");
+	git(f.repo, "remote", "add", "origin", f.repo);
+	git(f.repo, "config", "remote.origin.fetch", "+refs/heads/missing/*:refs/remotes/origin/*");
+	git(f.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+	f.put("client/src/api.ts", "export function value() { return 2; }\n");
+	git(f.repo, "add", ".");
+	git(f.repo, "commit", "-qm", "main change");
+	const changes = await readGitChanges(f.root);
+	expect(changes.baseRef).toBe("HEAD");
+	expect(changes.files).toEqual([]);
+	expect(changes.baseNote).toContain("committed changes aren't included");
+});
+
+test("a known remote default does not use local main as a fallback base", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "trunk");
+	git(f.repo, "checkout", "-qb", "feature");
+	git(f.repo, "branch", "main");
+	git(f.repo, "branch", "-D", "trunk");
+	git(f.repo, "remote", "add", "origin", f.repo);
+	git(f.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+	f.put("client/src/api.ts", "export function value() { return 2; }\n");
+	git(f.repo, "add", ".");
+	git(f.repo, "commit", "-qm", "feature change");
+	const changes = await readGitChanges(f.root);
+	expect(changes.baseRef).toBe("HEAD");
+	expect(changes.baseNote).toContain("committed changes aren't included");
+});
+
 test("HEAD fallback uses a base placeholder when several other branches exist", async () => {
 	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
 	git(f.repo, "branch", "-m", "feature");

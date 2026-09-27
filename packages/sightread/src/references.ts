@@ -1,5 +1,6 @@
 // Find every compiler-resolved use of a graph symbol in the project's real files.
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { API, type Snapshot } from "typescript/unstable/async";
 import {
@@ -29,19 +30,13 @@ import {
 	type Node,
 	type SourceFile,
 } from "typescript/unstable/ast";
-import { fromHandle, type GraphEdge, type GraphNode, type GraphResult } from "./model.ts";
+import { fromHandle, type GraphNode, type GraphResult } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
 import { projectFiles, type Project } from "./project.ts";
 import { graphKind, hasModifier, listedExports } from "./ranges.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
-	/** Every declaration that reaches `start` through compiler references, breadth first. */
-	walk(
-		start: string,
-		limits: { maxNodes: number; maxDepth?: number },
-		paths: PathMapper,
-	): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean; skipped: number }>;
 	close(): Promise<void>;
 }
 
@@ -273,13 +268,24 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 
 	// Every reference TypeScript resolves to the symbol `handle` names, with where it sits and the call it makes.
 	const collect = async (handle: string, includeDeclaration: boolean, paths: PathMapper, current?: Snapshot) => {
-		// Handles arrive relative to the project from requests, and relative to the repository from the walk.
-		const ref = fromHandle(paths.toProjectHandle(handle));
+		const ref = fromHandle(handle);
 		if (!ref) throw new Error(`${handle} not found`);
 		const active = current ?? (await refresh());
+		// The graph covers files anywhere in the repository, sibling packages included, so references do too.
+		const inRepository = (absolute: string) => {
+			// Compare resolved paths: the project's may run through a symlink (`/var` on macOS), the repository's doesn't.
+			let actual = absolute;
+			try {
+				actual = realpathSync(absolute);
+			} catch {
+				// A file that doesn't exist yet can't be referenced anyway; compare it as given.
+			}
+			const path = relative(paths.repository, actual);
+			return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+		};
 		const file = resolve(project.root, ref.file);
 		const local = relative(project.root, file);
-		if (local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) throw new Error(`${handle} not found`);
+		if (!inRepository(file)) throw new Error(`${handle} not found`);
 		const home = await active.getDefaultProjectForFile(file);
 		const source = await home?.program.getSourceFile(file);
 		const declaration = source && findDeclaration(source, ref.name, ref.kind);
@@ -301,8 +307,8 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 			const offset = reference.getStart(origin);
 			const declaredName = declarationName(reference);
 			if (declaredName && (!includeDeclaration || declaredName !== ref.name)) continue;
+			if (!inRepository(origin.fileName)) continue;
 			const path = relative(project.root, origin.fileName);
-			if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) continue;
 			const key = `${origin.fileName}:${offset}:${reference.end}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -373,64 +379,6 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 					nodes,
 					edges: [],
 					sections: { symbol: name, declaration },
-				};
-			}),
-		walk: (start, limits, paths) =>
-			serially(async () => {
-				const current = await refresh();
-				const nodes = new Map<string, GraphNode>();
-				const edges = new Map<string, GraphEdge>();
-				const depth = new Map([[start, 0]]);
-				const queue = [start];
-				let truncated = false;
-				let skipped = 0;
-				while (queue.length) {
-					const target = queue.shift()!;
-					const level = depth.get(target)!;
-					if (limits.maxDepth !== undefined && level >= limits.maxDepth) continue;
-					let found: Found[];
-					try {
-						({ found } = await collect(target, false, paths, current));
-					} catch (error) {
-						if (!(error instanceof Error) || error.message !== `${target} not found`) throw error;
-						skipped++;
-						continue;
-					}
-					for (const item of found) {
-						const container = item.container;
-						if (!container || container.handle === target) continue;
-						const kind = item.call ? "calls" : "references";
-						const key = `${container.handle}\u0000${target}\u0000${kind}`;
-						if (!edges.has(key))
-							edges.set(key, {
-								from: container.handle,
-								to: target,
-								kind,
-								at: { file: item.file, line: item.line, col: item.col, endCol: item.endCol },
-							});
-						if (nodes.has(container.handle) || container.handle === start) continue;
-						if (nodes.size >= limits.maxNodes) {
-							truncated = true;
-							continue;
-						}
-						const { handle, name, kind: symbolKind, start: from, end, exported } = container;
-						nodes.set(handle, {
-							handle,
-							name,
-							kind: symbolKind,
-							file: item.file,
-							ranges: [{ start: from, end }],
-							...(exported ? { exported } : {}),
-						});
-						depth.set(handle, level + 1);
-						queue.push(handle);
-					}
-				}
-				return {
-					nodes: [...nodes.values()],
-					edges: [...edges.values()].filter((edge) => nodes.has(edge.from) || edge.from === start),
-					truncated,
-					skipped,
 				};
 			}),
 		close: () =>

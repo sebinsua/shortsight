@@ -1,4 +1,5 @@
 // Parse syntax ranges for graph symbols without loading the target project.
+import { realpathSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -257,20 +258,25 @@ export async function parseDeclarations(fileName: string, text: string): Promise
 }
 
 /** Cache project files by disk metadata and reuse one TypeScript API process. */
-export function createRangeIndex(root: string, options: { maxFiles?: number } = {}): RangeIndex {
+/** Paths resolve from `root`; files must lie within `within` (default `root`), such as the repository. */
+export function createRangeIndex(root: string, options: { maxFiles?: number; within?: string } = {}): RangeIndex {
 	const absoluteRoot = resolve(root);
+	// Express `within` in the same spelling as `root`, which may run through a symlink (`/var` on macOS).
+	const absoluteWithin = options.within
+		? resolve(absoluteRoot, relative(realpathSync(absoluteRoot), realpathSync(options.within)))
+		: absoluteRoot;
 	const cache = new Map<string, { mtimeMs: number; size: number; declarations: Declaration[] }>();
 	const inFlight = new Map<string, Promise<Declaration[] | undefined>>();
 	const maxFiles = Math.max(0, options.maxFiles ?? 64);
 	let parser: DeclarationParser | undefined;
 	let closed = false;
 	const insideRoot = (file: string) => {
-		const path = relative(absoluteRoot, file);
+		const path = relative(absoluteWithin, file);
 		return path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
 	};
 	const readDeclarations = async (absolute: string, file: string): Promise<Declaration[] | undefined> => {
 		try {
-			const actualRoot = await realpath(absoluteRoot);
+			const actualRoot = await realpath(absoluteWithin);
 			const actualFile = await realpath(absolute);
 			const path = relative(actualRoot, actualFile);
 			if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) return undefined;
@@ -298,7 +304,8 @@ export function createRangeIndex(root: string, options: { maxFiles?: number } = 
 		}
 	};
 	const declarations = async (file: string): Promise<Declaration[] | undefined> => {
-		if (closed || isAbsolute(file) || file.includes("\\") || file.split("/").includes("..")) return undefined;
+		// `..` is allowed: a sibling package's file resolves outside the project, and is checked to be within bounds.
+		if (closed || isAbsolute(file) || file.includes("\\")) return undefined;
 		const absolute = resolve(absoluteRoot, file);
 		if (!insideRoot(absolute)) return undefined;
 		const pending = inFlight.get(absolute);

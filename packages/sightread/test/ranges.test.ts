@@ -2,7 +2,8 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { API } from "typescript/unstable/async";
 import { createDeclarationParser, createRangeIndex, parseDeclarations, type Declaration } from "../src/ranges.ts";
@@ -130,6 +131,23 @@ test("one parser gives each of many .tsx and .ts files its own declarations", as
 			}
 	} finally {
 		await parser.close();
+	}
+});
+
+test("the range index reads a sibling package's file but nothing outside the repository", async () => {
+	const repository = mkdtempSync(join(realpathSync("/tmp"), "sr-within-"));
+	mkdirSync(join(repository, "app"), { recursive: true });
+	mkdirSync(join(repository, "lib"), { recursive: true });
+	writeFileSync(join(repository, "lib/shared.ts"), "export function shared() {}\n");
+	writeFileSync(join(dirname(repository), `${basename(repository)}-outside.ts`), "export function outside() {}\n");
+	const index = createRangeIndex(join(repository, "app"), { within: repository });
+	try {
+		expect((await index.declarations("../lib/shared.ts"))?.map(({ name }) => name)).toEqual(["shared"]);
+		expect(await index.declarations(`../../${basename(repository)}-outside.ts`)).toBeUndefined();
+	} finally {
+		await index.close();
+		rmSync(repository, { recursive: true, force: true });
+		rmSync(join(dirname(repository), `${basename(repository)}-outside.ts`), { force: true });
 	}
 });
 

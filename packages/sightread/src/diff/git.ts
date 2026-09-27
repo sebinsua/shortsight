@@ -70,7 +70,7 @@ async function defaultBase(repository: string): Promise<{ revision: string; ref:
 		}
 	}
 	const ownBranch = (await git(repository, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
-	for (const candidate of ["origin/HEAD", remoteBranch, "main", "master"]) {
+	for (const candidate of ["origin/HEAD", remoteBranch, ...(remoteBranch ? [] : ["main", "master"])]) {
 		if (!candidate || candidate === ownBranch || candidate === `origin/${ownBranch}`) continue;
 		if (candidate === "origin/HEAD" && remoteBranch === `origin/${ownBranch}`) continue;
 		try {
@@ -85,7 +85,9 @@ async function defaultBase(repository: string): Promise<{ revision: string; ref:
 		.split("\n")
 		.filter(Boolean);
 	const other = branches.filter((branch) => branch !== ownBranch);
-	const onDefault = ownBranch === "main" || ownBranch === "master" || remoteBranch === `origin/${ownBranch}`;
+	const onDefault = remoteBranch
+		? remoteBranch === `origin/${ownBranch}`
+		: ownBranch === "main" || ownBranch === "master";
 	const example = other.length === 1 ? `diff ${other[0]}` : "diff <base>";
 	const note =
 		other.length && !onDefault
