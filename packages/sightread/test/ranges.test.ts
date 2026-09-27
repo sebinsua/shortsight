@@ -114,6 +114,25 @@ test("marks exactly the top-level declarations a module exports", async () => {
 	expect(["hidden", "Box.method"].map(exported)).toEqual([false, false]);
 });
 
+test("one parser gives each of many .tsx and .ts files its own declarations", async () => {
+	const parser = createDeclarationParser();
+	try {
+		for (let index = 0; index < 6; index++)
+			for (const extension of [".tsx", ".ts"]) {
+				const expected = `Item${index}${extension === ".tsx" ? "View" : "Model"}`;
+				const contents =
+					extension === ".tsx"
+						? `export function ${expected}() { return <main><h1>{${index}}</h1></main>; }\n`
+						: `export function ${expected}() { return ${index}; }\n`;
+				expect(
+					(await parser.parse(`file${index}${extension}`, contents)).map((declaration) => declaration.name),
+				).toEqual([expected]);
+			}
+	} finally {
+		await parser.close();
+	}
+});
+
 test("ranges anonymous default declarations using names and kinds from the live graph", async () => {
 	const repository = await project();
 	const root = join(repository, "client");

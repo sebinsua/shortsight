@@ -96,6 +96,8 @@ export function createDeclarationParser(): DeclarationParser {
 	let watched: ChildProcess | undefined;
 	let sequence: Promise<unknown> = Promise.resolve();
 	let closed = false;
+	let parsed = 0;
+	let previous: string | undefined;
 
 	const parse = (fileName: string, text: string): Promise<Declaration[]> => {
 		const task = sequence.then(async () => {
@@ -108,15 +110,19 @@ export function createDeclarationParser(): DeclarationParser {
 				exited = false;
 				throw new Error("TypeScript parser process exited");
 			}
-			const extension = extname(fileName) || ".ts";
-			const file = `${root}/source${extension}`;
-			const existing = files.has(file);
+			// Each parse gets a new virtual file. TypeScript can keep serving an open file's first contents
+			// after a change, so reusing one file per extension returned earlier files' declarations.
+			const file = `${root}/source${++parsed}${extname(fileName) || ".ts"}`;
+			const replaced = previous;
+			if (replaced) files.delete(replaced);
 			files.set(file, text);
 			const snapshot = await api.updateSnapshot({
 				...(configured ? {} : { openProjects: [config] }),
-				...(existing ? {} : { openFiles: [file] }),
-				fileChanges: existing ? { changed: [file] } : { created: [file] },
+				openFiles: [file],
+				...(replaced ? { closeFiles: [replaced] } : {}),
+				fileChanges: { created: [file], ...(replaced ? { deleted: [replaced] } : {}) },
 			});
+			previous = file;
 			const child = (api as unknown as { client: { process?: ChildProcess } }).client.process;
 			if (child && child !== watched) {
 				watched = child;
