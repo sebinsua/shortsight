@@ -152,9 +152,10 @@ async function completeTrace(
 		// Each level's callers come from one `details` request where it can answer, since every graph request first
 		// checks the whole project for changes; other symbols get their own one-level trace.
 		const dependents = async (targets: string[]): Promise<Map<string, Record<string, unknown>[]>> => {
+			// Nested functions and variables have dotted names too; methods are left out by their kind.
 			const known = targets.filter((target) => {
-				const parsed = fromHandle(target);
-				return parsed && !parsed.name.includes(".") && detailsKinds.has(parsed.kind);
+				const kind = fromHandle(target)?.kind;
+				return kind !== undefined && detailsKinds.has(kind);
 			});
 			const found = new Map<string, Record<string, unknown>[]>();
 			if (!known.length) return found;
@@ -301,6 +302,8 @@ async function completeTrace(
 		);
 		Object.assign(model, completed);
 		if (!truncated) delete model.raise;
+		// Say so on the first line too, since a hub's direct users alone can look like the whole answer.
+		if (!truncated && hubDepth) model.raise = "trace.maxDepth";
 		model.note = `${
 			unresolvedHub
 				? `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`

@@ -125,6 +125,65 @@ test("complete reverse trace follows graph handles, edges, and cycles", async ()
 	expect(result.note).toContain("complete");
 });
 
+test("details answers nested functions in a completed trace, and methods still get their own trace", async () => {
+	const target = "src/a.ts#target:function";
+	const nested = "src/a.ts#outer.inner:function";
+	const method = "src/a.ts#Box.open:method";
+	const outer = "src/a.ts#outer:function";
+	const traced: string[] = [];
+	const detailed: string[][] = [];
+	const traceClient: GraphClient = {
+		...client,
+		query: async (request) => {
+			if (request.type === "details") {
+				const handles = request.handles as string[];
+				detailed.push(handles);
+				return {
+					value: {
+						result: {
+							type: "details",
+							nodes: handles.map((id) => ({
+								...symbol(id),
+								dependedOnBy: id === nested ? [{ ...symbol(outer), relation: "calls" }] : [],
+							})),
+						},
+					},
+					isError: false,
+				};
+			}
+			const from = String(request.from);
+			if (request.maxDepth !== 1)
+				return {
+					value: { result: { type: "trace", start: symbol(target), reached: [], truncated: true } },
+					isError: false,
+				};
+			traced.push(from);
+			const callers = from === target ? [nested, method] : [];
+			return {
+				value: {
+					result: {
+						type: "trace",
+						reached: callers.map((id) => ({ ...symbol(id), kind: id.split(":")[1] })),
+						hops: callers.map((caller) => ({ from: caller, to: from, kind: "calls" })),
+						truncated: false,
+					},
+				},
+				isError: false,
+			};
+		},
+	};
+	const [result] = JSON.parse(
+		await runQuery(
+			{ client: traceClient, ranges, root: "/tmp" },
+			[{ type: "trace", from: target, direction: "reverse", maxDepth: 2 }],
+			{ mode: "json" },
+		),
+	) as Array<{ nodes: Array<{ handle: string }> }>;
+	expect(detailed).toEqual([[nested]]);
+	expect(traced).toEqual([target, method]);
+	expect(result.nodes.map(({ handle }) => handle)).toContain(outer);
+});
+
 test("reverse trace honors maxNodes, maxDepth, and counts unresolved symbols", async () => {
 	const target = "src/a.ts#target:function";
 	const missing = "src/a.ts#missing:function";
@@ -209,7 +268,9 @@ test("reverse trace honors maxNodes, maxDepth, and counts unresolved symbols", a
 	// With more direct users than the graph's limit, the default is one level; asked, never more than eight.
 	expect((await ask()).shown).toBe(42);
 	expect((await ask()).note).toContain("only direct users are shown");
+	expect((await ask()).raise).toBe("trace.maxDepth");
 	const complete = await ask(undefined, 3);
+	expect(complete.raise).toBeUndefined();
 	expect(complete.shown).toBe(44);
 	expect(complete.note).toContain("1 symbol skipped");
 	expect((await ask(undefined, 20)).shown).toBe(49);
