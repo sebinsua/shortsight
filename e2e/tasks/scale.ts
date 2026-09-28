@@ -189,7 +189,10 @@ const optionsMigration: Family = {
 }
 `,
 		};
-		const sites: Check[] = [matches("src/lib/http.ts", /request\(url:string,\w+:RequestOptions/, "options signature")];
+		const sites: Check[] = [
+			// Named or destructured: both take the options object.
+			matches("src/lib/http.ts", /request\(url:string,(?:\w+|\{[^}]*\}):RequestOptions/, "options signature"),
+		];
 		const decoys: Check[] = [contains("src/lib/cache.ts", "request(key: string, ttl: number)")];
 		const cases: Case[] = [];
 		for (let i = 0; i < size; i++) {
@@ -392,15 +395,15 @@ export function ${call}() {
 
 /**
  * A call migrated to logger, however its arguments are spelled: behaviour checks already compare the
- * recorded entries, so this only confirms the call now goes through logger. A non-literal level may be
- * written logger.log(level, m) or logger[level](m).
+ * recorded entries, so this only confirms the call now goes through logger. A literal level may also be
+ * written logger.log("info", m), and a non-literal one logger.log(level, m) or logger[level](m).
  */
 const migratedLog = (file: string, level: "info" | "warn" | "error" | "level", message: string): Check =>
 	matches(
 		file,
 		level === "level"
 			? new RegExp(`logger(?:\\.log\\(level,|\\[level\\]\\()"${message}"`)
-			: new RegExp(`logger\\.${level}\\("${message}"[,)]`),
+			: new RegExp(`logger(?:\\.${level}\\(|\\.log\\("${level}",)"${message}"[,)]`),
 		`logger ${level} call for "${message}"`,
 	);
 

@@ -5,35 +5,35 @@ session, checks the result independently, and keeps evidence for human review.
 
 ## Results
 
-Latest single run per cell: `openai-codex/gpt-5.6-sol`, high reasoning, `baseline` against `code` with the
-skill. Fixtures include `oxfmt`, which shorthand runs on the files it changes; the `options-migration` row at
-10 files and `move-declaration` are the only ones run since. Every run verified with zero drift except stock `move-declaration`, which
-repointed the `src/utils` barrel's importers instead of re-exporting the moved function from it. Repeat runs of
-one task have differed by up to 92s, so small gaps are noise.
+Latest run, 2026-09-28 at bcfb74d: `openai-codex/gpt-5.6-sol`, high reasoning, `baseline` against `code` with
+the skill, two attempts per cell, results in `results/main-sol-2026-09-28`. Times are means, with the previous
+single run in brackets. The skill no longer has examples mirroring the tasks (3aa9d94), so these are the first
+shorthand numbers free of that. The two attempts in a cell differed by up to 23s.
 
-| Task                    | Prompt  | Files |   Stock | Shorthand |
-| ----------------------- | ------- | ----: | ------: | --------: |
-| `rename-symbol`         | brief   |   100 |    142s |   **55s** |
-| `rename-symbol`         | outcome |   100 |    129s |   **43s** |
-| `options-migration`     | brief   |   100 |    106s |   **75s** |
-| `options-migration`     | outcome |   100 |    140s |  **107s** |
-| `move-module`           | brief   |   100 |     87s |   **52s** |
-| `move-module`           | outcome |   100 |     57s |   **47s** |
-| `move-declaration`      | outcome |    40 |  failed |   **39s** |
-| `logger-migration`      | brief   |   100 | **60s** |       79s |
-| `logger-migration`      | outcome |   100 |    115s |   **79s** |
-| `rename-symbol`         | brief   |    10 |     76s |   **35s** |
-| `options-migration`     | brief   |    10 | **50s** |       63s |
-| `empty-average` (pilot) | outcome |     1 |     24s |       24s |
+| Task                    | Prompt  | Files |           Stock |     Shorthand |
+| ----------------------- | ------- | ----: | --------------: | ------------: |
+| `rename-symbol`         | brief   |   100 |      91s (142s) | **37s** (55s) |
+| `rename-symbol`         | outcome |   100 |      84s (129s) | **32s** (43s) |
+| `options-migration`     | brief   |   100 |     115s (106s) | **87s** (75s) |
+| `options-migration`     | outcome |   100 |  **68s** (140s) |    75s (107s) |
+| `move-module`           | brief   |   100 |       44s (87s) | **41s** (52s) |
+| `move-module`           | outcome |   100 |       53s (57s) | **39s** (47s) |
+| `move-declaration`      | outcome |    40 | failed (failed) | **52s** (39s) |
+| `logger-migration`      | brief   |   100 |   **64s** (60s) |     93s (79s) |
+| `logger-migration`      | outcome |   100 |  **76s** (115s) |    124s (79s) |
+| `rename-symbol`         | brief   |    10 |       41s (76s) | **21s** (35s) |
+| `options-migration`     | brief   |    10 |   **38s** (50s) |     74s (63s) |
+| `empty-average` (pilot) | outcome |     1 |   **18s** (24s) |     21s (24s) |
+
+Stock `move-declaration` failed both attempts as before: it repointed the `src/utils` barrel's importers
+instead of re-exporting the moved function from it. Every other attempt verified with zero drift, four of them
+only after two checks were corrected in this round. Stock `options-migration` (outcome) destructured the
+options, `{ retries = 0, timeoutMs = 1000 }: RequestOptions = {}`, which the signature check didn't accept; one
+attempt per setup in `logger-migration` (outcome) wrote `logger.log("info", m)` rather than `logger.info(m)`.
+Both keep behaviour and now count. The first run of this round lost 30 attempts to an expired sign-in (fixed in
+e4a8645); those cells were run again, and the ones counted here all completed.
 
 The pilot and guidance suites verified every task in both conditions, with shorthand 9–76% slower.
-
-**These shorthand results need re-running.** Until 3aa9d94, the shorthand skill's examples mirrored benchmark
-tasks: retry limits moved into an options object (`options-migration`), `console.log` to `logger.info`
-(`logger-migration`), `formatPrice` gaining an argument (`rename-symbol`'s target), and `TableWriter.format`
-extracted into `renderTable` (the guidance suite's table extraction). Those rows may overstate shorthand.
-`move-module`, `move-declaration` and the pilot had no matching example. The examples now use names and
-changes no task uses.
 
 ### sightread
 

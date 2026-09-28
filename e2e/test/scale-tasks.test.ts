@@ -110,6 +110,22 @@ test("a migrated logger call counts however its arguments are written", async ()
 	await edit(root, "src/features/g2/feature2.ts", (text) =>
 		text.replace('logger.log(level, "m301")', 'logger[level]("m301")'),
 	);
+	await edit(root, "src/features/feature0.ts", (text) =>
+		text.replace('logger.info("m101")', 'logger.log("info", "m101")'),
+	);
+	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
+	await task.verify(root);
+});
+
+test("a destructured options parameter counts as the options signature", async () => {
+	const task = taskById("options-migration-10");
+	const root = await fixture(task.id);
+	await applySolution(task, root);
+	await edit(root, "src/lib/http.ts", (text) =>
+		text
+			.replace("options: RequestOptions = {}", "{ retries = 0, timeoutMs = 1000 }: RequestOptions = {}")
+			.replace("retries: options.retries ?? 0, timeoutMs: options.timeoutMs ?? 1000", "retries, timeoutMs"),
+	);
 	expect(await task.drift!(root)).toMatchObject({ missed: [], overmatched: [], unrelated: [] });
 	await task.verify(root);
 });
