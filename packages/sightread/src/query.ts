@@ -84,6 +84,12 @@ const GRAPH_TRACE_LIMIT = 32;
 const GRAPH_TRACE_DEPTH = 3;
 const GRAPH_TRACE_MAX_DEPTH = 8;
 const WALK_LIMIT = 1000;
+// `details` lists at most this many dependents per symbol, however many are asked for, and doesn't say when it
+// stopped, so only a shorter list is known to be whole.
+const DETAILS_NEIGHBOR_LIMIT = 3;
+// `details` leaves out `dispatches` edges, from an interface to what implements it, so only symbols that can't
+// implement one are looked up through it.
+const detailsKinds = new Set(["function", "variable", "type"]);
 const rawSymbol = (handle: string) => {
 	const parsed = fromHandle(handle);
 	return parsed ? { id: handle, ...parsed } : undefined;
@@ -107,10 +113,11 @@ async function completeTrace(
 	) {
 		const start = paths?.inputToProjectHandle(String(model.sections.start)) ?? String(model.sections.start);
 		const limit = asked ?? WALK_LIMIT;
-		const maxDepth = Math.min(
+		let maxDepth = Math.min(
 			GRAPH_TRACE_MAX_DEPTH,
 			Math.max(1, typeof request.maxDepth === "number" ? request.maxDepth : GRAPH_TRACE_DEPTH),
 		);
+		let hubDepth = false;
 		const depth = new Map([[start, 0]]);
 		const symbols = new Map<string, Record<string, unknown>>();
 		const edges = new Map<string, Record<string, unknown>>();
@@ -138,85 +145,139 @@ async function completeTrace(
 			if (!depth.has(caller)) return;
 			edges.set(JSON.stringify(edge), edge);
 		};
-		while (queue.length) {
-			const target = queue.shift()!;
-			const level = depth.get(target)!;
-			if (level >= maxDepth) continue;
-			let direct: Record<string, unknown> | undefined;
+		// Each level's callers come from one `details` request where it can answer, since every graph request first
+		// checks the whole project for changes; other symbols get their own one-level trace.
+		const dependents = async (targets: string[]): Promise<Map<string, Record<string, unknown>[]>> => {
+			const known = targets.filter((target) => {
+				const parsed = fromHandle(target);
+				return parsed && !parsed.name.includes(".") && detailsKinds.has(parsed.kind);
+			});
+			const found = new Map<string, Record<string, unknown>[]>();
+			if (!known.length) return found;
 			try {
 				const answer = await context.client.query({
-					type: "trace",
-					from: target,
-					direction: "reverse",
-					maxDepth: 1,
-					maxNodes: GRAPH_TRACE_LIMIT,
+					type: "details",
+					handles: known,
+					neighbors: true,
+					neighborLimit: DETAILS_NEIGHBOR_LIMIT,
 				});
-				if (answer.isError) throw new Error("symbol not found");
-				direct = object(object(answer.value)?.result) ?? object(answer.value);
-				if (!direct || !Array.isArray(direct.reached)) throw new Error("symbol not found");
-			} catch {
-				skipped++;
-				continue;
-			}
-			const reached = direct.reached as unknown[];
-			if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT && context.references && paths) {
-				try {
-					const refs = await context.references.query({ type: "references", symbol: target }, paths);
-					// The graph's trace follows every kind of use, type references and JSX included, so the fallback does too.
-					for (const node of refs.nodes) {
-						if (!node.in) continue;
-						const caller = paths.inputToProjectHandle(node.in.handle);
-						const file = paths.inputToProjectPath(node.file);
-						let content = lines.get(file);
-						if (!content) {
-							content = (await readFile(resolve(paths.project, file), "utf8")).split(/\r\n|\n|\r/);
-							lines.set(file, content);
-						}
-						const byte = (column: number) =>
-							Buffer.byteLength((content[node.line! - 1] ?? "").slice(0, column - 1), "utf8") + 1;
-						add(
-							caller,
-							target,
-							{
-								from: caller,
-								to: target,
-								kind: !node.call
-									? "references"
-									: node.call.line === node.line && node.text?.slice(node.call.col - 1).startsWith("new ")
-										? "instantiates"
-										: "calls",
-								evidence: {
-									file,
-									startLine: node.line,
-									startCol: byte(node.col!),
-									endLine: node.line,
-									endCol: byte(node.endCol!),
-								},
-							},
-							level,
+				const nodes = (object(object(answer.value)?.result) ?? object(answer.value))?.nodes;
+				for (const item of Array.isArray(nodes) ? nodes : []) {
+					const node = object(item);
+					const list = node?.dependedOnBy;
+					if (typeof node?.id !== "string" || !known.includes(node.id) || !Array.isArray(list)) continue;
+					if (list.length < DETAILS_NEIGHBOR_LIMIT)
+						found.set(
+							node.id,
+							list.flatMap((entry) => {
+								const dependent = object(entry);
+								return dependent ? [dependent] : [];
+							}),
 						);
+				}
+			} catch {
+				// Every symbol gets its own trace instead.
+			}
+			return found;
+		};
+		while (queue.length) {
+			const frontier = queue.splice(0).filter((target) => depth.get(target)! < maxDepth);
+			const batched = await dependents(frontier.filter((target) => target !== start));
+			for (const target of frontier) {
+				const level = depth.get(target)!;
+				const listed = batched.get(target);
+				if (listed) {
+					for (const dependent of listed) {
+						// Module-level code is listed under its file, which a reverse trace leaves out.
+						if (typeof dependent.id !== "string" || !fromHandle(dependent.id) || typeof dependent.relation !== "string")
+							continue;
+						const { relation, evidence, ...symbol } = dependent;
+						add(dependent.id, target, { from: dependent.id, to: target, kind: relation, evidence }, level, symbol);
 					}
+					continue;
+				}
+				let direct: Record<string, unknown> | undefined;
+				try {
+					const answer = await context.client.query({
+						type: "trace",
+						from: target,
+						direction: "reverse",
+						maxDepth: 1,
+						maxNodes: GRAPH_TRACE_LIMIT,
+					});
+					if (answer.isError) throw new Error("symbol not found");
+					direct = object(object(answer.value)?.result) ?? object(answer.value);
+					if (!direct || !Array.isArray(direct.reached)) throw new Error("symbol not found");
 				} catch {
 					skipped++;
+					continue;
 				}
-				continue;
-			}
-			if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT) {
-				truncated = true;
-				unresolvedHub = true;
-			}
-			for (const item of reached) {
-				const symbol = object(item);
-				if (!symbol || typeof symbol.id !== "string") continue;
-				const caller = symbol.id;
+				const reached = direct.reached as unknown[];
+				if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT && context.references && paths) {
+					try {
+						const refs = await context.references.query({ type: "references", symbol: target }, paths);
+						// The graph's trace follows every kind of use, type references and JSX included, so the fallback does too.
+						for (const node of refs.nodes) {
+							if (!node.in) continue;
+							const caller = paths.inputToProjectHandle(node.in.handle);
+							const file = paths.inputToProjectPath(node.file);
+							let content = lines.get(file);
+							if (!content) {
+								content = (await readFile(resolve(paths.project, file), "utf8")).split(/\r\n|\n|\r/);
+								lines.set(file, content);
+							}
+							const byte = (column: number) =>
+								Buffer.byteLength((content[node.line! - 1] ?? "").slice(0, column - 1), "utf8") + 1;
+							add(
+								caller,
+								target,
+								{
+									from: caller,
+									to: target,
+									kind: !node.call
+										? "references"
+										: node.call.line === node.line && node.text?.slice(node.call.col - 1).startsWith("new ")
+											? "instantiates"
+											: "calls",
+									evidence: {
+										file,
+										startLine: node.line,
+										startCol: byte(node.col!),
+										endLine: node.line,
+										endCol: byte(node.endCol!),
+									},
+								},
+								level,
+							);
+						}
+					} catch {
+						skipped++;
+					}
+					continue;
+				}
+				if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT) {
+					truncated = true;
+					unresolvedHub = true;
+				}
+				for (const item of reached) {
+					const symbol = object(item);
+					if (!symbol || typeof symbol.id !== "string") continue;
+					const caller = symbol.id;
+					for (const hop of Array.isArray(direct.hops) ? direct.hops : []) {
+						const edge = object(hop);
+						if (edge?.from === caller && edge.to === target) add(caller, target, edge, level, symbol);
+					}
+				}
 				for (const hop of Array.isArray(direct.hops) ? direct.hops : []) {
 					const edge = object(hop);
-					if (edge?.from === caller && edge.to === target) add(caller, target, edge, level, symbol);
+					if (edge?.from === start && edge.to === target) edges.set(JSON.stringify(edge), edge);
 				}
 			}
-			for (const hop of Array.isArray(direct.hops) ? direct.hops : []) {
-				const edge = object(hop);
-				if (edge?.from === start && edge.to === target) edges.set(JSON.stringify(edge), edge);
+			// A symbol used this widely reaches much of the codebase within a few levels, which is slow to walk and
+			// too long to read, so without an explicit depth its direct users answer.
+			if (frontier[0] === start && typeof request.maxDepth !== "number" && depth.size - 1 > GRAPH_TRACE_LIMIT) {
+				maxDepth = 1;
+				hubDepth = true;
 			}
 		}
 		const completed = await normalizeResult(
@@ -242,7 +303,11 @@ async function completeTrace(
 				: truncated
 					? `stopped at ${limit} symbols; trace from a narrower symbol`
 					: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through graph traces`
-		}${skipped ? `; ${skipped} ${skipped === 1 ? "symbol" : "symbols"} skipped` : ""}`;
+		}${skipped ? `; ${skipped} ${skipped === 1 ? "symbol" : "symbols"} skipped` : ""}${
+			hubDepth
+				? `; only direct users are shown, since there are more than ${GRAPH_TRACE_LIMIT}; pass maxDepth to follow their users too`
+				: ""
+		}`;
 	} else if ((asked !== undefined && asked >= GRAPH_TRACE_LIMIT) || model.shown >= GRAPH_TRACE_LIMIT) {
 		delete model.raise;
 		model.note = `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`;

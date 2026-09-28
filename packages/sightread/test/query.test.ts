@@ -23,6 +23,7 @@ const client: GraphClient = {
 };
 const requests = [{ type: "lookup" }, { type: "escape" }];
 const callerHandle = (index: number) => `src/a.ts#caller${index}:function`;
+const symbol = (id: string) => ({ id, name: id.split("#")[1].split(":")[0], file: "src/a.ts", kind: "function" });
 
 test("batch returns input order with numbered headers", async () => {
 	expect(await runQuery({ client, ranges }, requests, { json: false })).toBe(
@@ -205,9 +206,49 @@ test("reverse trace honors maxNodes, maxDepth, and counts unresolved symbols", a
 	// One level: the chain's first caller, the missing symbol and the forty leaves.
 	expect((await ask(undefined, 1)).shown).toBe(42);
 	expect((await ask(undefined, 2)).shown).toBe(43);
-	// Like the graph's own trace, three levels by default and never more than eight.
-	const complete = await ask();
+	// With more direct users than the graph's limit, the default is one level; asked, never more than eight.
+	expect((await ask()).shown).toBe(42);
+	expect((await ask()).note).toContain("only direct users are shown");
+	const complete = await ask(undefined, 3);
 	expect(complete.shown).toBe(44);
 	expect(complete.note).toContain("1 symbol skipped");
 	expect((await ask(undefined, 20)).shown).toBe(49);
+});
+
+test("a start with exactly the graph's limit of direct users keeps the default depth", async () => {
+	const target = "src/a.ts#target:function";
+	const direct = Array.from({ length: 32 }, (_, index) => `src/a.ts#direct${index}:function`);
+	const traceClient: GraphClient = {
+		...client,
+		query: async (request) => {
+			const from = String(request.from);
+			if (request.maxDepth !== 1)
+				return {
+					value: { result: { type: "trace", start: symbol(target), reached: [], truncated: true } },
+					isError: false,
+				};
+			// Each direct user has a caller of its own, so the graph flags the one-level trace as truncated.
+			const callers = from === target ? direct : from.includes("#direct") ? [from.replace("direct", "outer")] : [];
+			return {
+				value: {
+					result: {
+						type: "trace",
+						reached: callers.map(symbol),
+						hops: callers.map((caller) => ({ from: caller, to: from, kind: "calls" })),
+						truncated: from === target,
+					},
+				},
+				isError: false,
+			};
+		},
+	};
+	const [result] = JSON.parse(
+		await runQuery(
+			{ client: traceClient, ranges, root: "/tmp" },
+			[{ type: "trace", from: target, direction: "reverse" }],
+			{ mode: "json" },
+		),
+	) as Array<{ nodes: Array<{ name: string }>; note?: string }>;
+	expect(result.nodes.map(({ name }) => name)).toContain("outer0");
+	expect(result.note).not.toContain("only direct users");
 });

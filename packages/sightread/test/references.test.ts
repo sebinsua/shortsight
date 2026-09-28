@@ -363,7 +363,11 @@ for (const [name, contents] of Object.entries(wideFiles)) {
 }
 
 test("a reverse trace past the graph's limit follows graph callers after its hub", () => {
-	const output = runIn(wide, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" }));
+	const output = runIn(
+		wide,
+		"--json",
+		JSON.stringify({ type: "trace", from: "target", direction: "reverse", maxDepth: 3 }),
+	);
 	expect(output.code).toBe(0);
 	const [result] = JSON.parse(output.out) as Array<{
 		shown: number;
@@ -394,10 +398,24 @@ test("a reverse trace past the graph's limit follows graph callers after its hub
 	);
 	expect(result.nodes.find(({ name }) => name === "outer1")?.exported).toBeUndefined();
 	expect(result.nodes.find(({ name }) => name === "outer0")?.exported).toBe(true);
-	const text = runIn(wide, JSON.stringify({ type: "trace", from: "target", direction: "reverse" })).out;
+	const text = runIn(wide, JSON.stringify({ type: "trace", from: "target", direction: "reverse", maxDepth: 3 })).out;
 	expect(text).toStartWith(`trace reverse from target: ${result.shown} shown\n`);
 	expect(text).toEndWith(
 		"note: complete: past the graph's 32-symbol limit, callers were followed through graph traces",
+	);
+});
+
+test("a reverse trace from a hub shows its direct users unless asked to go deeper", () => {
+	const [result] = JSON.parse(
+		runIn(wide, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" })).out,
+	) as Array<{ nodes: Array<{ name: string }>; note?: string }>;
+	const names = new Set(result.nodes.map(({ name }) => name));
+	for (let index = 0; index < 40; index++) {
+		expect(names.has(`direct${index}`)).toBe(true);
+		expect(names.has(`outer${index}`)).toBe(false);
+	}
+	expect(result.note).toBe(
+		"complete: past the graph's 32-symbol limit, callers were followed through graph traces; only direct users are shown, since there are more than 32; pass maxDepth to follow their users too",
 	);
 });
 
@@ -446,7 +464,11 @@ test("a nested project keeps repository handles through the complete graph walk"
 	}
 	Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
 	try {
-		const output = runIn(client, "--json", JSON.stringify({ type: "trace", from: "target", direction: "reverse" }));
+		const output = runIn(
+			client,
+			"--json",
+			JSON.stringify({ type: "trace", from: "target", direction: "reverse", maxDepth: 2 }),
+		);
 		expect(output.code).toBe(0);
 		const [result] = JSON.parse(output.out) as Array<{ nodes: Array<{ handle: string }> }>;
 		expect(result.nodes.map(({ handle }) => handle)).toContain("client/src/callers.ts#outer:function");
@@ -536,7 +558,7 @@ test("includeDeclaration includes every overload of the same symbol", () => {
 	expect(merged.nodes.filter((node) => node.file === "src/overloads.ts").map((node) => node.line)).toEqual([4, 5]);
 });
 
-test("a completed trace goes as deep as the graph's own trace: three levels, or maxDepth", () => {
+test("a completed trace from a hub stops at its direct users unless maxDepth says how deep", () => {
 	const fixture = createFixtureProject({
 		"src/target.ts": "export function target() {}\n",
 		"src/callers.ts": [
@@ -559,8 +581,11 @@ test("a completed trace goes as deep as the graph's own trace: three levels, or 
 		).nodes.map(({ name }) => name);
 	try {
 		const standard = names({});
-		expect(standard).toEqual(expect.arrayContaining(["direct0", "second", "third"]));
-		expect(standard).not.toContain("fourth");
+		expect(standard).toContain("direct0");
+		expect(standard).not.toContain("second");
+		const three = names({ maxDepth: 3 });
+		expect(three).toEqual(expect.arrayContaining(["direct0", "second", "third"]));
+		expect(three).not.toContain("fourth");
 		expect(names({ maxDepth: 4 })).toContain("fourth");
 	} finally {
 		runIn(fixture.root, "stop");
