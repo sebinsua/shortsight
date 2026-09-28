@@ -37,21 +37,32 @@ changes no task uses.
 
 ### sightread
 
-Latest runs, after the skills stopped mirroring tasks: `openai-codex/gpt-5.6-sol`, high reasoning, outcome
-prompts, two attempts per cell, `--skills shorthand`. Every attempt verified with zero drift. Times are means;
-two attempts are too few to separate gaps of a few seconds from noise.
+Latest run, 2026-09-28 at bcfb74d (after v0.11.0): `openai-codex/gpt-5.6-sol`, high reasoning, outcome
+prompts, two attempts per cell, `--skills shorthand`, results in `results/sightread-sol-2026-09-28`. All 32
+attempts verified with zero drift. Times are means, with the previous round (2026-09-26) in brackets. The two
+attempts in a cell differed by up to 42s, so only large gaps mean anything.
 
-| Task               | Files | Stock | Stock + sightread | Shorthand | Shorthand + sightread |
-| ------------------ | ----: | ----: | ----------------: | --------: | --------------------: |
-| `impact-report`    |    10 |   19s |               18s |       29s |                   19s |
-| `method-migration` |    10 |   45s |               47s |       60s |                   44s |
-| `impact-report`    |   100 |   50s |               44s |       48s |                   41s |
-| `method-migration` |   100 |   67s |              134s |       71s |                   52s |
+| Task               | Files |     Stock | Stock + sightread | Shorthand | Shorthand + sightread |
+| ------------------ | ----: | --------: | ----------------: | --------: | --------------------: |
+| `impact-report`    |    10 | 26s (19s) |         17s (18s) | 25s (29s) |             20s (19s) |
+| `method-migration` |    10 | 39s (45s) |         50s (47s) | 56s (60s) |             49s (44s) |
+| `impact-report`    |   100 | 35s (50s) |         53s (44s) | 70s (48s) |             39s (41s) |
+| `method-migration` |   100 | 97s (67s) |        64s (134s) | 78s (71s) |             83s (52s) |
 
-The 10-file impact rows overlapped with another benchmark run on the same machine, so their times are rough.
-In the stock 100-file migration, agents script 115 edits and look for a TypeScript parser the fixture's
-TypeScript 7 doesn't provide; `references` has since added call and argument ranges for that, not yet
-re-measured. Earlier rounds, and what each change fixed, are in the commit history from 04f244d.
+In the stock 100-file migration, sightread's `references` call and argument ranges now carry the whole edit:
+agents script it from `--json` output instead of hunting for a TypeScript parser, halving the previous time.
+
+The 100-file impact report is slower with sightread than without it in stock, and needs more turns in both
+setups (8–8.5 against 5–7 before). `applyDiscount` has 46 direct callers, more than the graph's 32-symbol
+limit, so since 8b14640 the default reverse trace stops at those callers and says `truncated; raise
+trace.maxDepth`. In all four sightread attempts the agent then ran `sightread --help` to find the field and
+traced again with `maxDepth` (8–50), adding two turns. The previous round answered it in one trace.
+
+The shorthand + sightread 100-file migration has one slow attempt (104s): its program applied all 100 files in
+one call, then the agent spent nine more shell calls checking the result, including reading truncated shell output
+back from Pi's log. The other took 62s. The 10-file impact rows of the previous
+round overlapped with another benchmark run, so their times are rough. Earlier rounds, and what each change
+fixed, are in the commit history from 04f244d.
 
 ## Layout
 
