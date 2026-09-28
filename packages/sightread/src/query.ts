@@ -54,9 +54,13 @@ function filterIn(result: GraphResult, directory: string): GraphResult {
 		}
 		return value;
 	};
+	// Trace hops refer to edges by index, and so does each of details' neighbour lists.
+	const edgeList = (key: string, value: unknown) =>
+		key === "hops" ||
+		(result.type === "details" && Array.isArray(value) && value.every((item) => typeof item === "number"));
 	const sections = Object.fromEntries(
 		Object.entries(result.sections)
-			.map(([key, value]) => [key, filter(value, key === "hops")])
+			.map(([key, value]) => [key, filter(value, edgeList(key, value))])
 			.filter(([, value]) => value !== undefined),
 	);
 	const primary = ["hits", "entrypoints", "nodes", "reached", "hops", "files", "tests"].find((key) =>

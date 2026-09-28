@@ -252,3 +252,44 @@ test("a start with exactly the graph's limit of direct users keeps the default d
 	expect(result.nodes.map(({ name }) => name)).toContain("outer0");
 	expect(result.note).not.toContain("only direct users");
 });
+
+test("--in keeps each details neighbour list pointing at its own edges", async () => {
+	const neighbour = (id: string, relation: string, line: number) => ({
+		...symbol(id),
+		file: id.split("#")[0],
+		relation,
+		evidence: { file: id.split("#")[0], startLine: line, startCol: 1, endLine: line, endCol: 2 },
+	});
+	const detailsClient: GraphClient = {
+		...client,
+		query: async () => ({
+			value: {
+				result: {
+					type: "details",
+					nodes: [
+						{
+							...symbol("src/a.ts#get:function"),
+							calls: [neighbour("src/a.ts#normalise:function", "calls", 2)],
+							dependedOnBy: [
+								neighbour("src/b.ts#outside:function", "calls", 3),
+								neighbour("src/a.ts#inside:function", "calls", 4),
+							],
+						},
+					],
+				},
+			},
+			isError: false,
+		}),
+	};
+	const [result] = JSON.parse(
+		await runQuery(
+			{ client: detailsClient, ranges, root: "/tmp" },
+			[{ type: "details", handles: ["src/a.ts#get:function"], neighbors: true }],
+			{ mode: "json", in: "src/a.ts" },
+		),
+	) as Array<{ edges: Array<{ from: string; to: string }>; sections: Record<string, number[]> }>;
+	const named = (key: string) =>
+		result.sections[key].map((index) => `${result.edges[index].from} → ${result.edges[index].to}`);
+	expect(named("calls")).toEqual(["src/a.ts#get:function → src/a.ts#normalise:function"]);
+	expect(named("dependedOnBy")).toEqual(["src/a.ts#inside:function → src/a.ts#get:function"]);
+});
