@@ -95,6 +95,8 @@ export const omittedKeys = [
 ] as const;
 
 const omitted = new Set<string>(omittedKeys);
+// Neighbour lists that name what uses a symbol, rather than what it uses.
+const incoming = new Set(["dependedOnBy", "implementedBy", "calledBy", "referencedBy"]);
 const primaryLists = ["hits", "entrypoints", "hotspots", "publicApi", "nodes", "reached", "hops", "files", "tests"];
 const requests = new WeakMap<GraphResult, Record<string, unknown>>();
 
@@ -118,10 +120,10 @@ async function evidenceLines(value: unknown, root: string): Promise<Map<string, 
 		const item = object(nested);
 		if (!item) return;
 		const evidence = object(item.evidence);
+		// Edges, and the neighbours details lists with a relation, carry byte columns to convert.
 		if (
-			typeof item.from === "string" &&
-			typeof item.to === "string" &&
-			typeof item.kind === "string" &&
+			((typeof item.from === "string" && typeof item.to === "string" && typeof item.kind === "string") ||
+				typeof item.relation === "string") &&
 			typeof evidence?.file === "string" &&
 			typeof evidence.startCol === "number" &&
 			typeof evidence.endCol === "number"
@@ -256,6 +258,69 @@ export async function normalizeResult(
 		const ref = fromHandle(handle);
 		if (ref) addSymbol({ id: handle, ...ref });
 	};
+	const addEdge = (from: string, to: string, kind: string, evidence: Record<string, unknown> | undefined): number => {
+		const lines = typeof evidence?.file === "string" ? linesByFile.get(evidence.file) : undefined;
+		const startLine = evidence?.startLine;
+		const endLine = evidence?.endLine;
+		const col =
+			lines && typeof startLine === "number" && typeof evidence?.startCol === "number"
+				? utf16Column(lines[startLine - 1] ?? "", evidence.startCol)
+				: undefined;
+		const endCol =
+			lines && typeof endLine === "number" && typeof evidence?.endCol === "number"
+				? utf16Column(lines[endLine - 1] ?? "", evidence.endCol)
+				: undefined;
+		const edge: GraphEdge = {
+			from: paths?.toRepositoryHandle(from) ?? from,
+			to: paths?.toRepositoryHandle(to) ?? to,
+			kind,
+			...(typeof evidence?.file === "string" && typeof evidence.startLine === "number"
+				? {
+						at: {
+							file: paths?.toRepositoryPath(evidence.file) ?? evidence.file,
+							line: evidence.startLine,
+							...(col !== undefined && endCol !== undefined && typeof endLine === "number"
+								? { col, endLine, endCol }
+								: {}),
+						},
+					}
+				: {}),
+		};
+		const key = JSON.stringify(edge);
+		let index = edgeKeys.get(key);
+		if (index === undefined) {
+			index = edges.length;
+			edges.push(edge);
+			edgeKeys.set(key, index);
+		}
+		return index;
+	};
+	// A details node lists what it uses and what uses it as symbols carrying a relation, and its members without a
+	// file. Keep them as edges and member symbols, gathered per list across every node.
+	const neighbours = new Map<string, unknown[]>();
+	const members: Record<string, unknown>[] = [];
+	const addNeighbours = (item: Record<string, unknown>) => {
+		const from = typeof item.id === "string" ? item.id : undefined;
+		for (const [key, list] of Object.entries(item)) {
+			if (!Array.isArray(list)) continue;
+			const entries = list.flatMap((entry): unknown[] => {
+				const neighbour = object(entry);
+				if (!neighbour) return [];
+				if (key === "members") {
+					members.push({ file: item.file, ...neighbour });
+					return [];
+				}
+				if (!from || typeof neighbour.id !== "string" || typeof neighbour.relation !== "string") return [];
+				addSymbol(neighbour);
+				return [
+					incoming.has(key)
+						? addEdge(neighbour.id, from, neighbour.relation, object(neighbour.evidence))
+						: addEdge(from, neighbour.id, neighbour.relation, object(neighbour.evidence)),
+				];
+			});
+			if (entries.length) neighbours.set(key, [...new Set([...(neighbours.get(key) ?? []), ...entries])]);
+		}
+	};
 	const walk = (value: unknown): unknown => {
 		if (Array.isArray(value)) {
 			const entries = value.map(walk).filter((entry) => entry !== undefined);
@@ -266,45 +331,13 @@ export async function normalizeResult(
 		if (typeof item.from === "string" && typeof item.to === "string" && typeof item.kind === "string") {
 			addEndpoint(item.from);
 			addEndpoint(item.to);
-			const evidence = object(item.evidence);
-			const lines = typeof evidence?.file === "string" ? linesByFile.get(evidence.file) : undefined;
-			const startLine = evidence?.startLine;
-			const endLine = evidence?.endLine;
-			const col =
-				lines && typeof startLine === "number" && typeof evidence?.startCol === "number"
-					? utf16Column(lines[startLine - 1] ?? "", evidence.startCol)
-					: undefined;
-			const endCol =
-				lines && typeof endLine === "number" && typeof evidence?.endCol === "number"
-					? utf16Column(lines[endLine - 1] ?? "", evidence.endCol)
-					: undefined;
-			const edge: GraphEdge = {
-				from: paths?.toRepositoryHandle(item.from) ?? item.from,
-				to: paths?.toRepositoryHandle(item.to) ?? item.to,
-				kind: item.kind,
-				...(typeof evidence?.file === "string" && typeof evidence.startLine === "number"
-					? {
-							at: {
-								file: paths?.toRepositoryPath(evidence.file) ?? evidence.file,
-								line: evidence.startLine,
-								...(col !== undefined && endCol !== undefined && typeof endLine === "number"
-									? { col, endLine, endCol }
-									: {}),
-							},
-						}
-					: {}),
-			};
-			const key = JSON.stringify(edge);
-			let index = edgeKeys.get(key);
-			if (index === undefined) {
-				index = edges.length;
-				edges.push(edge);
-				edgeKeys.set(key, index);
-			}
-			return index;
+			return addEdge(item.from, item.to, item.kind, object(item.evidence));
 		}
 		const handle = addSymbol(item);
-		if (handle) return handle;
+		if (handle) {
+			addNeighbours(item);
+			return handle;
+		}
 		const result: Record<string, unknown> = {};
 		for (const [key, nested] of Object.entries(item)) {
 			if (omitted.has(key) || (key === "steps" && item.hops !== undefined)) continue;
@@ -327,6 +360,15 @@ export async function normalizeResult(
 			);
 		if (converted !== undefined) sections[key] = converted;
 	}
+	// A member can also be a neighbour, under another kind (a property the graph calls a variable), so add members
+	// last and reuse the neighbour's node.
+	for (const member of members) {
+		const file = paths?.toRepositoryPath(String(member.file)) ?? member.file;
+		const handle =
+			[...nodes.values()].find((node) => node.file === file && node.name === member.name)?.handle ?? addSymbol(member);
+		if (handle) neighbours.set("members", [...new Set([...(neighbours.get("members") ?? []), handle])]);
+	}
+	for (const [key, entries] of neighbours) if (sections[key] === undefined) sections[key] = entries;
 	const step = /^(.+?) -\[([A-Za-z]+) at ([^:\]\n]+):([1-9]\d*)\]-> (.+)$/;
 	const convertSteps = (value: unknown): unknown => {
 		if (Array.isArray(value)) return value.map(convertSteps);

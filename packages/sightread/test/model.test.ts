@@ -136,6 +136,65 @@ test("tour steps become edges only when both declaration names resolve uniquely"
 	expect(renderText(result, { color: false })).toContain("unknown -[calls at src/x.ts:2]-> greet");
 });
 
+const neighbour = (id: string, name: string, kind: string, relation: string, line: number) => ({
+	id,
+	name,
+	kind,
+	file: "src/x.ts",
+	relation,
+	line,
+	evidence: { file: "src/x.ts", startLine: line, startCol: 1, endLine: line, endCol: 2 },
+});
+
+test("details keeps what a method calls and accesses, what uses it, and its class's members once each", async () => {
+	const result = await normalizeResult(
+		{ type: "details", handles: ["src/x.ts#A:class", "src/x.ts#A.sayHello:method"] },
+		{
+			result: {
+				type: "details",
+				nodes: [
+					{
+						id: "src/x.ts#A:class",
+						name: "A",
+						kind: "class",
+						file: "src/x.ts",
+						line: 2,
+						members: [
+							{ name: "A.sayHello", kind: "method", line: 2 },
+							{ name: "A.count", kind: "property", line: 2 },
+						],
+					},
+					{
+						id: "src/x.ts#A.sayHello:method",
+						name: "A.sayHello",
+						kind: "method",
+						file: "src/x.ts",
+						line: 2,
+						calls: [
+							neighbour("src/x.ts#greet:function", "greet", "function", "calls", 1),
+							neighbour("src/x.ts#A.count:variable", "A.count", "property", "accesses", 2),
+						],
+						dependedOnBy: [neighbour("src/x.ts#B.sayHello:method", "B.sayHello", "method", "calls", 3)],
+					},
+				],
+			},
+		},
+		ranges,
+	);
+	const edges = (key: string) =>
+		(result.sections[key] as number[]).map((index) => {
+			const { from, to, kind } = result.edges[index];
+			return `${from} -${kind}-> ${to}`;
+		});
+	expect(edges("calls")).toEqual([
+		"src/x.ts#A.sayHello:method -calls-> src/x.ts#greet:function",
+		"src/x.ts#A.sayHello:method -accesses-> src/x.ts#A.count:variable",
+	]);
+	expect(edges("dependedOnBy")).toEqual(["src/x.ts#B.sayHello:method -calls-> src/x.ts#A.sayHello:method"]);
+	expect(result.sections.members).toEqual(["src/x.ts#A.sayHello:method", "src/x.ts#A.count:variable"]);
+	expect(result.nodes.filter(({ name }) => name === "A.count")).toHaveLength(1);
+});
+
 test("names resolve in one live lookup batch; ambiguous and unknown names suggest handles", async () => {
 	let batches = 0;
 	const counted: GraphClient = {

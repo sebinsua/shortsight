@@ -39,7 +39,7 @@ beforeAll(async () => {
 	for (const request of [
 		{ type: "lookup", query: "greet", limit: 3 },
 		{ type: "trace", from: "src/model.ts#greet:function", direction: "reverse", maxNodes: 6 },
-		{ type: "details", handles: ["src/model.ts#greet:function"], neighbors: true },
+		{ type: "details", handles: ["src/model.ts#greet:function", "src/model.ts#Greeter:class"], neighbors: true },
 		{ type: "tour", reinterpretations: ["greet"], limit: 2 },
 		{ type: "overview", aspect: "all" },
 	]) {
@@ -81,9 +81,23 @@ test("reverse trace text is complete and each edge has one evidence line", () =>
 	);
 });
 
-test("details text is complete", () => {
+test("details text is complete, with members and what uses each symbol", () => {
 	expect(outputs.get("details")).toBe(
-		["details: 1 shown", "", "src/model.ts", "  1-1  greet  exported function"].join("\n"),
+		[
+			"details: 2 shown",
+			"",
+			"src/model.ts",
+			"            1-1  greet             exported function",
+			"            2-2  caller            exported function",
+			"            3-7  Greeter           exported class",
+			"  4-4, 5-5, 6-6  Greeter.sayHello  method",
+			"",
+			"dependedOnBy",
+			"  caller → greet  calls at model.ts:2",
+			"",
+			"members",
+			"  Greeter.sayHello",
+		].join("\n"),
 	);
 });
 
