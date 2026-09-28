@@ -6,6 +6,8 @@ import { relative, resolve, sep } from "node:path";
 
 const runFile = promisify(execFile);
 const types = ["*.ts", "*.tsx", "*.mts", "*.cts"];
+// User config can change prefixes, paths and colour in diff output, or hand it to another program; pin what the parser reads.
+const plainDiff = ["--no-ext-diff", "--no-color", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
 export const isTypeScript = (file: string) => /\.(?:ts|tsx|mts|cts)$/.test(file);
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -96,6 +98,23 @@ async function defaultBase(repository: string): Promise<{ revision: string; ref:
 	return { revision: (await git(repository, ["rev-parse", "HEAD"])).trim(), ref: "HEAD", note };
 }
 
+/**
+ * Compare from where HEAD and the given base diverged, like `git diff <base>...`, so commits the base gained
+ * since the branch left it don't show as changes here.
+ */
+async function givenBase(
+	repository: string,
+	base: string,
+): Promise<{ revision: string; ref: undefined; note?: string }> {
+	const tip = (await git(repository, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+	const revision = (await git(repository, ["merge-base", "HEAD", tip]).catch(() => tip)).trim();
+	const note =
+		revision === tip
+			? undefined
+			: `${base} isn't an ancestor of HEAD; this compares from their merge base, ${revision.slice(0, 12)}.`;
+	return { revision, ref: undefined, note };
+}
+
 /** Resolve the revision and enumerate all paths, including untracked and renamed files. */
 export async function readGitChanges(projectRoot: string, base?: string): Promise<GitChanges> {
 	const repository = await realpath((await git(projectRoot, ["rev-parse", "--show-toplevel"])).trim());
@@ -104,13 +123,7 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 		revision,
 		ref: baseRef,
 		note: baseNote,
-	} = base
-		? {
-				revision: (await git(repository, ["rev-parse", "--verify", `${base}^{commit}`])).trim(),
-				ref: undefined,
-				note: undefined,
-			}
-		: await defaultBase(repository);
+	} = base ? await givenBase(repository, base) : await defaultBase(repository);
 	const project = relative(repository, root).replaceAll(sep, "/") || ".";
 	const projectPath = (file: string) => {
 		const absolute = resolve(repository, file);
@@ -119,7 +132,9 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 			? { outside: true }
 			: { path: local, outside: false };
 	};
-	const names = (await git(repository, ["diff", "--name-status", "-z", "-M", revision, "--"])).split("\0");
+	const names = (await git(repository, ["diff", ...plainDiff, "--name-status", "-z", "-M", revision, "--"])).split(
+		"\0",
+	);
 	const files: GitFile[] = [];
 	for (let index = 0; index < names.length && names[index];) {
 		const status = names[index++];
@@ -134,7 +149,7 @@ export async function readGitChanges(projectRoot: string, base?: string): Promis
 	)) {
 		if (file && !tracked.has(file)) files.push({ path: path(file), status: "untracked", hunks: [] });
 	}
-	const patch = await git(repository, ["diff", "-U0", "-M", revision, "--", ...types]);
+	const patch = await git(repository, ["diff", ...plainDiff, "-U0", "-M", revision, "--", ...types]);
 	let current: GitFile | undefined;
 	for (const line of patch.split("\n")) {
 		if (line.startsWith("+++ b/") || line.startsWith('+++ "b/'))

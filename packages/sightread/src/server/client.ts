@@ -140,6 +140,12 @@ async function pathFromDirectory(directory: string): Promise<ServerPaths | undef
 
 const startTimeout = 30_000;
 
+let announceStart: ((project: Project) => void) | undefined;
+/** Say when a request has to start a server first, since that request takes much longer than the rest. */
+export function onServerStart(announce: (project: Project) => void): void {
+	announceStart = announce;
+}
+
 function pidAlive(pid: number): boolean {
 	if (!Number.isInteger(pid) || pid <= 0) return false;
 	try {
@@ -206,6 +212,7 @@ async function evictQuiet(current: string): Promise<void> {
 }
 
 async function start(paths: ServerPaths, project: Project, signature: string): Promise<Ping> {
+	announceStart?.(project);
 	await withStartLock(join(paths.parent, "start.lock"), async () => {
 		await evictQuiet(paths.directory);
 		await writeFile(

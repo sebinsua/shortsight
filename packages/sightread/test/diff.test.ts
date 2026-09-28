@@ -198,6 +198,41 @@ test("whitespace removed inside a string literal is an edit", async () => {
 	]);
 }, 30_000);
 
+test("diff config that changes patch prefixes, paths or colour doesn't hide changes", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	for (const [key, value] of [
+		["diff.mnemonicPrefix", "true"],
+		["diff.noprefix", "true"],
+		["diff.relative", "true"],
+		["color.diff", "always"],
+	])
+		git(f.repo, "config", key, value);
+	f.put("client/src/api.ts", "export function value() { return 2; }\n");
+	const changes = await readGitChanges(f.root, "HEAD");
+	expect(changes.files.map(({ path, hunks }) => [path, hunks.length])).toEqual([["client/src/api.ts", 1]]);
+});
+
+test("a given base that has moved on compares from the merge base", async () => {
+	const f = fixture({ "client/src/api.ts": "export function value() { return 1; }\n" });
+	git(f.repo, "branch", "-m", "trunk");
+	git(f.repo, "checkout", "-qb", "feature");
+	f.put("client/src/feature.ts", "export function feature() { return 1; }\n");
+	git(f.repo, "add", ".");
+	git(f.repo, "commit", "-qm", "feature");
+	git(f.repo, "checkout", "-q", "trunk");
+	f.put("client/src/later.ts", "export function later() { return 1; }\n");
+	git(f.repo, "add", ".");
+	git(f.repo, "commit", "-qm", "trunk moves on");
+	git(f.repo, "checkout", "-q", "feature");
+	const changes = await readGitChanges(f.root, "trunk");
+	expect(changes.base).toBe(f.sha);
+	expect(changes.files.map(({ path, status }) => [path, status])).toEqual([["client/src/feature.ts", "added"]]);
+	expect(changes.baseNote).toBe(
+		`trunk isn't an ancestor of HEAD; this compares from their merge base, ${f.sha.slice(0, 12)}.`,
+	);
+	expect((await readGitChanges(f.root, "HEAD~1")).baseNote).toBeUndefined();
+});
+
 test("a pure deletion inside a method selects the method", async () => {
 	const f = fixture({
 		"client/src/box.ts": "export class Box {\n\tvalue() {\n\t\tconst a = 1;\n\t\tconst b = 2;\n\t\treturn a;\n\t}\n}\n",

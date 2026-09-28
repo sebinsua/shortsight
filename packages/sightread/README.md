@@ -47,11 +47,11 @@ Pass an array to ask several questions at once. The requests you'll use most:
 - `tour` and `overview` sketch a feature or the whole project.
 - `lookup` finds symbols when you only half know the name.
 
-`sightread --help` lists every field, with examples. Names work wherever a request asks for a symbol, and paths are relative to the repository, so you can pass them straight to other tools. Add `--json` for scripts, or `--in packages/api` to keep results to one part of a monorepo.
+`sightread --help` lists every field, with examples. Names work wherever a request asks for a symbol, `symbol` names it in any request, and paths are relative to the repository, so you can pass them straight to other tools. Add `--json` for scripts, or `--in packages/api` to keep results to one part of a monorepo.
 
 ## What a branch changes
 
-`sightread diff [base]` lists the declarations changed since `base` (by default, where your branch left the default branch, or your uncommitted changes when you are on it), what calls them, and the tests that use them:
+`sightread diff [base]` lists the declarations changed since your branch left `base` (by default, the default branch, or your uncommitted changes when you are on it), what calls them, and the tests that use them:
 
 ```
 diff against main (1f2b8f79e012): formatPrice edited · used by 2 · tested by 0 files

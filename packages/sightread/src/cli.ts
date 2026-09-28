@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDiff } from "./diff/index.ts";
 import { DiscoveryError, findProject, type Project } from "./project.ts";
-import { connect, listServers, ServerRequestError, stopAllServers, stopServer } from "./server/client.ts";
+import {
+	connect,
+	listServers,
+	onServerStart,
+	ServerRequestError,
+	stopAllServers,
+	stopServer,
+} from "./server/client.ts";
 import { runDaemon } from "./server/daemon.ts";
 
 const usage = `sightread [--cwd DIR] [--in DIR] [--json | --raw] '<JSON request or array>'
@@ -170,6 +177,10 @@ async function main(args: string[]): Promise<string> {
 	return query(cwd, requests as Record<string, unknown>[], raw ? "raw" : json ? "json" : "text", within);
 }
 
+// Without this, an agent waiting on a cold start sees nothing and may assume the command hung.
+onServerStart((project) =>
+	console.error(`sightread: starting a server for ${project.root}; the first request may take a while`),
+);
 try {
 	const output = await main(process.argv.slice(2));
 	if (process.argv[2] !== "--daemon") {

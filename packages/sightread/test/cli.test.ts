@@ -78,11 +78,17 @@ test("ambiguous handles remain complete past the ordinary error limit", () => {
 	try {
 		const output = run("--cwd", large.root, '{"type":"trace","from":"duplicateName","direction":"reverse"}');
 		expect(output.err).toBe(
-			`sightread: duplicateName is ambiguous; use a handle: ${Array.from(
+			`sightread: starting a server for ${large.root}; the first request may take a while\nsightread: duplicateName is ambiguous; use a handle: ${Array.from(
 				{ length: 6 },
-				(_, index) => `src/long-directory-for-component-${index}/file.ts#duplicateName:function`,
+				(_, index) => `src/long-directory-for-component-${index}/file.ts#duplicateName`,
 			).join(", ")}`,
 		);
+		const suggested = run(
+			"--cwd",
+			large.root,
+			'{"type":"trace","from":"src/long-directory-for-component-0/file.ts#duplicateName","direction":"reverse"}',
+		);
+		expect(suggested).toMatchObject({ code: 0, err: "" });
 	} finally {
 		run("--cwd", large.root, "stop");
 		large.cleanup();

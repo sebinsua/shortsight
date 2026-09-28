@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { normalizeResult, omittedKeys } from "../src/model.ts";
-import { resolveNames } from "../src/names.ts";
+import { resolveNames, resolveNamesSettled } from "../src/names.ts";
 import { createRangeIndex, type RangeIndex } from "../src/ranges.ts";
 import { renderText } from "../src/render.ts";
 import { startGraphClient, type GraphClient } from "../src/upstream.ts";
@@ -157,7 +157,7 @@ test("names resolve in one live lookup batch; ambiguous and unknown names sugges
 		{ type: "trace", from: "src/x.ts#greet:function" },
 	]);
 	await expect(resolveNames(client, [{ type: "trace", from: "sayHello" }])).rejects.toThrow(
-		"sayHello is ambiguous; use a handle: src/x.ts#A.sayHello:method, src/x.ts#B.sayHello:method",
+		"sayHello is ambiguous; use a handle: src/x.ts#A.sayHello, src/x.ts#B.sayHello",
 	);
 	await expect(resolveNames(client, [{ type: "trace", from: "gret" }])).rejects.toThrow(
 		"gret not found; nearest: src/x.ts#greet:function",
@@ -165,6 +165,25 @@ test("names resolve in one live lookup batch; ambiguous and unknown names sugges
 	await expect(resolveNames(client, [{ type: "trace", from: "Missing.greet" }])).rejects.toThrow(
 		"Missing.greet not found; nearest: src/x.ts#greet:function",
 	);
+});
+
+test("symbol names the target of every request type; another type's field says which it expected", async () => {
+	const settled = await resolveNamesSettled(client, [
+		{ type: "details", symbol: ["greet"] },
+		{ type: "trace", symbol: "greet" },
+		{ type: "references", symbol: ["greet"] },
+		{ type: "references", from: "greet" },
+		{ type: "details", from: "greet" },
+		{ type: "trace", symbol: ["greet", "greet"] },
+	]);
+	expect(settled).toEqual([
+		{ request: { type: "details", handles: ["src/x.ts#greet:function"] } },
+		{ request: { type: "trace", from: "src/x.ts#greet:function" } },
+		{ request: { type: "references", symbol: "src/x.ts#greet:function" } },
+		{ error: "references takes symbol, not from" },
+		{ error: "details takes handles or symbol, not from" },
+		{ error: "trace takes one symbol; got 2" },
+	]);
 });
 
 test("unknown names in an empty project have no empty nearest suffix", async () => {

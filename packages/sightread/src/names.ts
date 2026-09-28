@@ -32,14 +32,30 @@ function closeName(wanted: string, candidate: string): boolean {
 	return previous[right.length] <= limit;
 }
 
-// Agents carry `symbol` over from `references`; take it wherever a request names one symbol.
-function withAliases(request: Record<string, unknown>): Record<string, unknown> {
-	if (typeof request.symbol !== "string") return request;
+const symbolField: Record<string, string> = { details: "handles", trace: "from", references: "symbol" };
+
+// Each type names its symbol differently, so take `symbol` everywhere, and name the right field when a request
+// borrows another type's.
+function withAliases(request: Record<string, unknown>): Record<string, unknown> | Error {
+	const type = String(request.type);
+	const field = symbolField[type];
+	if (!field) return request;
 	const { symbol, ...rest } = request;
-	if (request.type === "details" && rest.handles === undefined) return { ...rest, handles: [symbol] };
-	if (request.type === "trace" && rest.from === undefined) return { ...rest, from: symbol };
-	return request;
+	const value = rest[field] ?? symbol;
+	if (value === undefined) {
+		const borrowed = Object.values(symbolField).find((name) => request[name] !== undefined);
+		return borrowed
+			? new Error(`${type} takes ${field === "symbol" ? "symbol" : `${field} or symbol`}, not ${borrowed}`)
+			: request;
+	}
+	if (field === "handles") return { ...rest, handles: Array.isArray(value) ? value : [value] };
+	if (!Array.isArray(value)) return { ...rest, [field]: value };
+	return value.length === 1
+		? { ...rest, [field]: value[0] }
+		: new Error(`${type} takes one symbol; got ${value.length}`);
 }
+
+const withoutKind = (handle: string) => handle.slice(0, handle.lastIndexOf(":"));
 
 // A name may carry its file, `src/lib/pricing.ts#applyDiscount`, to choose among same-named symbols.
 function qualified(value: string): [file: string, name: string] | undefined {
@@ -53,7 +69,12 @@ export async function resolveNamesSettled(
 	original: Record<string, unknown>[],
 	paths?: PathMapper,
 ): Promise<Array<{ request: Record<string, unknown> } | { error: string }>> {
-	const requests = original.map(withAliases);
+	const aliased = original.map(withAliases);
+	const requests = aliased.map((request) => (request instanceof Error ? {} : request));
+	const settle = (request: Record<string, unknown>, index: number) => {
+		const alias = aliased[index];
+		return alias instanceof Error ? { error: alias.message } : { request: convertHandles(request, paths) };
+	};
 	const names = [
 		...new Set(
 			requests.flatMap((request) =>
@@ -66,7 +87,7 @@ export async function resolveNamesSettled(
 			),
 		),
 	];
-	if (!names.length) return requests.map((request) => ({ request: convertHandles(request, paths) }));
+	if (!names.length) return requests.map(settle);
 	const queries = [
 		...new Set(
 			names.flatMap((given) => {
@@ -108,17 +129,16 @@ export async function resolveNamesSettled(
 			const parsed = fromHandle(handle);
 			return parsed?.name === name || parsed?.name.split(".").at(-1) === name;
 		});
-		if (exact.length > 1)
+		if (exact.length > 1) {
+			const listed = exact.map((id) => paths?.toRepositoryHandle(id) ?? id);
+			// `file#name` resolves too, and is what gets copied into the next request, so offer it where it's unique.
+			const shortest = (handle: string) =>
+				listed.filter((other) => withoutKind(other) === withoutKind(handle)).length > 1 ? handle : withoutKind(handle);
 			resolved.set(
 				given,
-				new Error(
-					`${given} is ambiguous; use a handle: ${exact
-						.slice(0, 10)
-						.map((id) => paths?.toRepositoryHandle(id) ?? id)
-						.join(", ")}`,
-				),
+				new Error(`${given} is ambiguous; use a handle: ${listed.slice(0, 10).map(shortest).join(", ")}`),
 			);
-		else if (!exact.length) {
+		} else if (!exact.length) {
 			const last = name.split(".").at(-1)!;
 			const candidates =
 				[
@@ -143,7 +163,7 @@ export async function resolveNamesSettled(
 			);
 		} else resolved.set(given, exact[0]);
 	}
-	return requests.map((request) => {
+	return requests.map((request, index) => {
 		const copy = { ...request };
 		for (const field of fields[String(request.type)] ?? []) {
 			const value = copy[field];
@@ -154,7 +174,7 @@ export async function resolveNamesSettled(
 			else if (Array.isArray(value))
 				copy[field] = value.map((item) => (typeof item === "string" ? (resolved.get(item) ?? item) : item));
 		}
-		return { request: convertHandles(copy, paths) };
+		return settle(copy, index);
 	});
 }
 
