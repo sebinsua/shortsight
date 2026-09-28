@@ -1,6 +1,6 @@
 {
 	"name": "pi-shorthand",
-	"version": "0.10.0",
+	"version": "0.11.0",
 	"description": "Pi tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.",
 	"keywords": [
 		"ast-grep",
@@ -26,7 +26,7 @@
 	],
 	"type": "module",
 	"dependencies": {
-		"shorthand-code": "0.10.0"
+		"shorthand-code": "0.11.0"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
