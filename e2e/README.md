@@ -195,7 +195,7 @@ each repetition. With two conditions this alternates the order; a full cycle req
 conditions. Keep the initial matrix small.
 
 Every attempt has a fresh agent directory. Authentication and custom model definitions are copied from the
-configured Pi agent directory, with private permissions, then removed at the end. Ambient settings, system
+configured Pi agent directory, with private permissions, then removed at the end. OAuth refresh tokens are single-use, so an `auth.json` that Pi refreshed during an attempt is copied back, or every later attempt would fail to sign in. Ambient settings, system
 prompt files, context files, skills, templates, and extensions are excluded. Explicit extensions and skills are
 the only exceptions. Environment variables still supply credentials and provider configuration. Reasoning is
 explicitly `high` by default. `--offline` disables Pi startup network operations, not model requests.

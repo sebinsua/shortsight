@@ -266,6 +266,49 @@ console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content
 	};
 }
 
+test("a token Pi refreshes in an attempt's copy reaches the next attempt", async () => {
+	const root = await directory();
+	const fixture = path.join(root, "fixture");
+	await materializeTask(allTasks[0]!, fixture);
+	const env = await fakeEnvironment(root);
+	await writeFile(path.join(env.PI_CODING_AGENT_DIR, "auth.json"), '{"refresh":"1"}');
+	// Each attempt records the token it was given, then spends it, as an OAuth refresh does.
+	await writeFile(
+		path.join(root, "bin/pi"),
+		`#!/usr/bin/env bun
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const file = process.env.PI_CODING_AGENT_DIR + "/auth.json";
+const token = JSON.parse(readFileSync(file, "utf8")).refresh;
+appendFileSync(process.env.FAKE_CALLS, token + "\\n");
+writeFileSync(file, JSON.stringify({ refresh: String(Number(token) + 1) }));
+`,
+	);
+	await chmod(path.join(root, "bin/pi"), 0o755);
+	const child = Bun.spawn(
+		[
+			"bun",
+			path.resolve("e2e/run.ts"),
+			"--repo",
+			fixture,
+			"--task",
+			"Example",
+			"--setup",
+			"baseline",
+			"--runs",
+			"2",
+		].concat(["--check", "true", "--results-dir", path.join(root, "results")]),
+		{ env, stdout: "pipe", stderr: "pipe" },
+	);
+	const [exit] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	expect(exit).toBe(0);
+	expect(await readFile(env.FAKE_CALLS, "utf8")).toBe("1\n2\n");
+	expect(JSON.parse(await readFile(path.join(env.PI_CODING_AGENT_DIR, "auth.json"), "utf8"))).toEqual({ refresh: "3" });
+}, 20_000);
+
 test("sightread off keeps other executables beside sightread on PATH", async () => {
 	const root = await directory();
 	const fixture = path.join(root, "fixture");

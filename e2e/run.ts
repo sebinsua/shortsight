@@ -13,7 +13,7 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { chmod, copyFile, mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
@@ -299,6 +299,9 @@ async function runPi(
 		mkdirSync(agentDir, { mode: 0o700 });
 		// Preserve authentication and model definitions, but not ambient prompts, skills or settings.
 		const originalAgentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi/agent");
+		const copiedAuth = await Bun.file(path.join(originalAgentDir, "auth.json"))
+			.text()
+			.catch(() => null);
 		for (const file of ["auth.json", "models.json"]) {
 			const from = path.join(originalAgentDir, file);
 			if (await Bun.file(from).exists()) {
@@ -377,6 +380,7 @@ async function runPi(
 		const [piExitCode, observed, stderr] = await Promise.all([pi.exited, observedPromise, stderrPromise]);
 		clearTimeout(timer);
 		if (forceTimer) clearTimeout(forceTimer);
+		await keepRefreshedAuth(path.join(agentDir, "auth.json"), path.join(originalAgentDir, "auth.json"), copiedAuth);
 		await Bun.write(stderrFile, stderr);
 		const eventSummary = summarizeEvents(observed.events);
 		await Bun.write(
@@ -524,4 +528,22 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 	} catch {
 		// It exited between the timer firing and the signal.
 	}
+}
+
+/**
+ * OAuth refresh tokens are single-use: a refresh inside an attempt's copy spends the one in the original, so
+ * every later attempt would fail to authenticate. Copy a refreshed file back, unless the original has since
+ * changed some other way.
+ */
+async function keepRefreshedAuth(copy: string, original: string, copied: string | null) {
+	if (copied === null) return;
+	const current = await Bun.file(copy)
+		.text()
+		.catch(() => null);
+	if (current === null || current === copied) return;
+	if ((await Bun.file(original).text()) !== copied) return;
+	const staged = `${original}.${process.pid}.tmp`;
+	await Bun.write(staged, current);
+	await chmod(staged, 0o600);
+	await rename(staged, original);
 }
