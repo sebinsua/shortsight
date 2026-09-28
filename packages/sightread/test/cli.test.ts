@@ -160,8 +160,8 @@ test("lookup and reverse trace print live ranges and edges", () => {
 	expect(lookup.out).toContain("hits\n  = greet  exported function  src/model.ts:1-1");
 	const trace = run("--cwd", fixture.root, JSON.stringify({ type: "trace", from: "greet", direction: "reverse" }));
 	expect(trace.code).toBe(0);
-	expect(trace.out).toContain("trace reverse from greet: 1 shown");
-	expect(trace.out).toContain("caller → greet  calls at model.ts:2");
+	expect(trace.out).toContain("trace reverse from greet: 1 shown in 1 file\n");
+	expect(trace.out).toContain("2-2  caller  exported function  calls greet :2");
 	expect(run("--cwd", fixture.root, JSON.stringify({ type: "lookup", query: "greet" })).out).toBe(lookup.out);
 }, 30_000);
 

@@ -98,7 +98,7 @@ test("edge spans slice call names with UTF-16 columns after tabs, BMP, astral, a
 		const sameLine = edges.filter(({ at }) => at?.line === 5);
 		expect(sameLine).toHaveLength(2);
 		expect(sameLine[0].at?.col).not.toBe(sameLine[1].at?.col);
-		expect(renderText(result, { color: false }).match(/calls at edges\.ts:5/g)).toHaveLength(2);
+		expect(renderText(result, { color: false }).match(/calls useTable :5/g)).toHaveLength(2);
 		expect(JSON.parse(JSON.stringify(result)).edges).toEqual(result.edges);
 	} finally {
 		await graph.close();

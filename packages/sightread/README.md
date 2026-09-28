@@ -21,22 +21,16 @@ sightread '{"type":"trace","from":"runWithBun","direction":"reverse"}'
 ```
 
 ```
-trace reverse from runWithBun: 3 shown
+trace reverse from runWithBun: 3 shown in 3 files; 2 at depth 1, 1 at depth 2
 
 packages/pi-shorthand/src/index.ts
-  48-139  default  function
+  54-148  default  exported function  calls runWithBun :108
 packages/shorthand-code/src/cli/shorthand.ts
-  34-95  main  function
+  38-105  main  function  calls runWithBun :83
 packages/shorthand-code/src/runner/client.ts
-  20-115  runWithBun  function
+  20-115  runWithBun  exported function
 packages/shorthand-code/test/graph.test.ts
-  287-306  description  function
-
-hops
-  main → runWithBun      calls at shorthand.ts:73
-  default → runWithBun   calls at index.ts:100
-  description → default  calls at graph.test.ts:289
-  description → default  type_ref at graph.test.ts:295
+  504-523  description  function  calls default :506; type_ref default :512
 ```
 
 Pass an array to ask several questions at once. The requests you'll use most:

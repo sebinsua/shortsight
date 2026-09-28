@@ -66,17 +66,14 @@ test("lookup ranked text is complete", () => {
 	);
 });
 
-test("reverse trace text is complete and each edge has one evidence line", () => {
+test("reverse trace text is complete, with each link on the row of the symbol it starts from", () => {
 	expect(outputs.get("trace")).toBe(
 		[
-			"trace reverse from greet: 1 shown",
+			"trace reverse from greet: 1 shown in 1 file",
 			"",
 			"src/model.ts",
 			"  1-1  greet   exported function",
-			"  2-2  caller  exported function",
-			"",
-			"hops",
-			"  caller → greet  calls at model.ts:2",
+			"  2-2  caller  exported function  calls greet :2",
 		].join("\n"),
 	);
 });
@@ -274,4 +271,43 @@ test("numbered lists stay aligned past nine rows", () => {
 	expect(new Set(rows.map((row) => row.indexOf("fan-in")))).toEqual(new Set([rows[0].indexOf("fan-in")]));
 	expect(rows[9].startsWith("  10. f9")).toBe(true);
 	expect(rows[0].startsWith("   1. f0")).toBe(true);
+});
+
+const symbol = (name: string, file = "src/model.ts") => ({
+	id: `${file}#${name}:function`,
+	name,
+	file,
+	kind: "function",
+});
+const hop = (from: string, to: string, file: string, line: number) => ({
+	from: `src/model.ts#${from}:function`,
+	to: `src/model.ts#${to}:function`,
+	kind: "calls",
+	evidence: { file, startLine: line, endLine: line },
+});
+
+test("a trace keeps a link on its own line when its call is in another file, and a path keeps its links in order", async () => {
+	const value = {
+		result: {
+			type: "trace",
+			start: symbol("greet"),
+			direction: "reverse",
+			reached: [symbol("caller")],
+			hops: [hop("caller", "greet", "src/model.ts", 2), hop("caller", "greet", "src/View.tsx", 1)],
+		},
+	};
+	const open = renderText(
+		await normalizeResult({ type: "trace", from: "greet", direction: "reverse" }, value, ranges),
+		{ color: false },
+	);
+	expect(open).toContain("  2-2  caller  exported function  calls greet :2\n");
+	expect(open).toEndWith("hops\n  caller → greet  calls at View.tsx:1");
+	const path = renderText(await normalizeResult({ type: "trace", from: "caller", to: "greet" }, value, ranges), {
+		color: false,
+	});
+	expect(path).toContain("  2-2  caller  exported function\n");
+	expect(path).toContain("hops\n  caller → greet  calls at model.ts:2\n  caller → greet  calls at View.tsx:1");
+	const noted = await normalizeResult({ type: "trace", from: "caller", to: "greet" }, value, ranges);
+	noted.note = "truncated at the graph's 32-symbol limit";
+	expect(renderText(noted, { color: false })).toContain("hops\n  caller → greet  calls at model.ts:2");
 });

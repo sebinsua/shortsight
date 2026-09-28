@@ -1,7 +1,7 @@
 // Render the normalised graph as compact text for terminals and agents.
 import { basename } from "node:path";
 import { bold, dim, displayKind, groupedSymbols, unnamedTest } from "./layout.ts";
-import { fromHandle, requestFor, type GraphEdge, type GraphNode, type GraphResult } from "./model.ts";
+import { fromHandle, inheritRequest, requestFor, type GraphEdge, type GraphNode, type GraphResult } from "./model.ts";
 
 const scalar = (value: unknown) => (typeof value === "string" ? value : (JSON.stringify(value) ?? String(value)));
 
@@ -33,6 +33,40 @@ function referenceLines(node: GraphNode, color: boolean, pad: string): string[] 
 	];
 }
 
+// How far a trace goes, so "how widely is this used?" is answered by its first line.
+function reach(result: GraphResult): string {
+	const start = String(result.sections.start);
+	const forward = result.sections.direction === "forward";
+	const depth = new Map([[start, 0]]);
+	for (let frontier = [start]; frontier.length;) {
+		const next: string[] = [];
+		for (const edge of result.edges) {
+			const [near, far] = forward ? [edge.from, edge.to] : [edge.to, edge.from];
+			if (frontier.includes(near) && !depth.has(far)) {
+				depth.set(far, depth.get(near)! + 1);
+				next.push(far);
+			}
+		}
+		frontier = next;
+	}
+	const reached = result.nodes.filter((node) => node.handle !== start);
+	const files = new Set(reached.map((node) => node.file)).size;
+	if (!files) return "";
+	const levels = new Map<number, number>();
+	for (const node of reached) {
+		const level = depth.get(node.handle);
+		if (level) levels.set(level, (levels.get(level) ?? 0) + 1);
+	}
+	const byDepth =
+		levels.size > 1
+			? `; ${[...levels]
+					.toSorted(([a], [b]) => a - b)
+					.map(([level, count]) => `${count} at depth ${level}`)
+					.join(", ")}`
+			: "";
+	return ` in ${files} ${files === 1 ? "file" : "files"}${byDepth}`;
+}
+
 function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 	const { type, sections } = result;
 	if (type === "overview") {
@@ -50,7 +84,7 @@ function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 	else if (Array.isArray(request?.reinterpretations))
 		subject = ` for ${request.reinterpretations.map(scalar).join(", ")}`;
 	const count = result.total === undefined ? `${result.shown} shown` : `${result.shown} of ${result.total} shown`;
-	return `${type}${subject}${result.tsconfig && result.tsconfig !== "tsconfig.json" ? ` (${result.tsconfig})` : ""}: ${count}${result.raise ? ` (truncated; raise ${result.raise})` : ""}`;
+	return `${type}${subject}${result.tsconfig && result.tsconfig !== "tsconfig.json" ? ` (${result.tsconfig})` : ""}: ${count}${type === "trace" ? reach(result) : ""}${result.raise ? ` (truncated; raise ${result.raise})` : ""}`;
 }
 
 function overviewText(result: GraphResult, nodes: Map<string, GraphNode>, color: boolean): string {
@@ -109,7 +143,8 @@ function edgeLines(edges: GraphEdge[], nodes: Map<string, GraphNode>, color: boo
 
 /** Render one model with one mention of each symbol's location. */
 export function renderText(result: GraphResult, options: { color: boolean }): string {
-	if (result.note) return `${renderText({ ...result, note: undefined }, options)}\n\nnote: ${result.note}`;
+	if (result.note)
+		return `${renderText(inheritRequest(result, { ...result, note: undefined }), options)}\n\nnote: ${result.note}`;
 	const nodes = new Map(result.nodes.map((node) => [node.handle, node]));
 	if (result.type === "overview") return overviewText(result, nodes, options.color);
 	if (result.type === "references") {
@@ -163,8 +198,29 @@ export function renderText(result: GraphResult, options: { color: boolean }): st
 		pushSection(rows);
 	}
 	const grouped = result.nodes.filter((node) => !rankedHandles.has(node.handle));
-	if (grouped.length) pushSection(groupedSymbols(grouped, options.color));
 	const seenEdges = new Set<number>();
+	// A trace's links go on the row of the symbol they start from, since a call's file is that symbol's file. A
+	// path keeps its links in order, below.
+	const folded = new Map<string, Map<string, string[]>>();
+	if (result.type === "trace" && requestFor(result)?.to === undefined && Array.isArray(result.sections.hops))
+		for (const index of result.sections.hops) {
+			const edge = typeof index === "number" ? result.edges[index] : undefined;
+			const from = edge && nodes.get(edge.from);
+			if (!edge || !from || from.site || (edge.at && edge.at.file !== from.file)) continue;
+			const byKind = folded.get(edge.from) ?? new Map<string, string[]>();
+			const target = `${nodes.get(edge.to)?.name ?? edge.to}${edge.at ? dim(` :${edge.at.line}`, options.color) : ""}`;
+			byKind.set(edge.kind, [...(byKind.get(edge.kind) ?? []), target]);
+			folded.set(edge.from, byKind);
+			seenEdges.add(index);
+		}
+	if (grouped.length)
+		pushSection(
+			groupedSymbols(grouped, options.color, (node) =>
+				[...(folded.get(node.handle) ?? [])]
+					.map(([kind, targets]) => `${dim(kind, options.color)} ${targets.join(", ")}`)
+					.join("; "),
+			),
+		);
 	const skip = new Set(
 		["query", "reinterpretations", "start", "direction", rankedKey, "reached", "nodes", "total"].filter(
 			(item): item is string => !!item,

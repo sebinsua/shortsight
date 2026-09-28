@@ -399,7 +399,12 @@ test("a reverse trace past the graph's limit follows graph callers after its hub
 	expect(result.nodes.find(({ name }) => name === "outer1")?.exported).toBeUndefined();
 	expect(result.nodes.find(({ name }) => name === "outer0")?.exported).toBe(true);
 	const text = runIn(wide, JSON.stringify({ type: "trace", from: "target", direction: "reverse", maxDepth: 3 })).out;
-	expect(text).toStartWith(`trace reverse from target: ${result.shown} shown\n`);
+	expect(text).toStartWith(
+		`trace reverse from target: ${result.shown} shown in 82 files; 40 at depth 1, 44 at depth 2, 1 at depth 3\n`,
+	);
+	expect(text).toContain(
+		"  5-5  Child.run               method             calls Base.run :5; overrides Base.run :5\n",
+	);
 	expect(text).toEndWith(
 		"note: complete: past the graph's 32-symbol limit, callers were followed through graph traces",
 	);
