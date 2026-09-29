@@ -90,6 +90,10 @@ if (!values.execute) {
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
+	if (values.round)
+		console.log(
+			`Round finished. Build the table with:\n  bun e2e/table.ts ${path.relative(process.cwd(), values["results-dir"]!)} --write e2e/README.md`,
+		);
 }
 
 /** One run.ts experiment per task and prompt style, so each summary compares conditions on identical input. */

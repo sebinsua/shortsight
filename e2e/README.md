@@ -17,6 +17,18 @@ No complete round has been run yet with all four setups.
 
 <!-- results:end -->
 
+To produce this table, run a full round, then generate the table from it:
+
+```sh
+bun e2e/suite.ts --round                                              # shows the plan; calls no model
+bun e2e/suite.ts --round --execute --model openai-codex/gpt-5.6-sol   # about 3 hours of paid model calls
+bun e2e/table.ts e2e/results/round-2026-09-29 --write e2e/README.md   # the directory the round printed
+```
+
+The round runs every task in [round.ts](round.ts), in all four setups, two attempts each. `table.ts` writes
+the table only if the round is complete, and otherwise lists what's missing and leaves this file alone. Then
+update the sentences around the table by hand.
+
 ## Layout
 
 | Path                                             | Contents                                                                   |
@@ -156,17 +168,7 @@ explicitly `high` by default. `--offline` disables Pi startup network operations
 
 ## Execute deliberately
 
-The results above come from a full round: every task in [round.ts](round.ts), in all four setups, two
-attempts each, into a directory of its own. It's one command, and it can't be narrowed:
-
-```sh
-bun e2e/suite.ts --round --execute --model openai-codex/gpt-5.6-sol
-bun e2e/table.ts e2e/results/round-<date> --write e2e/README.md
-```
-
-`table.ts` writes the table only if the round is complete: every row and setup with both attempts, none ended
-by the model provider, one model and one committed revision throughout. Otherwise it names what's missing and
-leaves the README alone. Update the sentences around the table by hand to match it.
+For the results table, run a full round as shown under [Results](#results).
 
 For a narrower experiment, after deciding to spend on model calls:
 
