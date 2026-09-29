@@ -20,6 +20,7 @@ const files: Record<string, string> = {
 		"}",
 	].join("\n"),
 	"src/barrel.ts": 'export { Row as ExportedRow } from "./row.ts";\n',
+	"src/rows.ts": 'export * as Rows from "./row.ts";\n',
 	"src/use.ts": [
 		'import { Row as TableRow, type Getter } from "./row.ts";',
 		'import { ExportedRow } from "./barrel.ts";',
@@ -316,6 +317,15 @@ test("a name qualified by a barrel that re-exports it resolves to its declaratio
 	}>;
 	expect(details.nodes.map(({ handle }) => handle)).toContain("src/row.ts#Row:class");
 	expect(references.nodes.some(({ handle }) => handle.startsWith("src/use.ts#reference:"))).toBe(true);
+	// `export * as Rows` makes Rows a namespace: its members resolve, and it alone says what it is.
+	const namespaced = run("--json", JSON.stringify({ type: "details", symbol: "src/rows.ts#Rows.Row" }));
+	expect(namespaced.code).toBe(0);
+	expect(
+		(JSON.parse(namespaced.out) as Array<{ nodes: Array<{ handle: string }> }>)[0].nodes.map(({ handle }) => handle),
+	).toContain("src/row.ts#Row:class");
+	const namespace = run(JSON.stringify({ type: "details", symbol: "src/rows.ts#Rows" }));
+	expect(namespace.code).toBe(1);
+	expect(namespace.err).toContain("src/rows.ts#Rows is a namespace, the exports of src/row.ts");
 	// Importing a name isn't exporting it, so a file that only imports Row still doesn't have it.
 	const imported = run(JSON.stringify({ type: "details", symbol: "src/use.ts#Row" }));
 	expect(imported.code).toBe(1);

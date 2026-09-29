@@ -333,7 +333,10 @@ export async function runQuery(
 		references && paths
 			? async (file: string, name: string) => {
 					const declared = await references.reexport(paths.inputToProjectPath(file), name);
-					return declared && { file: paths.toRepositoryPath(declared.file), name: declared.name };
+					if (!declared) return undefined;
+					return "namespace" in declared
+						? { namespace: paths.toRepositoryPath(declared.namespace) }
+						: { file: paths.toRepositoryPath(declared.file), name: declared.name };
 				}
 			: undefined;
 	const resolved = await resolveNamesSettled(context.client, requests, paths, reexport);

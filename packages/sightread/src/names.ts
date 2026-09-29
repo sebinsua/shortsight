@@ -75,7 +75,10 @@ export async function resolveNamesSettled(
 	original: Record<string, unknown>[],
 	paths?: PathMapper,
 	/** Where what `file` exports as `name` is declared, when it re-exports it from another file. */
-	reexport?: (file: string, name: string) => Promise<{ file: string; name: string } | undefined>,
+	reexport?: (
+		file: string,
+		name: string,
+	) => Promise<{ file: string; name: string } | { namespace: string } | undefined>,
 ): Promise<Array<{ request: Record<string, unknown> } | { error: string }>> {
 	const aliased = original.map(withAliases);
 	const requests = aliased.map((request) => (request instanceof Error ? {} : request));
@@ -134,13 +137,16 @@ export async function resolveNamesSettled(
 			fromHandle(handle)?.file === file;
 		const handles = hitsFor(file === undefined ? name : given).filter(inFile);
 		let exact = handles.filter(named(name));
-		// `src/lib/index.ts#formatAmount` names what a barrel re-exports, perhaps renamed: use its declaration.
+		// `src/lib/index.ts#formatAmount` names what a barrel re-exports, perhaps renamed or through a namespace
+		// (`src/index.ts#Accordion.Root`): use its declaration.
+		let namespace: string | undefined;
 		if (!exact.length && file !== undefined && reexport) {
-			const [top, ...members] = name.split(".");
-			const declared = await reexport(file, top).catch(() => undefined);
-			if (declared) {
-				const target = [declared.name, ...members].join(".");
-				const [lookup] = await client.batch([{ type: "lookup", query: target, limit: 200 }]);
+			const declared = await reexport(file, name).catch(() => undefined);
+			if (declared && "namespace" in declared) namespace = declared.namespace;
+			else if (declared) {
+				// Qualify the query by file, so a common name's other hits can't crowd the declaration out.
+				const query = `${paths?.toProjectPath(declared.file) ?? declared.file}#${declared.name}`;
+				const [lookup] = await client.batch([{ type: "lookup", query, limit: 200 }]);
 				const hits = object(object(lookup.value)?.result)?.hits;
 				exact = (Array.isArray(hits) ? hits : [])
 					.flatMap((hit) => {
@@ -149,7 +155,7 @@ export async function resolveNamesSettled(
 					})
 					.filter(
 						(handle) =>
-							named(target)(handle) &&
+							named(declared.name)(handle) &&
 							(fromHandle(paths?.toRepositoryHandle(handle) ?? handle)?.file === declared.file ||
 								fromHandle(handle)?.file === declared.file),
 					);
@@ -163,6 +169,11 @@ export async function resolveNamesSettled(
 			resolved.set(
 				given,
 				new Error(`${given} is ambiguous; use a handle: ${listed.slice(0, 10).map(shortest).join(", ")}`),
+			);
+		} else if (namespace !== undefined) {
+			resolved.set(
+				given,
+				new Error(`${given} is a namespace, the exports of ${namespace}; name one of them, as ${given}.Name`),
 			);
 		} else if (!exact.length) {
 			const last = name.split(".").at(-1)!;

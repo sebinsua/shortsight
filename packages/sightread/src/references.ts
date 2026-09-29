@@ -37,8 +37,11 @@ import { graphKind, hasModifier, listedExports } from "./ranges.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
-	/** Where what `file` exports as `name` is declared, project-relative, when it re-exports it from elsewhere. */
-	reexport(file: string, name: string): Promise<{ file: string; name: string } | undefined>;
+	/**
+	 * Where what `file` exports as `name` is declared, project-relative, when it re-exports it from elsewhere; or
+	 * the module `name` is, for a namespace re-export such as `export * as Accordion from "./parts"`.
+	 */
+	reexport(file: string, name: string): Promise<{ file: string; name: string } | { namespace: string } | undefined>;
 	close(): Promise<void>;
 }
 
@@ -389,17 +392,35 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 				const absolute = resolve(project.root, file);
 				const home = await active.getDefaultProjectForFile(absolute);
 				const source = await home?.program.getSourceFile(absolute);
-				const module = source && (await home!.checker.getSymbolAtLocation(source));
-				const exported = module && (await home!.checker.getMemberInModuleExports(module, name));
-				if (!exported) return undefined;
-				// A re-export is an alias; follow it through barrels to the declaration.
-				const target = exported.flags & SymbolFlags.Alias ? await home!.checker.getAliasedSymbol(exported) : exported;
-				const declaration = target.declarations[0] && (await target.declarations[0].resolve());
-				if (!declaration) return undefined;
-				const declaring = relative(realpathSync(project.root), realpathSync(declaration.getSourceFile().fileName));
-				return declaring === relative(realpathSync(project.root), realpathSync(absolute))
-					? undefined
-					: { file: declaring, name: target.name };
+				if (!home || !source) return undefined;
+				const root = realpathSync(project.root);
+				const where = async (symbol: Awaited<ReturnType<typeof home.checker.getAliasedSymbol>>) => {
+					const node = symbol.declarations[0] && (await symbol.declarations[0].resolve());
+					return node && relative(root, realpathSync(node.getSourceFile().fileName));
+				};
+				// Walk the name a part at a time: each part is an export of the module before it, and `export * as ns`
+				// makes a part a module itself, as in `src/index.ts#Accordion.Root`.
+				const parts = name.split(".");
+				let module = await home.checker.getSymbolAtLocation(source);
+				let used = 0;
+				while (module) {
+					const exported = await home.checker.getMemberInModuleExports(module, parts[used]!);
+					if (!exported) return undefined;
+					used++;
+					// A re-export is an alias; follow it through barrels to the declaration.
+					const target = exported.flags & SymbolFlags.Alias ? await home.checker.getAliasedSymbol(exported) : exported;
+					const isFile = target.declarations[0]?.kind === SyntaxKind.SourceFile;
+					if (isFile && used < parts.length) {
+						module = target;
+						continue;
+					}
+					const declaring = await where(target);
+					if (!declaring) return undefined;
+					if (isFile) return { namespace: declaring };
+					if (used === 1 && declaring === relative(root, realpathSync(absolute))) return undefined;
+					return { file: declaring, name: [target.name, ...parts.slice(used)].join(".") };
+				}
+				return undefined;
 			}),
 		close: () =>
 			serially(async () => {
