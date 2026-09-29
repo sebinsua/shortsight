@@ -2657,6 +2657,18 @@ console.log(sg.rewrite(twice, (m) => m.node.replace(\`bar(\${m.A})\`)));`,
 		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("bar(1);\nbar(2);\n");
 	});
 
+	test("sg.rewrite inserts once when two matches insert the same text at the same place", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
+		const result = await run(
+			repo,
+			`const twice = [...sg.find("foo($A)", "src/a.ts"), ...sg.find("foo($A)", "src/a.ts")];
+sg.rewrite(twice, (m) => ({ startPos: m.node.range().start.index, endPos: m.node.range().start.index, insertedText: "void " }));`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("void foo(1);\n");
+	});
+
 	test("sg.rewrite rejects overlapping nested edits", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(foo(1));\n" });
 		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A)", "src/a.ts");`);

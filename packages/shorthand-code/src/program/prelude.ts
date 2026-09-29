@@ -766,7 +766,7 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	// A callback can run arbitrary code, including writes: don't overwrite changes made after selection.
 	const sources = new Map<string, string | null>();
 	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
-	const output = matches[0].node.getRoot().root().commitEdits(edits);
+	const output = matches[0].node.getRoot().root().commitEdits(ordered);
 	recordRewriteOutput(file, source, output, ordered);
 	writeFileSync(file, output);
 	return count;
