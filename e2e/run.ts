@@ -4,7 +4,8 @@
  *   bun e2e/run.ts --repo <path or git URL> --task "<task>" [--setups baseline,replace,code,read-code]
  *     [--model anthropic/claude-sonnet-4-6] [--reasoning high] [--runs 1]
  *     [--check "<shell command>"] [--budget-seconds 600] [--budget-dollars 2]
- *     [--documentation shipped,minimal] [--skills none,shorthand]
+ *     [--documentation shipped,minimal] [--skills none,shorthand] [--sightread off,on]
+ *     [--codemode off,on,only] [--code-exposure direct,model-only]
  *     [--extension <path> | --baseline-extension <path> --candidate-extension <path>]
  *     [--seed-messages <recovery-context.json>] [--task-id <id>] [--category <c>] [--prompt-style outcome|brief]
  *
@@ -35,9 +36,13 @@ import {
 import {
 	conditionTools,
 	extensionEntry,
+	parseCodeExposure,
+	parseCodemode,
 	parseSetups,
 	parseSightread,
 	rotateConditions,
+	type CodeExposure,
+	type Codemode,
 	type Documentation,
 	type Setup,
 	type Sightread,
@@ -74,6 +79,8 @@ const { values: args } = parseArgs({
 		documentation: { type: "string", default: "shipped" },
 		skills: { type: "string", default: "none" },
 		sightread: { type: "string", default: "off" },
+		codemode: { type: "string", default: "off" },
+		"code-exposure": { type: "string", default: "direct" },
 		"results-dir": { type: "string" },
 		"budget-dollars": { type: "string" },
 		"task-id": { type: "string" },
@@ -103,6 +110,8 @@ if (selectedDocumentation.some((item) => !["shipped", "minimal"].includes(item))
 	throw new Error("--documentation must be shipped and/or minimal");
 const skills = args.skills!.split(",");
 const selectedSightread = parseSightread(args.sightread!);
+const selectedCodemode = parseCodemode(args.codemode!);
+const selectedExposure = parseCodeExposure(args["code-exposure"]!);
 if (skills.some((item) => !["none", "shorthand"].includes(item)))
 	throw new Error("--skills must be none and/or shorthand");
 const budgetDollars = args["budget-dollars"] === undefined ? null : Number(args["budget-dollars"]);
@@ -114,6 +123,8 @@ type Condition = {
 	documentation: Documentation;
 	skill: string;
 	sightread: Sightread;
+	codemode: Codemode;
+	codeExposure: CodeExposure | null; // null without codemode or `code`
 	extension?: FrozenExtension;
 };
 type ExtensionCopies = { on: FrozenExtension; off?: FrozenExtension };
@@ -137,26 +148,46 @@ try {
 	await copyFixture(source, recordedFixture);
 	const startingFixture = await fixtureIdentity(recordedFixture);
 	const extensions = await prepareExtensions(workDir);
+	// Codemode conditions add a suffix, so conditions without it keep the ids of earlier results.
+	type CodemodeVariant = Pick<Condition, "codemode" | "codeExposure"> & { suffix: string };
+	const codemodeVariants = (setup: Setup) =>
+		selectedCodemode.flatMap((codemode): CodemodeVariant[] =>
+			codemode === "off"
+				? [{ codemode, codeExposure: null, suffix: "" }]
+				: setup === "baseline"
+					? [{ codemode, codeExposure: null, suffix: `-codemode-${codemode}` }]
+					: selectedExposure.map((codeExposure) => ({
+							codemode,
+							codeExposure,
+							suffix: `-codemode-${codemode}-${codeExposure}`,
+						})),
+		);
 	const conditions: Condition[] = selectedSetups.flatMap((setup): Condition[] =>
 		setup === "baseline"
-			? selectedSightread.map((sightread) => ({
-					id: `baseline-sightread-${sightread}`,
-					setup,
-					documentation: "shipped",
-					skill: "none",
-					sightread,
-				}))
+			? selectedSightread.flatMap((sightread) =>
+					codemodeVariants(setup).map(({ suffix, ...variant }) => ({
+						id: `baseline-sightread-${sightread}${suffix}`,
+						setup,
+						documentation: "shipped",
+						skill: "none",
+						sightread,
+						...variant,
+					})),
+				)
 			: extensions.flatMap((copies) =>
 					selectedDocumentation.flatMap((docs) =>
 						selectedSightread.flatMap((sightread) =>
-							skills.map((skill) => ({
-								id: `${setup}-${copies.on.label}-${docs}-${skill}-sightread-${sightread}`,
-								setup,
-								documentation: docs,
-								skill,
-								sightread,
-								extension: sightread === "on" ? copies.on : copies.off!,
-							})),
+							skills.flatMap((skill) =>
+								codemodeVariants(setup).map(({ suffix, ...variant }) => ({
+									id: `${setup}-${copies.on.label}-${docs}-${skill}-sightread-${sightread}${suffix}`,
+									setup,
+									documentation: docs,
+									skill,
+									sightread,
+									...variant,
+									extension: sightread === "on" ? copies.on : copies.off!,
+								})),
+							),
 						),
 					),
 				),
@@ -185,12 +216,14 @@ try {
 		kind: "experiment",
 		model: args.model,
 		reasoning: args.reasoning ?? null,
-		conditions: conditions.map(({ id, setup, documentation, skill, sightread }) => ({
+		conditions: conditions.map(({ id, setup, documentation, skill, sightread, codemode, codeExposure }) => ({
 			id,
 			setup,
 			documentation,
 			skill,
 			sightread,
+			codemode,
+			codeExposure,
 		})),
 		task: args.task,
 		taskId: args["task-id"] ?? null,
@@ -263,7 +296,7 @@ async function runPi(
 	startingFixture: Awaited<ReturnType<typeof fixtureIdentity>>,
 	recordedFixture: string,
 ) {
-	const { setup, extension, documentation, skill, sightread } = condition;
+	const { setup, extension, documentation, skill, sightread, codemode, codeExposure } = condition;
 	const runtime = await mkdtemp(path.join(realpathSync("/tmp"), "sr-"));
 	const sightreadBin = path.join(workDir, `${name}-bin`);
 	try {
@@ -288,10 +321,19 @@ async function runPi(
 		const logFile = path.join(resultsRoot, `${name}.jsonl`);
 		const stderrFile = path.join(resultsRoot, `${name}.stderr.log`);
 		const entry = extension
-			? await extensionEntry(extension.path, documentation, path.join(workDir, `${name}.ts`), sightread)
+			? await extensionEntry(
+					extension.path,
+					documentation,
+					path.join(workDir, `${name}.ts`),
+					sightread,
+					codemode,
+					codeExposure ?? undefined,
+				)
 			: null;
 		const setupArgs = entry ? ["-e", entry] : [];
-		setupArgs.push("--tools", conditionTools(setup).join(","));
+		// -ne below also turns off Pi's built-in extensions, codemode among them.
+		if (codemode !== "off") setupArgs.push("-e", "builtin:codemode");
+		setupArgs.push("--tools", conditionTools(setup, codemode).join(","));
 		if (skill === "shorthand" && extension) setupArgs.push("--skill", shorthandSkill(extension.path));
 		if (sightread === "on")
 			setupArgs.push("--skill", path.join(sightreadRoot(extension), "packages/sightread/skills/sightread"));
@@ -309,6 +351,9 @@ async function runPi(
 				await chmod(path.join(agentDir, file), 0o600);
 			}
 		}
+		// Pi has no flag for codemode's mode; "on" is its default, so only "only" needs a setting.
+		if (codemode === "only")
+			await Bun.write(path.join(agentDir, "settings.json"), JSON.stringify({ codemode: { mode: "only" } }));
 		const reasoningArgs = ["--thinking", args.reasoning ?? "high"];
 		let seedRecord: { source: string; fingerprint: string; messages: number } | null = null;
 		const sessionArgs = ["--no-session"];
@@ -402,6 +447,8 @@ async function runPi(
 			documentation,
 			skill,
 			sightread,
+			codemode,
+			codeExposure,
 			task: args.task,
 			taskId: args["task-id"] ?? null,
 			category: args.category ?? null,
@@ -409,7 +456,7 @@ async function runPi(
 			budgetDollars,
 			exceededCost,
 			artifacts,
-			toolNames: conditionTools(setup),
+			toolNames: conditionTools(setup, codemode),
 			report: path.join(resultsRoot, `${name}.md`),
 			name,
 			setup,

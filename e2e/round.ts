@@ -44,5 +44,6 @@ export const roundOptions = {
 	skills: "shorthand",
 	documentation: "shipped",
 	sightread: "off,on",
+	codemode: "off",
 	runs: String(roundAttempts),
 } as const;

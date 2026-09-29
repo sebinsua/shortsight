@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { materializeTask, promptFor, suites, taskById, type PromptStyle, type Suite, type Task } from "./tasks.ts";
-import { parseSetups, parseSightread } from "./conditions.ts";
+import { parseCodeExposure, parseCodemode, parseSetups, parseSightread } from "./conditions.ts";
 import { roundOptions, roundRows } from "./round.ts";
 
 const { values, tokens } = parseArgs({
@@ -19,6 +19,8 @@ const { values, tokens } = parseArgs({
 		documentation: { type: "string", default: "shipped" },
 		skills: { type: "string", default: "none" },
 		sightread: { type: "string", default: "off" },
+		codemode: { type: "string", default: "off" },
+		"code-exposure": { type: "string", default: "direct" },
 		runs: { type: "string", default: "3" },
 		model: { type: "string", default: "anthropic/claude-sonnet-4-6" },
 		reasoning: { type: "string", default: "high" },
@@ -56,6 +58,8 @@ if (values.round) {
 for (const [task, style] of pairs) promptFor(task, style);
 const setups = parseSetups(values.setups!);
 const sightread = parseSightread(values.sightread!);
+const codemode = parseCodemode(values.codemode!);
+const codeExposure = parseCodeExposure(values["code-exposure"]!);
 if (!Number.isInteger(Number(values.runs)) || Number(values.runs) < 1)
 	throw new Error("--runs must be positive integer");
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -71,6 +75,8 @@ for (const [task, style] of pairs)
 			documentation: values.documentation,
 			skills: values.skills,
 			sightread,
+			codemode,
+			codeExposure,
 			repetitions: Number(values.runs),
 			execute: values.execute,
 		}),
@@ -120,6 +126,8 @@ async function runTask(task: Task, style: PromptStyle, fixture: string) {
 		"documentation",
 		"skills",
 		"sightread",
+		"codemode",
+		"code-exposure",
 		"runs",
 		"model",
 		"reasoning",

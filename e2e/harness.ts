@@ -24,11 +24,16 @@ export interface EventSummary {
 	turns: number;
 	/** The model provider's error when it ended the session, which says nothing about the tools. */
 	providerError?: string;
+	/** Calls the model made. */
 	tools: Record<string, number>;
 	failedTools: Record<string, number>;
+	/** Calls a tool made, such as a codemode script's; they don't cost the model a turn. */
+	nestedTools: Record<string, number>;
+	nestedFailedTools: Record<string, number>;
 	failedCodeCalls: number;
 	toolOutcomes: Array<{
 		toolCallId?: string;
+		parentToolCallId?: string;
 		toolName: string;
 		failed: boolean;
 		exitCode?: number | null;
@@ -107,19 +112,25 @@ const zeroCost = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tota
 export function summarizeEvents(events: JsonEvent[]): EventSummary {
 	const tools: Record<string, number> = {};
 	const failedTools: Record<string, number> = {};
+	const nestedTools: Record<string, number> = {};
+	const nestedFailedTools: Record<string, number> = {};
 	const toolOutcomes: EventSummary["toolOutcomes"] = [];
 	const usage: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost() };
 
 	for (const event of events) {
+		const parentToolCallId = string(event.parentToolCallId);
 		if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
-			tools[event.toolName] = (tools[event.toolName] ?? 0) + 1;
+			const counts = parentToolCallId ? nestedTools : tools;
+			counts[event.toolName] = (counts[event.toolName] ?? 0) + 1;
 		}
 		if (event.type === "tool_execution_end" && typeof event.toolName === "string") {
 			const details = record(event.result?.details);
 			const failed = structuredToolFailure(event, details);
-			if (failed) failedTools[event.toolName] = (failedTools[event.toolName] ?? 0) + 1;
+			const failures = parentToolCallId ? nestedFailedTools : failedTools;
+			if (failed) failures[event.toolName] = (failures[event.toolName] ?? 0) + 1;
 			toolOutcomes.push({
 				toolCallId: string(event.toolCallId),
+				...(parentToolCallId ? { parentToolCallId } : {}),
 				toolName: event.toolName,
 				failed,
 				exitCode: numberOrNull(details?.exitCode),
@@ -148,7 +159,9 @@ export function summarizeEvents(events: JsonEvent[]): EventSummary {
 		turns: events.filter((event) => event.type === "turn_start").length,
 		tools,
 		failedTools,
-		failedCodeCalls: failedTools.code ?? 0,
+		nestedTools,
+		nestedFailedTools,
+		failedCodeCalls: (failedTools.code ?? 0) + (nestedFailedTools.code ?? 0),
 		toolOutcomes,
 		usage,
 		...(providerError ? { providerError } : {}),

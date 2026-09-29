@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { allTasks, applySolution, materializeTask, taskById } from "../tasks.ts";
 import { saveChanges } from "../artifacts.ts";
-import { extensionEntry, conditionTools } from "../conditions.ts";
+import { codeOutputSchema, conditionTools, extensionEntry } from "../conditions.ts";
 import { sessionReport } from "../report.ts";
 
 const temporary: string[] = [];
@@ -209,6 +209,43 @@ test("minimal documentation wrapper changes registration without changing execut
 	expect(conditionTools("replace")).toEqual(["read", "bash", "code"]);
 });
 
+test("codemode conditions add the codemode tool and expose code to it as each variant", async () => {
+	expect(conditionTools("code", "on")).toEqual(["read", "bash", "edit", "write", "code", "codemode"]);
+	expect(conditionTools("baseline", "only")).toEqual(["read", "bash", "edit", "write", "codemode"]);
+	expect(conditionTools("code")).toEqual(["read", "bash", "edit", "write", "code"]);
+	const root = await directory();
+	await writeFile(
+		path.join(root, "index.ts"),
+		'export default pi => pi.registerTool({ name: "code", description: "shipped", execute: async () => ({ content: [], details: { exitCode: 1, applied: [] } }) });',
+	);
+	const register = async (exposure: "direct" | "model-only") => {
+		const entry = await extensionEntry(root, "shipped", path.join(root, `${exposure}.ts`), "on", "on", exposure);
+		let tool: any;
+		(await import(entry)).default({
+			registerTool(value: unknown) {
+				tool = value;
+			},
+		});
+		return tool;
+	};
+	const direct = await register("direct");
+	expect(direct.description).toBe("shipped");
+	expect(direct.outputSchema).toEqual(codeOutputSchema);
+	expect(direct.exposure).toBeUndefined();
+	expect(await direct.execute()).toEqual({
+		content: [],
+		details: { exitCode: 1, applied: [] },
+		structuredContent: { exitCode: 1, applied: [] },
+	});
+	const modelOnly = await register("model-only");
+	expect(modelOnly.exposure).toBe("model-only");
+	expect(modelOnly.outputSchema).toBeUndefined();
+	// Without codemode, the shipped extension is loaded as it is.
+	expect(await extensionEntry(root, "shipped", path.join(root, "off.ts"), "on", "off", "model-only")).toBe(
+		path.join(root, "index.ts"),
+	);
+});
+
 test("sightread off hides graph.query from shipped and minimal code registration", async () => {
 	const root = await directory();
 	await writeFile(
@@ -254,9 +291,11 @@ async function fakeEnvironment(root: string) {
 	await writeFile(
 		path.join(bin, "pi"),
 		`#!/usr/bin/env bun
-import { writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { writeFileSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args, ambientSettings: existsSync(process.env.PI_CODING_AGENT_DIR + "/settings.json") }) + "\\n");
+const settings = process.env.PI_CODING_AGENT_DIR + "/settings.json";
+const entries = args.flatMap((arg, index) => (args[index - 1] === "-e" && existsSync(arg) ? [readFileSync(arg, "utf8")] : []));
+appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args, ambientSettings: existsSync(settings), settings: existsSync(settings) ? readFileSync(settings, "utf8") : null, entries }) + "\\n");
 writeFileSync("added.txt", "saved output\\n");
 console.log(JSON.stringify({type:"turn_start"}));
 console.log(JSON.stringify({type:"tool_execution_start", toolName:"bash", toolCallId:"1", args:{command:"write added.txt"}}));
@@ -547,6 +586,77 @@ test("runner compares conditions from identical fixtures and saves independent r
 		expect(call.args).toContain("--no-context-files");
 	}
 }, 20_000);
+
+test("codemode conditions load Pi's codemode, set its mode, and keep earlier condition ids", async () => {
+	const root = await directory();
+	const fixture = path.join(root, "fixture");
+	const results = path.join(root, "results");
+	await materializeTask(allTasks[0]!, fixture);
+	const env = await fakeEnvironment(root);
+	const child = Bun.spawn(
+		[
+			"bun",
+			path.resolve("e2e/run.ts"),
+			"--repo",
+			fixture,
+			"--task",
+			"Example",
+			"--setups",
+			"baseline,code",
+			"--sightread",
+			"on",
+			"--codemode",
+			"off,only",
+			"--code-exposure",
+			"direct,model-only",
+			"--check",
+			"true",
+			"--results-dir",
+			results,
+		],
+		{ env, stdout: "pipe", stderr: "pipe" },
+	);
+	const [exit, , stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+	const runs = (await readFile(path.join(results, "summary.jsonl"), "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line))
+		.filter((item) => item.kind === "run");
+	expect(runs.map((run) => run.condition).toSorted()).toEqual([
+		"baseline-sightread-on",
+		"baseline-sightread-on-codemode-only",
+		"code-candidate-shipped-none-sightread-on",
+		"code-candidate-shipped-none-sightread-on-codemode-only-direct",
+		"code-candidate-shipped-none-sightread-on-codemode-only-model-only",
+	]);
+	const calls = (await readFile(env.FAKE_CALLS, "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	for (const [index, run] of runs.entries()) {
+		const { args, settings, entries } = calls[index];
+		const tools = args[args.indexOf("--tools") + 1].split(",");
+		expect(run.codemode).toBe(run.condition.includes("codemode") ? "only" : "off");
+		if (run.codemode === "off") {
+			expect(args).not.toContain("builtin:codemode");
+			expect(tools).not.toContain("codemode");
+			expect(settings).toBeNull();
+			expect(run.codeExposure).toBeNull();
+			continue;
+		}
+		expect(args).toContain("builtin:codemode");
+		expect(tools).toContain("codemode");
+		expect(JSON.parse(settings)).toEqual({ codemode: { mode: "only" } });
+		if (run.setup === "baseline") expect(run.codeExposure).toBeNull();
+		else if (run.codeExposure === "direct") expect(entries.join("")).toContain("structuredContent");
+		else expect(entries.join("")).toContain('exposure: "model-only"');
+	}
+}, 30_000);
 
 test("spending threshold disqualifies an otherwise passing fake session", async () => {
 	const root = await directory();

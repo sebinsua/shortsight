@@ -157,14 +157,24 @@ suite shows an effect.
 
 ## Conditions
 
-| Dimension     | Values   | Default |
-| ------------- | -------- | ------- |
-| `--sightread` | `off,on` | `off`   |
+| Dimension         | Values              | Default  |
+| ----------------- | ------------------- | -------- |
+| `--sightread`     | `off,on`            | `off`    |
+| `--codemode`      | `off,on,only`       | `off`    |
+| `--code-exposure` | `direct,model-only` | `direct` |
 
 `on` provides the sightread CLI and skill, and advertises `graph.query` in shorthand; it also works with the `baseline` setup. Each attempt gets a separate runtime directory, and its servers are stopped when the attempt ends.
 `off` runs against a frozen copy of the extension with no `sightread` package, as if it weren't installed:
 `sightread` answers "command not found" (a stand-in placed first on `PATH`, so tools installed beside it stay
 available), `graph.query` isn't advertised, and a program can't reach the graph or import the package.
+
+`--codemode on` adds Pi's `codemode` tool alongside the others; `only` also sets `codemode.mode: "only"`, so
+other tools are reached through scripts rather than declared to the model. With `baseline` it measures codemode
+without shorthand. `--code-exposure` applies only with codemode and a setup that has `code`: `direct` lets scripts
+call `code` and receive its result as data, and `model-only` keeps `code` declared to the model but out of
+scripts. Both wrap registration; the shipped extension is unchanged, and without codemode `code` is as shipped
+and conditions keep their earlier names. Calls a script makes are counted apart from the model's own, as
+`nestedTools`. A round never includes codemode.
 
 | `--setups` value | Enabled tools                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------- |

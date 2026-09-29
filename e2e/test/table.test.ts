@@ -72,6 +72,15 @@ test("a round is refused if a task didn't finish, or the code was uncommitted or
 	]);
 });
 
+test("a round is refused if any attempt ran with codemode", () => {
+	const records = completeRound();
+	Object.assign(
+		records.find((record) => record.kind === "run")!,
+		{ codemode: "on" },
+	);
+	expect(problems(records)).toEqual(["some attempts ran with codemode, which a round doesn't"]);
+});
+
 test("a failed attempt shows in its cell rather than disappearing from the average", () => {
 	const records = completeRound();
 	const stock = records.filter(

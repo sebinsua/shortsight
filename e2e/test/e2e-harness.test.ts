@@ -124,6 +124,29 @@ test("aggregate results charge failed attempts to verified completions", () => {
 	});
 });
 
+test("calls a codemode script makes are counted apart from the model's own", () => {
+	const summary = summarizeEvents([
+		{ type: "turn_start" },
+		{ type: "tool_execution_start", toolName: "codemode", toolCallId: "1" },
+		{ type: "tool_execution_start", toolName: "code", toolCallId: "1/1", parentToolCallId: "1" },
+		{
+			type: "tool_execution_end",
+			toolName: "code",
+			toolCallId: "1/1",
+			parentToolCallId: "1",
+			isError: false,
+			result: { details: { exitCode: 1, conflicts: [] } },
+		},
+		{ type: "tool_execution_end", toolName: "codemode", toolCallId: "1", isError: false, result: {} },
+	]);
+	expect(summary.tools).toEqual({ codemode: 1 });
+	expect(summary.nestedTools).toEqual({ code: 1 });
+	expect(summary.failedTools).toEqual({});
+	expect(summary.nestedFailedTools).toEqual({ code: 1 });
+	expect(summary.failedCodeCalls).toBe(1);
+	expect(summary.toolOutcomes.map((outcome) => outcome.parentToolCallId)).toEqual(["1", undefined]);
+});
+
 test("an attempt the model provider ended is counted apart, not as the tool failing", () => {
 	const ended = summarizeEvents([
 		{ type: "turn_start" },

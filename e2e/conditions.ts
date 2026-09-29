@@ -6,16 +6,28 @@ export const setups = ["baseline", "code", "replace", "read-code"] as const;
 export type Setup = (typeof setups)[number];
 export type Documentation = "shipped" | "minimal";
 export type Sightread = "off" | "on";
+/** Pi's codemode tool: absent, alongside the declared tools (`codemode.mode: "on"`), or in place of them ("only"). */
+export type Codemode = "off" | "on" | "only";
+/** How `code` meets codemode: callable from scripts with a structured result, or declared to the model only. */
+export type CodeExposure = "direct" | "model-only";
+
+function distinctMembers<T extends string>(option: string, value: string, members: readonly T[]): T[] {
+	const result = value.split(",");
+	if (!result.length || result.some((item) => !members.includes(item as T)) || new Set(result).size !== result.length)
+		throw new Error(`--${option} must be distinct members of ${members.join(", ")}`);
+	return result as T[];
+}
 
 export function parseSightread(value: string): Sightread[] {
-	const result = value.split(",");
-	if (
-		!result.length ||
-		result.some((item) => item !== "off" && item !== "on") ||
-		new Set(result).size !== result.length
-	)
-		throw new Error("--sightread must be distinct members of off, on");
-	return result as Sightread[];
+	return distinctMembers("sightread", value, ["off", "on"]);
+}
+
+export function parseCodemode(value: string): Codemode[] {
+	return distinctMembers("codemode", value, ["off", "on", "only"]);
+}
+
+export function parseCodeExposure(value: string): CodeExposure[] {
+	return distinctMembers("code-exposure", value, ["direct", "model-only"]);
 }
 
 /** API facts only: no batching advice, workflow examples, or skill referral. */
@@ -46,13 +58,48 @@ export function parseSetups(value: string): Setup[] {
 	return result as Setup[];
 }
 
-export function conditionTools(setup: Setup): string[] {
+export function conditionTools(setup: Setup, codemode: Codemode = "off"): string[] {
 	// Explicit lists keep stock and replacement exploration facilities identical.
 	const common = ["read", "bash"];
-	if (setup === "read-code") return ["read", "code"];
-	if (setup === "replace") return [...common, "code"];
-	return [...common, "edit", "write", ...(setup === "code" ? ["code"] : [])];
+	const tools =
+		setup === "read-code"
+			? ["read", "code"]
+			: setup === "replace"
+				? [...common, "code"]
+				: [...common, "edit", "write", ...(setup === "code" ? ["code"] : [])];
+	return codemode === "off" ? tools : [...tools, "codemode"];
 }
+
+/**
+ * What a codemode script receives from `code` under the direct exposure: the run's result rather than its text.
+ * A failed run resolves too, as Pi does for any tool with an output schema, so scripts check `exitCode`.
+ */
+export const codeOutputSchema = {
+	type: "object",
+	properties: {
+		exitCode: { type: ["number", "null"], description: "0 on success; null when the program was killed" },
+		timedOut: { type: "boolean" },
+		output: { type: "string", description: "The program's stdout and stderr" },
+		errorLine: { type: "string", description: "On failure, the program line the error came from" },
+		changes: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+					kind: { type: "string", enum: ["added", "modified", "deleted"] },
+					patch: { type: "string" },
+				},
+				required: ["path", "kind", "patch"],
+			},
+		},
+		applied: { type: "array", items: { type: "string" }, description: "Changed files written to the repository" },
+		conflicts: { type: "array", items: { type: "string" }, description: "Files changed by others during the run" },
+		rolledBack: { type: "array", items: { type: "string" }, description: "Changed files not kept after a failure" },
+		warnings: { type: "array", items: { type: "string" } },
+		infrastructureError: { type: "string", description: "Set, without the fields above, when the run couldn't start" },
+	},
+} as const;
 
 export function rotateConditions<T>(conditions: T[], repetition: number): T[] {
 	const offset = (repetition - 1) % conditions.length;
@@ -75,18 +122,34 @@ export async function extensionEntry(
 	documentation: Documentation,
 	destination: string,
 	sightread: Sightread = "on",
+	codemode: Codemode = "off",
+	exposure: CodeExposure = "direct",
 ): Promise<string> {
 	const entry = await extensionIndex(root);
-	if (documentation === "shipped" && sightread === "on") return entry;
+	if (documentation === "shipped" && sightread === "on" && codemode === "off") return entry;
 	await mkdir(path.dirname(destination), { recursive: true });
 	const description = sightread === "on" ? minimalDescription : minimalDescription.replace(/^graph\.query.*\n/m, "");
+	const documented =
+		documentation === "minimal"
+			? `{ ...tool, description: ${JSON.stringify(description)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }`
+			: "tool";
+	// Without codemode, `code` stays exactly as shipped, so these conditions match earlier results.
+	const exposed =
+		codemode === "off"
+			? documented
+			: exposure === "model-only"
+				? `{ ...${documented}, exposure: "model-only" }`
+				: `{ ...${documented}, outputSchema: ${JSON.stringify(codeOutputSchema)}, async execute(...args) {
+          const result = await tool.execute(...args);
+          return { ...result, structuredContent: result.details };
+        } }`;
 	await writeFile(
 		destination,
 		`import extension from ${JSON.stringify(pathToFileURL(entry).href)};
 export default function(pi) {
   const proxy = new Proxy(pi, { get(target, key) {
     if (key === "registerTool") return (tool) => target.registerTool(tool.name === "code"
-      ? ${documentation === "minimal" ? `{ ...tool, description: ${JSON.stringify(description)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }` : "tool"}
+      ? ${exposed}
       : tool);
     const value = Reflect.get(target, key);
     return typeof value === "function" ? value.bind(target) : value;

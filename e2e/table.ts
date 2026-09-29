@@ -20,6 +20,7 @@ interface Run {
 	promptStyle: string | null;
 	setup: string;
 	sightread: string;
+	codemode?: string; // absent before codemode conditions existed
 	skill: string;
 	documentation: string;
 	model: string;
@@ -67,6 +68,8 @@ export function problems(records: (Run | Experiment)[]): string[] {
 		),
 	);
 	for (const item of extra) found.push(`${item}: not part of a round`);
+	if (runs.some((run) => (run.codemode ?? "off") !== "off"))
+		found.push("some attempts ran with codemode, which a round doesn't");
 	const shorthand = runs.filter((run) => run.setup === "code");
 	if (shorthand.some((run) => run.skill !== "shorthand" || run.documentation !== "shipped"))
 		found.push("some shorthand attempts ran without the shipped documentation and skill");
