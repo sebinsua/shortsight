@@ -744,7 +744,13 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
 	// edit twice is one edit; only different edits to the same text conflict.
 	const ordered = edits
-		.toSorted((a, b) => a.startPos - b.startPos || b.endPos - a.endPos)
+		// Text breaks ties so identical edits sit together, however the matches were ordered.
+		.toSorted(
+			(a, b) =>
+				a.startPos - b.startPos ||
+				b.endPos - a.endPos ||
+				(a.insertedText < b.insertedText ? -1 : a.insertedText > b.insertedText ? 1 : 0),
+		)
 		.filter(
 			(edit, i, all) =>
 				i === 0 ||
