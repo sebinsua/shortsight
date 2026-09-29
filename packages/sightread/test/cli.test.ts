@@ -45,6 +45,7 @@ test("parsing errors have exact messages and exit 1", () => {
 		[["{}", "{}"], "pass one JSON request (or array); run sightread --help"],
 		[["42"], "pass one JSON request (or array); run sightread --help"],
 		[["{"], "invalid JSON request; run sightread --help"],
+		[["overview"], `requests are JSON: sightread '{"type":"overview"}'; run sightread --help`],
 		[["[]"], "batch must contain at least one request"],
 	] as const) {
 		const output = run(...args);

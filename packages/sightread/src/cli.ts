@@ -174,6 +174,9 @@ async function main(args: string[]): Promise<string> {
 	try {
 		parsed = JSON.parse(positionals[0]);
 	} catch {
+		// A bare word is usually a request type tried as a subcommand, like `sightread overview`.
+		if (/^[a-z]+$/.test(positionals[0]))
+			throw new Error(`requests are JSON: sightread '{"type":"${positionals[0]}"}'; run sightread --help`);
 		throw new Error("invalid JSON request; run sightread --help");
 	}
 	if (!isRequest(parsed) && !Array.isArray(parsed)) throw new Error(argumentError);
