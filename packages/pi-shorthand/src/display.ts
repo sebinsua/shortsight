@@ -25,9 +25,7 @@ const ANSI_CUBE_VALUES = [0, 95, 135, 175, 215, 255];
 const ANSI_GRAY_VALUES = Array.from({ length: 24 }, (_, index) => 8 + index * 10);
 
 const OUTPUT_PREVIEW_LINES = 5; // like Pi's bash tool
-// Changed lines, not context: Pi's edit tool shows every diff, so a small edit in a few places must stay inline.
-const INLINE_CHANGED_LINES = 40; // more changed lines, or more files than are listed, collapse to a list of files…
-const LISTED_FILES = 8; // …showing this many, then "and N more files"
+const LISTED_FILES = 8; // a diff too tall for the screen lists this many files, then "and N more files"
 const EXPANDED_DIFF_LINES = 2000; // even expanded, a diff of hundreds of files stops here
 
 export function callLine(
@@ -61,7 +59,8 @@ function indent(line: string): string {
 	return `  ${line}`;
 }
 
-export function resultLines(run: RunResult, expanded: boolean, theme: Theme): string[] {
+/** `collapseDiff` swaps the applied diff for a list of its files; see FitsScreen for when. */
+export function resultLines(run: RunResult, expanded: boolean, theme: Theme, collapseDiff = false): string[] {
 	const applied = run.changes.filter((change) => run.applied.includes(change.path));
 	const notApplied = run.changes.filter(
 		(change) => !run.applied.includes(change.path) && !run.rolledBack.includes(change.path),
@@ -96,7 +95,7 @@ export function resultLines(run: RunResult, expanded: boolean, theme: Theme): st
 	const sections: string[][] = [];
 	const background: ToolBackground =
 		run.exitCode === 0 && run.conflicts.length === 0 && run.rolledBack.length === 0 ? "toolSuccessBg" : "toolErrorBg";
-	if (applied.length > 0) sections.push(diffLines(applied, expanded, theme, background));
+	if (applied.length > 0) sections.push(diffLines(applied, collapseDiff && !expanded, theme, background));
 	if (output && (expanded || !error)) sections.push(outputLines(output, expanded, run.changes.length > 0, theme));
 	if (notApplied.length > 0) sections.push(notAppliedLines(notApplied, expanded, theme, background));
 	for (const section of sections) lines.push("", ...section);
@@ -158,16 +157,11 @@ function outputLines(output: string, expanded: boolean, labelled: boolean, theme
 	return [...label, hint, ...lines.slice(-OUTPUT_PREVIEW_LINES)];
 }
 
-/** Each file's diff under its name, in Pi's own diff style. A large change collapses to a list of files. */
-function diffLines(changes: FileChange[], expanded: boolean, theme: Theme, background: ToolBackground): string[] {
-	const changed = changes.reduce((sum, change) => {
-		const count = countLines(change.patch);
-		return sum + count.additions + count.deletions;
-	}, 0);
-	if (!expanded && (changed > INLINE_CHANGED_LINES || changes.length > LISTED_FILES)) {
+/** Each file's diff under its name, in Pi's own diff style, or when collapsed a list of the files. */
+function diffLines(changes: FileChange[], collapse: boolean, theme: Theme, background: ToolBackground): string[] {
+	if (collapse) {
 		return [...fileList(changes, theme), theme.fg("muted", `(${keyHint("app.tools.expand", "to see the diff")})`)];
 	}
-
 	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme, background)]);
 	const lines = files.flatMap((file, index) => (index === 0 ? file : ["", ...file]));
 	if (lines.length <= EXPANDED_DIFF_LINES) return lines;
@@ -320,7 +314,7 @@ function colorDistance(first: number[], second: number[]): number {
 
 function notAppliedLines(changes: FileChange[], expanded: boolean, theme: Theme, background: ToolBackground): string[] {
 	const heading = theme.fg("muted", `Would have changed ${fileCount(changes)} · `) + stats(changes, theme);
-	if (expanded) return [heading, "", ...diffLines(changes, true, theme, background)];
+	if (expanded) return [heading, "", ...diffLines(changes, false, theme, background)];
 	return [heading + theme.fg("muted", ` (${keyHint("app.tools.expand", "to see the diff")})`)];
 }
 

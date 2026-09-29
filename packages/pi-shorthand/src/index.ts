@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	DEFAULT_TIMEOUT_SECONDS,
@@ -151,7 +151,7 @@ export function renderCodeResult(
 	result: { content: readonly unknown[]; details?: unknown },
 	{ expanded, isPartial }: { expanded: boolean; isPartial: boolean },
 	theme: Theme,
-): Text {
+): Component {
 	if (isPartial) {
 		const progress = (result.details as { progress?: string } | undefined)?.progress;
 		return new Text(theme.fg("muted", progress ? `running… ${progress}` : "running…"), 0, 0);
@@ -170,5 +170,32 @@ export function renderCodeResult(
 	}
 	const run = result.details as RunResult | undefined;
 	if (!run) return new Text(theme.fg("error", unstructuredResultText(result.content)), 0, 0);
-	return new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
+	const full = new Text(resultLines(run, expanded, theme).join("\n"), 0, 0);
+	if (expanded) return full;
+	return new FitsScreen(full, new Text(resultLines(run, false, theme, true).join("\n"), 0, 0));
+}
+
+/** Rows Pi keeps for itself below a tool result: the editor, its borders and the footer. */
+const PI_CHROME_ROWS = 8;
+
+/**
+ * Shows the whole result while it fits on screen once wrapped, like Pi's edit tool, and otherwise the version
+ * with the diff collapsed to a list of files. Measured on each render, so resizing the terminal is followed.
+ */
+export class FitsScreen implements Component {
+	constructor(
+		private readonly full: Component,
+		private readonly collapsed: Component,
+		private readonly rows = () => process.stdout.rows || 24,
+	) {}
+
+	render(width: number): string[] {
+		const lines = this.full.render(width);
+		return lines.length <= this.rows() - PI_CHROME_ROWS ? lines : this.collapsed.render(width);
+	}
+
+	invalidate(): void {
+		this.full.invalidate();
+		this.collapsed.invalidate();
+	}
 }

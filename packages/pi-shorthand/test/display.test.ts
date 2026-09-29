@@ -3,7 +3,8 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { highlightCode, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { callLine, resultLines, unstructuredResultText } from "../src/display.ts";
-import { renderCodeResult } from "../src/index.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { FitsScreen, renderCodeResult } from "../src/index.ts";
 import type { FileChange, RunResult } from "shorthand-code";
 
 // Plain text: no colours, so the tests read the words and layout.
@@ -320,16 +321,22 @@ describe("sections", () => {
 		expect(lines.slice(lines.indexOf("Program output"))).toEqual(["Program output", "done"]);
 	});
 
-	test("hundreds of files collapse to a short list", () => {
+	test("a diff too tall for the screen collapses to a short list", () => {
 		const changes = Array.from({ length: 300 }, (_, i) => change(`f${i}.ts`));
-		const lines = show(result({ changes, applied: changes.map((c) => c.path) }));
+		const run = result({ changes, applied: changes.map((c) => c.path) });
+		const fit = new FitsScreen(
+			new Text(resultLines(run, false, theme).join("\n"), 0, 0),
+			new Text(resultLines(run, false, theme, true).join("\n"), 0, 0),
+			() => 50,
+		);
+		const lines = fit.render(120).map((line) => Bun.stripANSI(line).trimEnd());
 		expect(lines[0]).toBe("✓ Applied 300 files · +300 −300 · 0.6s");
 		expect(lines).toContain("… and 292 more files");
 		expect(lines.length).toBeLessThan(15);
 	});
 
-	test("a small edit in several places stays inline, however much context surrounds it", () => {
-		// +10 −5 across five hunks renders to more than 40 lines once context is included.
+	test("a diff stays whole while it fits on the screen, counting wrapped lines", () => {
+		// +10 −5 in five places of one file: over 40 lines once context is included.
 		const hunks = [0, 1, 2, 3, 4].flatMap((i) => [
 			`@@ -${i * 20 + 1},${i === 4 ? 6 : 7} +${i * 20 + 1},${i === 4 ? 8 : 9} @@`,
 			" a",
@@ -344,10 +351,19 @@ describe("sections", () => {
 			" f",
 		]);
 		const patch = ["diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", ...hunks].join("\n");
-		const lines = show(result({ changes: [{ path: "a.ts", kind: "modified", patch }], applied: ["a.ts"] }));
-		expect(lines).toContain("a.ts +10 −5");
-		expect(lines.length).toBeGreaterThan(40);
-		expect(lines.join("\n")).not.toContain("to see the diff");
+		const run = result({ changes: [{ path: "a.ts", kind: "modified", patch }], applied: ["a.ts"] });
+		const fit = (rows: number) =>
+			new FitsScreen(
+				new Text(resultLines(run, false, theme).join("\n"), 0, 0),
+				new Text(resultLines(run, false, theme, true).join("\n"), 0, 0),
+				() => rows,
+			);
+		const whole = fit(60).render(120);
+		expect(whole.length).toBeGreaterThan(40);
+		expect(whole.join("\n")).not.toContain("to see the diff");
+		expect(fit(40).render(120).join("\n")).toContain("to see the diff");
+		// The same diff wrapped into a narrow terminal no longer fits in 60 rows.
+		expect(fit(60).render(12).length).toBeLessThan(15);
 	});
 
 	test("a failure's diff is one line until expanded", () => {
