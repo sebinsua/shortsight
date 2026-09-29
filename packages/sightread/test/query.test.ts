@@ -236,6 +236,7 @@ test("reverse trace honors maxNodes, maxDepth, and counts unresolved symbols", a
 		query: async () => {
 			throw new Error("unexpected references query");
 		},
+		reexport: async () => undefined,
 		close: async () => {},
 	};
 	const context = { client: traceClient, ranges, references, root: "/tmp" };

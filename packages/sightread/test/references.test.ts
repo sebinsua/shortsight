@@ -301,6 +301,27 @@ test("a single symbol, qualified by its file, works in details and trace", () =>
 	expect(missing.err).toContain("src/use.ts#Row.get not found");
 });
 
+test("a name qualified by a barrel that re-exports it resolves to its declaration", () => {
+	const output = run(
+		"--json",
+		JSON.stringify([
+			{ type: "details", symbol: "src/barrel.ts#ExportedRow" },
+			{ type: "references", symbol: "src/barrel.ts#ExportedRow.get" },
+		]),
+	);
+	expect(output.code).toBe(0);
+	const [details, references] = JSON.parse(output.out) as Array<{
+		nodes: Array<{ handle: string; line?: number }>;
+		sections: { declaration?: string };
+	}>;
+	expect(details.nodes.map(({ handle }) => handle)).toContain("src/row.ts#Row:class");
+	expect(references.nodes.some(({ handle }) => handle.startsWith("src/use.ts#reference:"))).toBe(true);
+	// Importing a name isn't exporting it, so a file that only imports Row still doesn't have it.
+	const imported = run(JSON.stringify({ type: "details", symbol: "src/use.ts#Row" }));
+	expect(imported.code).toBe(1);
+	expect(imported.err).toContain("src/use.ts#Row not found");
+});
+
 test("each reference names the declaration it sits in and the call it makes", () => {
 	const [result] = JSON.parse(run("--json", JSON.stringify({ type: "references", symbol: "Row.get" })).out) as Array<{
 		nodes: Array<{

@@ -328,7 +328,15 @@ export async function runQuery(
 ): Promise<string> {
 	const mode = options.mode ?? (options.json ? "json" : "text");
 	const paths = context.root ? createPaths(context.root) : undefined;
-	const resolved = await resolveNamesSettled(context.client, requests, paths);
+	const references = context.references;
+	const reexport =
+		references && paths
+			? async (file: string, name: string) => {
+					const declared = await references.reexport(paths.inputToProjectPath(file), name);
+					return declared && { file: paths.toRepositoryPath(declared.file), name: declared.name };
+				}
+			: undefined;
+	const resolved = await resolveNamesSettled(context.client, requests, paths, reexport);
 	const results = await Promise.all(
 		resolved.map(async (item) => {
 			if ("error" in item) return { error: item.error };

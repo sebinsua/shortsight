@@ -2,7 +2,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { API, type Snapshot } from "typescript/unstable/async";
+import { API, type Snapshot, SymbolFlags } from "typescript/unstable/async";
 import {
 	getTouchingPropertyName,
 	isCallExpression,
@@ -37,6 +37,8 @@ import { graphKind, hasModifier, listedExports } from "./ranges.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
+	/** Where what `file` exports as `name` is declared, project-relative, when it re-exports it from elsewhere. */
+	reexport(file: string, name: string): Promise<{ file: string; name: string } | undefined>;
 	close(): Promise<void>;
 }
 
@@ -380,6 +382,24 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 					edges: [],
 					sections: { symbol: name, declaration },
 				};
+			}),
+		reexport: (file, name) =>
+			serially(async () => {
+				const active = await refresh();
+				const absolute = resolve(project.root, file);
+				const home = await active.getDefaultProjectForFile(absolute);
+				const source = await home?.program.getSourceFile(absolute);
+				const module = source && (await home!.checker.getSymbolAtLocation(source));
+				const exported = module && (await home!.checker.getMemberInModuleExports(module, name));
+				if (!exported) return undefined;
+				// A re-export is an alias; follow it through barrels to the declaration.
+				const target = exported.flags & SymbolFlags.Alias ? await home!.checker.getAliasedSymbol(exported) : exported;
+				const declaration = target.declarations[0] && (await target.declarations[0].resolve());
+				if (!declaration) return undefined;
+				const declaring = relative(realpathSync(project.root), realpathSync(declaration.getSourceFile().fileName));
+				return declaring === relative(realpathSync(project.root), realpathSync(absolute))
+					? undefined
+					: { file: declaring, name: target.name };
 			}),
 		close: () =>
 			serially(async () => {
