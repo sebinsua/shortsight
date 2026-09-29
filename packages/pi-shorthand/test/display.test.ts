@@ -5,7 +5,7 @@ import { highlightCode, initTheme, type Theme } from "@earendil-works/pi-coding-
 import { callLine, resultLines, unstructuredResultText } from "../src/display.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { FitsScreen, renderCodeResult } from "../src/index.ts";
-import type { FileChange, RunResult } from "shorthand-code";
+import { textForModel, type FileChange, type RunResult } from "shorthand-code";
 
 // Plain text: no colours, so the tests read the words and layout.
 const theme = {
@@ -30,6 +30,8 @@ const change = (path: string, added = 1, removed = 1): FileChange => ({
 		...Array.from({ length: added }, (_, i) => `+new ${i}`),
 	].join("\n"),
 });
+
+const keep = (content: string) => ({ content, truncated: false, outputLines: 0, totalLines: 0 });
 
 const result = (overrides: Partial<RunResult>): RunResult => ({
 	exitCode: 0,
@@ -214,6 +216,19 @@ describe("unstructured completed results", () => {
 		expect(calls.filter((call) => call.text.includes("observer preparation"))).toEqual([
 			{ color: "muted", text: "  observer preparation: 23ms (failed)" },
 		]);
+	});
+
+	test("the model sees timing for a timeout, but not for an ordinary error", () => {
+		const text = (overrides: Partial<RunResult>) =>
+			textForModel(
+				result({
+					diagnostics: { spans: [], counters: {}, wallMs: 700, startupMs: 10, runnerMs: 690, responseMs: 0 },
+					...overrides,
+				}),
+				{ name: "test", truncateHead: keep, truncateTail: keep },
+			);
+		expect(text({ exitCode: 1, output: "TypeError: m.text is not a function\n" })).not.toContain("runner startup/IPC");
+		expect(text({ exitCode: 1, timedOut: true })).toContain("runner startup/IPC");
 	});
 
 	test("slow startup prints diagnostics even when the runner itself was quick", () => {

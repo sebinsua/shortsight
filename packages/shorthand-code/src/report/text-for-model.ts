@@ -88,7 +88,8 @@ export function textForModel(run: RunResult, options: ModelTextOptions): string 
 	// On failure the error goes last, where it's easiest to find; on success, the diff does.
 	if (run.exitCode === 0 && run.conflicts.length === 0) lines.push(...output, ...diff);
 	else lines.push(...diff, ...output);
-	if (run.diagnostics && ((run.diagnostics.wallMs ?? run.durationMs) >= timeoutBudgetMs(run) || run.exitCode !== 0))
+	// Timing explains a timeout or a slow run; an ordinary error in the program is about its code.
+	if (run.diagnostics && (run.timedOut || (run.diagnostics.wallMs ?? run.durationMs) >= timeoutBudgetMs(run)))
 		lines.push("", ...diagnosticLines(run.diagnostics));
 	return lines.join("\n");
 }
