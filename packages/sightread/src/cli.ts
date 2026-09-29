@@ -69,6 +69,12 @@ async function showHelp(cwd: string): Promise<string> {
 				"  sightread diff HEAD",
 				"  --raw prints upstream values and project-relative paths unchanged.",
 				"",
+				"--json prints an array with one result per request: its type, its nodes and any edges between them,",
+				"or an error. A node has handle, name, file and line ranges. A reference also has line, col, endCol,",
+				"its line's text, and call: the call's range and each argument's. Lines and columns count from 1,",
+				"columns in UTF-16 code units, and ends are exclusive. Many references make a large result: write",
+				"it to a file and read what you need from there.",
+				"",
 				"Request types:",
 			];
 			for (const request of await client.requestTypes()) {
