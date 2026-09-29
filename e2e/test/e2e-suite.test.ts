@@ -34,6 +34,14 @@ test("copied fixtures provide the same local TypeScript compiler without downloa
 });
 
 for (const task of allTasks)
+	test(`${task.id} starts formatted by its own formatter`, async () => {
+		const root = await directory();
+		await materializeTask(task, root);
+		const check = await $`node_modules/.bin/oxfmt --check .`.cwd(root).nothrow().quiet();
+		expect({ exit: check.exitCode, output: check.stdout.toString() }).toMatchObject({ exit: 0 });
+	});
+
+for (const task of allTasks)
 	test(`evaluator rejects initial ${task.id} and accepts its reference solution`, async () => {
 		const root = await directory();
 		await materializeTask(task, root);

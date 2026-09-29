@@ -43,7 +43,8 @@ async function tool(name: string) {
 	return { directory, version: JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")).version };
 }
 
-export async function materializeTask(task: Task, root: string): Promise<void> {
+/** `formatted: false` keeps generated layout, for replaying sessions recorded before fixtures were formatted. */
+export async function materializeTask(task: Task, root: string, { formatted = true } = {}): Promise<void> {
 	await mkdir(root, { recursive: true });
 	for (const [file, content] of Object.entries(task.files)) {
 		await mkdir(path.dirname(path.join(root, file)), { recursive: true });
@@ -83,6 +84,9 @@ export async function materializeTask(task: Task, root: string): Promise<void> {
 	await symlink("../typescript/bin/tsc", path.join(root, "node_modules/.bin/tsc"));
 	await symlink(oxfmt.directory, path.join(root, "node_modules/oxfmt"), "dir");
 	await symlink("../oxfmt/bin/oxfmt", path.join(root, "node_modules/.bin/oxfmt"));
+	// A project with a formatter keeps its files formatted, so start from that; `// prettier-ignore` keeps the
+	// layouts a task depends on, such as calls split over lines.
+	if (formatted) await $`${path.join(root, "node_modules/.bin/oxfmt")} .`.cwd(root).quiet();
 	await $`git init -q`.cwd(root).quiet();
 	await $`git add .`.cwd(root).quiet();
 	await $`git -c user.name=Benchmark -c user.email=benchmark@localhost -c commit.gpgsign=false commit -qm ${task.revision}`

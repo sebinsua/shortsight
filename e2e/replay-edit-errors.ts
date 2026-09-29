@@ -19,7 +19,8 @@ for (const name of ["method-pattern", "file-target"]) {
 	const task = allTasks.find((item) => item.id === metadata.task)!;
 	const root = await mkdtemp(path.join(tmpdir(), "shorthand-recovery-"));
 	try {
-		await materializeTask(task, root);
+		// The recorded failures happened against the generated layout, before fixtures were formatted.
+		await materializeTask(task, root, { formatted: false });
 		const execute = async (phase: string) => {
 			const program = await readFile(path.join(dir, `${name}.${phase}.ts.txt`), "utf8");
 			await writeFile(path.join(output, `${name}.${phase}.ts.txt`), program);

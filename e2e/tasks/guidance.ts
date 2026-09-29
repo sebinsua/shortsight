@@ -80,7 +80,7 @@ export const guidanceTasks: Task[] = [
 	{
 		id: "extract-table",
 		category: "extraction",
-		revision: "guidance-v1",
+		revision: "guidance-v2",
 		prompt:
 			"Extract TableWriter.format's formatting logic into an exported pure renderTable(rows, options?) function in table.ts. Keep the shared types and TableWriter API, delegating format to renderTable. Update exportTable to use renderTable without constructing TableWriter. Preserve quoting, separators, validation order, error messages and record/completed behavior.",
 		files: { "types.ts": types, "writer.ts": formatter, "export.ts": exportTable },
@@ -155,7 +155,7 @@ export const guidanceTasks: Task[] = [
 	{
 		id: "durability-options",
 		category: "migration",
-		revision: "guidance-v1",
+		revision: "guidance-v2",
 		prompt:
 			"Migrate every store.save(key, booleanLiteral) call to pass an options object with a durable property as its second argument. Leave dynamic expressions, existing options objects and string contents unchanged. Preserve behavior and existing comments.",
 		files: { "storage.ts": storage, "saves.ts": saves, "secondary.ts": secondary },
@@ -200,7 +200,7 @@ export const guidanceTasks: Task[] = [
 	{
 		id: "request-headers",
 		category: "propagation",
-		revision: "guidance-v1",
+		revision: "guidance-v2",
 		prompt:
 			"Add an optional HeadersInit parameter to readProject, readOwner and projectView, and forward it through every request. A projectView call must use the same headers value for both requests. Existing callers without headers and existing return values must keep working. Request failures must propagate unchanged.",
 		files: { "api.ts": api, "view.ts": view },

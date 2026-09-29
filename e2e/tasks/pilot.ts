@@ -61,7 +61,7 @@ export const pilotTasks: Task[] = [
 	{
 		id: "empty-average",
 		category: "small-edit",
-		revision: "embedded-v1",
+		revision: "embedded-v2",
 		prompt:
 			"Make average([]) return undefined. Preserve the existing behaviour for non-empty arrays and update the public return type accordingly.",
 		files: {
@@ -86,7 +86,7 @@ const correct: Equal<ReturnType<typeof average>, number | undefined> = true;
 	{
 		id: "status-options",
 		category: "migration",
-		revision: "embedded-v1",
+		revision: "embedded-v2",
 		prompt:
 			"Wherever c.json(data, status) has a number literal as its second argument, pass that number in an options object with a status property. Leave other calls and string contents unchanged. Preserve behaviour.",
 		files: { "response.ts": response, "routes.ts": routes, "extra.ts": extra },
@@ -118,7 +118,7 @@ const correct: Equal<ReturnType<typeof average>, number | undefined> = true;
 	{
 		id: "concurrency-map",
 		category: "implementation",
-		revision: "embedded-v1",
+		revision: "embedded-v2",
 		prompt:
 			"Implement mapConcurrent(items, limit, mapper) in map.ts. It returns a Promise of results in input order, runs at most limit mapper calls concurrently, and passes each item's index to mapper. Reject non-positive or non-integer limits, including for empty input. Propagate mapper errors, including synchronous throws, and stop starting new work once a failure is observed. Empty input returns an empty array. Preserve the generic signature.",
 		files: {
@@ -208,7 +208,7 @@ const correct: Equal<ReturnType<typeof average>, number | undefined> = true;
 	{
 		id: "shared-validation",
 		category: "extraction",
-		revision: "embedded-v1",
+		revision: "embedded-v2",
 		prompt:
 			"Extract the duplicated address normalisation and validation into an exported validateAddress function in validation.ts. Accounts.register, Accounts.update, and invitation must all use it. Preserve all existing return values, state changes, and error messages, including validation before account existence checks.",
 		files: { "accounts.ts": account, "invitation.ts": invitation },
@@ -254,7 +254,7 @@ const correct: Equal<ReturnType<typeof average>, number | undefined> = true;
 	{
 		id: "request-cancellation",
 		category: "propagation",
-		revision: "embedded-v1",
+		revision: "embedded-v2",
 		prompt:
 			"Add an optional AbortSignal to loadUser, loadTeam, and dashboard, and forward it through every request. Existing callers without a signal must keep working. A dashboard call must use the same signal for both requests, and request failures must propagate unchanged.",
 		files: {

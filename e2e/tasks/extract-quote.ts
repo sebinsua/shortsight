@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Lang, parse } from "@ast-grep/napi";
+import { $ } from "bun";
 import type { Task } from "./task.ts";
 import { assertImports } from "../verification.ts";
 
@@ -78,7 +79,7 @@ export function preview(items: readonly Item[], options: Options = {}) {
 export const orderTask: Task = {
 	id: "extract-quote",
 	category: "extraction",
-	revision: "embedded-v1",
+	revision: "embedded-v2",
 	prompt:
 		"Extract Checkout.quote's pricing calculation into an exported pure calculateQuote(items, options?) function in quote.ts. Keep Checkout's public API compatible by delegating to that function, and update preview to call it without constructing Checkout. Preserve all pricing, rounding, validation order, error messages, and submit/history behaviour. Keep the existing shared types.",
 	files: { "types.ts": types, "checkout.ts": original, "preview.ts": preview },
@@ -133,7 +134,9 @@ export const orderTask: Task = {
 		const copy = checkout.history();
 		copy.length = 0;
 		assert.equal(checkout.history().length, 1);
-		assert.equal(await readFile(path.join(root, "types.ts"), "utf8"), types);
+		// Unchanged since the fixture's commit, which holds it as its formatter wrote it.
+		const committed = await $`git show HEAD:types.ts`.cwd(root).quiet().text();
+		assert.equal(await readFile(path.join(root, "types.ts"), "utf8"), committed);
 		for (const file of ["checkout.ts", "preview.ts"]) {
 			const text = await readFile(path.join(root, file), "utf8");
 			const ast = parse(Lang.TypeScript, text).root();

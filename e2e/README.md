@@ -87,8 +87,9 @@ it starts Pi immediately.
 `--suite pilot|guidance|scale` selects a suite (default `pilot`); `--tasks` accepts IDs from any suite. Each task
 has versioned starting files, an outcome-only prompt, a reference solution and an evaluator. Evaluate a
 working directory with `bun e2e/tasks.ts <task-id> <directory>`.
-Starting files, a TypeScript configuration, and a package with a `check` script are copied into the agent's fixture. Reference solutions and
-evaluators stay outside it. These are evaluation boundaries, not a security sandbox against a malicious agent.
+Starting files, a TypeScript configuration, and a package with a `check` script and the `oxfmt` formatter are copied into the agent's fixture,
+then formatted with it, as a project that uses a formatter would be. `// prettier-ignore` keeps the few layouts a
+task tests, such as calls split over lines. Reference solutions and evaluators stay outside it. These are evaluation boundaries, not a security sandbox against a malicious agent.
 
 | Task                   | Category               | Independent checks                                                                                  |
 | ---------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- |

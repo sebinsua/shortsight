@@ -70,7 +70,7 @@ const logEntry = (level: string, message: string, context?: unknown) =>
 
 const renameSymbol: Family = {
 	id: "rename-symbol",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "rename",
 	build(size) {
 		const before: Record<string, string> = {
@@ -171,7 +171,7 @@ export function ${call}() {
 
 const optionsMigration: Family = {
 	id: "options-migration",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "migration",
 	build(size) {
 		const types = "export interface RequestOptions { retries?: number; timeoutMs?: number }\n";
@@ -219,6 +219,7 @@ export function ${call}() {
 export function ${call}() {
   return [
     request("${u1}", 2, 500),
+    // prettier-ignore
     request(
       "${u2}",
       5,
@@ -231,6 +232,7 @@ export function ${call}() {
 export function ${call}() {
   return [
     request("${u1}", { retries: 2, timeoutMs: 500 }),
+    // prettier-ignore
     request(
       "${u2}",
       { retries: 5, timeoutMs: 250 },
@@ -322,7 +324,7 @@ export function ${call}() {
 
 const moveModule: Family = {
 	id: "move-module",
-	revision: "scale-v2",
+	revision: "scale-v3",
 	category: "move",
 	build(size) {
 		const from = "src/utils/date.ts";
@@ -409,7 +411,7 @@ const migratedLog = (file: string, level: "info" | "warn" | "error" | "level", m
 
 const loggerMigration: Family = {
 	id: "logger-migration",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "migration",
 	build(size) {
 		const before: Record<string, string> = {
@@ -587,7 +589,7 @@ const stillExports = (file: string, name: string): Check => ({
 
 const moveDeclaration: Family = {
 	id: "move-declaration",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "move",
 	build(size) {
 		const from = "src/utils/date.ts";
@@ -673,7 +675,7 @@ const moveDeclaration: Family = {
 
 const impactReport: Family = {
 	id: "impact-report",
-	revision: "scale-v2",
+	revision: "scale-v3",
 	category: "analysis",
 	build(size) {
 		const before: Record<string, string> = {
@@ -735,7 +737,7 @@ export function Preview<T extends { cents: number }>(props: { items: T[]; title:
 
 const methodMigration: Family = {
 	id: "method-migration",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "migration",
 	build(size) {
 		const before: Record<string, string> = {
@@ -767,8 +769,8 @@ export class Row implements Getter {
 					23,
 				],
 				[
-					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(\n  3,\n); }\n`,
-					`import { Row } from "${row}";\nexport function ${name}() { const row = new Row(); return row.get(\n  3,\n  { fresh: true },\n); }\n`,
+					`import { Row } from "${row}";\nexport function ${name}() {\n  const row = new Row();\n  // prettier-ignore\n  return row.get(\n    3,\n  );\n}\n`,
+					`import { Row } from "${row}";\nexport function ${name}() {\n  const row = new Row();\n  // prettier-ignore\n  return row.get(\n    3,\n    { fresh: true },\n  );\n}\n`,
 					1,
 					13,
 				],
