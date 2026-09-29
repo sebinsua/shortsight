@@ -1,6 +1,6 @@
 {
 	"name": "shorthand-code",
-	"version": "0.12.0",
+	"version": "0.13.0",
 	"description": "Edit repositories with Bun programs, with first-class support for TypeScript and JavaScript: a CLI and a library that Pi's code tool is built on.",
 	"keywords": [
 		"ast-grep",
@@ -39,7 +39,7 @@
 		"vscode-jsonrpc": "^9.0.2"
 	},
 	"peerDependencies": {
-		"sightread": "0.12.0"
+		"sightread": "0.13.0"
 	},
 	"peerDependenciesMeta": {
 		"sightread": {
