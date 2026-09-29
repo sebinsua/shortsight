@@ -673,7 +673,7 @@ const moveDeclaration: Family = {
 
 const impactReport: Family = {
 	id: "impact-report",
-	revision: "scale-v1",
+	revision: "scale-v2",
 	category: "analysis",
 	build(size) {
 		const before: Record<string, string> = {
@@ -726,9 +726,9 @@ export function Preview<T extends { cents: number }>(props: { items: T[]; title:
 			})),
 			cases: [],
 			prompt:
-				"If applyDiscount in src/lib/pricing.ts changed its behaviour, which exported functions under src/features would be affected, directly or through other functions? Write their names to IMPACT.txt, one per line, sorted.",
+				"If applyDiscount in src/lib/pricing.ts changed its behaviour, which exported functions under src/features would be affected, directly or through other functions? Write their names to IMPACT.txt, one per line, sorted by character code (uppercase before lowercase).",
 			brief:
-				"Report exported functions under src/features affected directly or transitively by applyDiscount in src/lib/pricing.ts, through imports, aliases and re-exports. Exclude the separate legacy function, local functions with the same name, class methods, and strings. Write only the affected function names to IMPACT.txt, one per line, sorted. Make no other changes; run `npm run check` afterwards.",
+				"Report exported functions under src/features affected directly or transitively by applyDiscount in src/lib/pricing.ts, through imports, aliases and re-exports. Exclude the separate legacy function, local functions with the same name, class methods, and strings. Write only the affected function names to IMPACT.txt, one per line, sorted by character code (uppercase before lowercase). Make no other changes; run `npm run check` afterwards.",
 		};
 	},
 };
