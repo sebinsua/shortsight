@@ -48,16 +48,17 @@ imports that use it and dynamic imports of the source are refused before anythin
 
 `refactor.references` returns every reference TypeScript resolves to a symbol, including calls through
 import aliases and a second call in the same function, and leaves same-named methods on other types
-alone. Each match's `text` is the name as written, and matches go straight to `sg.rewrite`:
+alone. Matches go straight to `sg.rewrite`, and text returned for a reference replaces the name only:
 
 ```ts
 const refs = await refactor.references({ file: "src/session.ts", symbol: "Session.refresh" });
 sg.rewrite(refs, () => "renew");
 ```
 
-When a reference is being called, `match.call` is the whole call or `new` expression, and a rewrite
-may edit it. That's how to change a call's arguments, including for methods. To add one, append it
-to the last argument, which keeps calls split over lines with a trailing comma valid:
+When a reference is being called, `match.call` is the whole call or `new` expression. To replace the
+call, return `m.call.replace(...)`: returning `"logger.info(m)"` for `log("info", m)` would give
+`logger.info(m)("info", m)`. To add an argument, append it to the last one, which keeps calls split
+over lines with a trailing comma valid:
 
 ```ts
 sg.rewrite(refs, (m) => {
@@ -65,6 +66,10 @@ sg.rewrite(refs, (m) => {
 	return last ? last.replace(`${last.text()}, { force: true }`) : null;
 });
 ```
+
+Every match, from `refactor.references` or `sg.find`, has the same shape: `file`, `line` and `text`
+are plain values (`m.file.startsWith("src/")`, not `m.file()`), while `node`, and `call` when there
+is one, are syntax nodes with methods such as `text()`, `field()` and `replace()`.
 
 ## Code graph
 
