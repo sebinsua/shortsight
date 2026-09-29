@@ -89,7 +89,8 @@ export async function materializeTask(task: Task, root: string, { formatted = tr
 	if (formatted) await $`${path.join(root, "node_modules/.bin/oxfmt")} .`.cwd(root).quiet();
 	await $`git init -q`.cwd(root).quiet();
 	await $`git add .`.cwd(root).quiet();
-	await $`git -c user.name=Benchmark -c user.email=benchmark@localhost -c commit.gpgsign=false commit -qm ${task.revision}`
+	// Otherwise git packs the new loose objects in the background, deleting them while the fixture is copied.
+	await $`git -c user.name=Benchmark -c user.email=benchmark@localhost -c commit.gpgsign=false -c maintenance.auto=false commit -qm ${task.revision}`
 		.cwd(root)
 		.quiet();
 }
