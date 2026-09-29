@@ -580,7 +580,8 @@ async function runProgram(
 	const executionCwd = path.join(overlay.executionDir, path.relative(repo, options.cwd));
 	const executionProgramPath = path.join(executionCwd, PROGRAM_FILE);
 	const executionPrelude = executionPath(PRELUDE, repo, overlay);
-	await Bun.write(programFile, options.program);
+	// Bun shows the wrong source beside an error on a last line with no newline after it.
+	await Bun.write(programFile, options.program.endsWith("\n") ? options.program : `${options.program}\n`);
 
 	const excludesFile = overlay.executionExcludesFile ?? path.join(tempDir, "exclude");
 	await Bun.write(excludesFile, [PROGRAM_FILE, ...overlay.gitExcludes, await globalGitExcludes()].join("\n"));

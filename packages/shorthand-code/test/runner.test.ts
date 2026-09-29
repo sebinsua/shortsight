@@ -231,6 +231,32 @@ describe.skipIf(!hasOverlay)("runner", () => {
 				expect(result.applied).toEqual([]);
 			});
 		}
+
+		test("a helper's error shows the program line that called it", async () => {
+			const repo = await makeRepo({ "config.txt": "original\n" });
+			const result = await run(
+				repo,
+				`edit({ path: "config.txt", oldText: "original", newText: "first" });
+edit({ path: "config.txt", oldText: "absent", newText: "second" });`,
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain('2 | edit({ path: "config.txt", oldText: "absent"');
+			expect(result.output).toContain("at program.ts:2:1");
+			expect(result.output).not.toContain("prelude.ts");
+		});
+
+		test("an error in a rewrite callback still shows the callback's own line", async () => {
+			const repo = await makeRepo({ "a.ts": "foo(1);\n" });
+			const result = await run(
+				repo,
+				`sg.rewrite("foo($A)", (m) => {
+  return m.text();
+});`,
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("2 |   return m.text();");
+			expect(result.output).toContain("m.text is not a function");
+		});
 	});
 
 	describe("TypeScript refactors", () => {

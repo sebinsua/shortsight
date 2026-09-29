@@ -136,6 +136,24 @@ function report(event: Record<string, unknown>) {
 }
 
 let helperCalls = 0;
+/** Errors the program's own code threw from inside a helper, whose stacks already point at it. */
+const programErrors = new WeakSet<Error>();
+
+/**
+ * A helper whose own errors point at the program line that called it. Bun prints the source around an
+ * error's first frame, which would otherwise be shorthand's code rather than the call that failed.
+ */
+function atCaller<A extends unknown[], T>(helper: (...args: A) => T): (...args: A) => T {
+	const call = (...args: A): T => {
+		try {
+			return helper(...args);
+		} catch (error) {
+			if (error instanceof Error && !programErrors.has(error)) Error.captureStackTrace(error, call);
+			throw error;
+		}
+	};
+	return call;
+}
 let activeHelper: { helper: string; id: number } | undefined;
 
 /**
@@ -149,6 +167,9 @@ function programCode<T>(run: () => T): T {
 	activeHelper = undefined;
 	try {
 		return run();
+	} catch (error) {
+		if (error instanceof Error) programErrors.add(error);
+		throw error;
 	} finally {
 		activeHelper = helper;
 		report({ type: "helper-resume", ...helper });
@@ -986,26 +1007,27 @@ function editText(options: { path: string; oldText: string; newText: string }): 
 
 const globals = {
 	$,
-	edit: (...args: Parameters<typeof editText>) =>
+	edit: atCaller((...args: Parameters<typeof editText>) =>
 		logged("edit", args, () => {
 			const path = pathArgument("edit", args[0]?.path);
 			return editingFiles([path], () => editText({ ...args[0], path }));
 		}),
-	glob: (...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args)),
-	grep: (...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args)),
+	),
+	glob: atCaller((...args: Parameters<typeof glob>) => logged("glob", args, () => glob(...args))),
+	grep: atCaller((...args: Parameters<typeof grep>) => logged("grep", args, () => grep(...args))),
 	sg: {
 		...astGrep,
-		find: (...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args)),
-		one: (...args: Parameters<typeof one>) => logged("sg.one", args, () => one(...args)),
-		file: (path: string) => logged("sg.file", [path], () => placementFile(pathArgument("sg.file", path))),
-		insert: (...args: Parameters<typeof insert>) => logged("sg.insert", args, () => insert(...args)),
-		move: (...args: Parameters<typeof move>) => {
+		find: atCaller((...args: Parameters<typeof find>) => logged("sg.find", args, () => find(...args))),
+		one: atCaller((...args: Parameters<typeof one>) => logged("sg.one", args, () => one(...args))),
+		file: atCaller((path: string) => logged("sg.file", [path], () => placementFile(pathArgument("sg.file", path)))),
+		insert: atCaller((...args: Parameters<typeof insert>) => logged("sg.insert", args, () => insert(...args))),
+		move: atCaller((...args: Parameters<typeof move>) => {
 			const [match, destination, transform] = args;
 			const own = transform && ((text: string) => programCode(() => transform(text)));
 			return logged("sg.move", args, () => move(match, destination, own));
-		},
-		remove: (...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args)),
-		rewrite: (...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args)),
+		}),
+		remove: atCaller((...args: Parameters<typeof remove>) => logged("sg.remove", args, () => remove(...args))),
+		rewrite: atCaller((...args: Parameters<typeof rewrite>) => logged("sg.rewrite", args, () => rewrite(...args))),
 	},
 	refactor: {
 		rename: (
