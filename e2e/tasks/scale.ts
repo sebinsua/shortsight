@@ -409,13 +409,8 @@ const migratedLog = (file: string, level: "info" | "warn" | "error" | "level", m
 		`logger ${level} call for "${message}"`,
 	);
 
-const loggerMigration: Family = {
-	id: "logger-migration",
-	revision: "scale-v2",
-	category: "migration",
-	build(size) {
-		const before: Record<string, string> = {
-			"src/lib/logger.ts": `export type LogLevel = "info" | "warn" | "error";
+const loggerLibrary: Record<string, string> = {
+	"src/lib/logger.ts": `export type LogLevel = "info" | "warn" | "error";
 export interface Entry { level: LogLevel; message: string; context?: Record<string, unknown> }
 export const entries: Entry[] = [];
 export const logger = {
@@ -427,14 +422,24 @@ export const logger = {
   error: (message: string, context?: Record<string, unknown>) => logger.log("error", message, context),
 };
 `,
-			"src/lib/log.ts": `import { logger, type LogLevel } from "./logger";
+	"src/lib/log.ts": `import { logger, type LogLevel } from "./logger";
 export type { LogLevel };
 /** @deprecated Use logger from ./logger. */
 export function log(level: LogLevel, message: string, error?: unknown): void {
   logger.log(level, message, error === undefined ? undefined : { error });
 }
 `,
-		};
+};
+
+const LOGGER_PROMPT =
+	"Replace the deprecated log() from src/lib/log.ts with the logger from src/lib/logger.ts everywhere, then delete src/lib/log.ts. Preserve the recorded log entries.";
+
+const loggerMigration: Family = {
+	id: "logger-migration",
+	revision: "scale-v2",
+	category: "migration",
+	build(size) {
+		const before: Record<string, string> = { ...loggerLibrary };
 		const after: Record<string, string | null> = { "src/lib/log.ts": null };
 		const sites: Check[] = [absent("src/lib/log.ts")];
 		const decoys: Check[] = [];
@@ -572,9 +577,181 @@ export function ${call}() {
 				const { entries } = await import(pathToFileURL(path.join(root, "src/lib/logger.ts")).href);
 				return entries.splice(0);
 			},
-			prompt:
-				"Replace the deprecated log() from src/lib/log.ts with the logger from src/lib/logger.ts everywhere, then delete src/lib/log.ts. Preserve the recorded log entries.",
+			prompt: LOGGER_PROMPT,
 			brief: `Migrate every call to the deprecated \`log(level, message, error?)\` from src/lib/log.ts to \`logger\` from src/lib/logger.ts (${size} files under src/features), then delete src/lib/log.ts. Map \`log("info" | "warn" | "error", m)\` to \`logger.info/warn/error(m)\`. A third argument becomes \`{ error: <arg> }\` context: \`log("error", m, err)\` becomes \`logger.error(m, { error: err })\`. Calls with a non-literal level become \`logger.log(level, m)\`. Replace the log import with \`logger\`, importing \`type LogLevel\` from lib/logger where it is used. Leave audit.log, Math.log and string contents alone. Make no other changes; run \`npm run check\` afterwards.`,
+		};
+	},
+};
+
+/** A migrated call site, found by its message whatever the receiver's name, layout or argument spelling. */
+const migratedLogCall = (file: string, message: string): Check =>
+	matches(
+		file,
+		new RegExp(`(?:\\.(?:info|warn|error|log)|\\[\\w+\\])\\((?:[^()]|\\([^()]*\\))*${message}`),
+		`migrated call for ${message}`,
+	);
+
+/**
+ * logger-migration's change on consumers that don't share one shape: calls split over lines, aliased imports,
+ * calls inside callbacks, a local parameter named `log`, `log(...)` inside a template string, and an error
+ * argument that may be undefined. A rewrite fitted to a few sampled lines misses or over-matches some of them.
+ */
+const irregularLogger: Family = {
+	id: "irregular-logger",
+	revision: "scale-v1",
+	category: "migration",
+	build(size) {
+		const before: Record<string, string> = { ...loggerLibrary };
+		const after: Record<string, string | null> = { "src/lib/log.ts": null };
+		const sites: Check[] = [absent("src/lib/log.ts")];
+		const decoys: Check[] = [];
+		const cases: Case[] = [];
+		const failure = new Error("failure");
+		for (let i = 0; i < size; i++) {
+			const file = consumer(i);
+			const logImport = specifier(file, "src/lib/log.ts");
+			const loggerImport = specifier(file, "src/lib/logger.ts");
+			const [m1, m2, m3] = [`m${key(i, 1)}`, `m${key(i, 2)}`, `m${key(i, 3)}`];
+			const call = `feature${i}`;
+			const kind = i % 5;
+			const [text, migrated] = [
+				[
+					`import { log } from "${logImport}";
+export function ${call}() {
+  // prettier-ignore
+  log(
+    "info",
+    'loaded settings: ${m1}',
+  );
+  log("warn", \`retrying ${m2}\`);
+}
+`,
+					`import { logger } from "${loggerImport}";
+export function ${call}() {
+  // prettier-ignore
+  logger.info(
+    'loaded settings: ${m1}',
+  );
+  logger.warn(\`retrying ${m2}\`);
+}
+`,
+				],
+				[
+					`import { log as record } from "${logImport}";
+export function ${call}(run: () => void) {
+  try {
+    run();
+  } catch (e) {
+    record("error", "failed: " + "${m1}", e);
+  }
+}
+`,
+					`import { logger } from "${loggerImport}";
+export function ${call}(run: () => void) {
+  try {
+    run();
+  } catch (e) {
+    logger.error("failed: " + "${m1}", { error: e });
+  }
+}
+`,
+				],
+				[
+					`import { log } from "${logImport}";
+export function ${call}(items: string[]) {
+  items.forEach((item) => log("info", "${m1} " + item));
+  if (items.length < 2) log("warn", "${m2}");
+  return items.length;
+}
+`,
+					`import { logger } from "${loggerImport}";
+export function ${call}(items: string[]) {
+  items.forEach((item) => logger.info("${m1} " + item));
+  if (items.length < 2) logger.warn("${m2}");
+  return items.length;
+}
+`,
+				],
+				[
+					`import { log } from "${logImport}";
+function withSink(log: (level: string, message: string) => string) {
+  return log("info", "${m3}");
+}
+export function ${call}() {
+  log("info", "${m1}");
+  return withSink((level, message) => \`\${level}/\${message}\`);
+}
+`,
+					`import { logger } from "${loggerImport}";
+function withSink(log: (level: string, message: string) => string) {
+  return log("info", "${m3}");
+}
+export function ${call}() {
+  logger.info("${m1}");
+  return withSink((level, message) => \`\${level}/\${message}\`);
+}
+`,
+				],
+				[
+					`import { log, type LogLevel } from "${logImport}";
+export const hint${i} = \`log("info", "${m2}")\`;
+export function ${call}(level: LogLevel, cause?: unknown) {
+  log(level, /* keep */ "${m1}", cause);
+}
+`,
+					`import { logger, type LogLevel } from "${loggerImport}";
+export const hint${i} = \`log("info", "${m2}")\`;
+export function ${call}(level: LogLevel, cause?: unknown) {
+  logger.log(level, /* keep */ "${m1}", cause === undefined ? undefined : { error: cause });
+}
+`,
+				],
+			][kind]!;
+			before[file] = text!;
+			after[file] = migrated!;
+			if (kind === 0 || kind === 2) sites.push(migratedLogCall(file, m1), migratedLogCall(file, m2));
+			else sites.push(migratedLogCall(file, m1));
+			if (kind === 3) decoys.push(contains(file, `return log("info", "${m3}")`, "the local log parameter's call"));
+			if (kind === 4) decoys.push(contains(file, `\`log("info", "${m2}")\``, "template string contents"));
+			cases.push({
+				file,
+				call,
+				args: [
+					[],
+					[
+						() => {
+							throw failure;
+						},
+					],
+					[["a"]],
+					[],
+					["warn"],
+				][kind],
+				expected: [
+					{
+						returned: undefined,
+						logged: [logEntry("info", `loaded settings: ${m1}`), logEntry("warn", `retrying ${m2}`)],
+					},
+					{ returned: undefined, logged: [logEntry("error", `failed: ${m1}`, { error: failure })] },
+					{ returned: 1, logged: [logEntry("info", `${m1} a`), logEntry("warn", m2)] },
+					{ returned: `info/${m3}`, logged: [logEntry("info", m1)] },
+					// No error, so no context: the deprecated log() only adds one for a defined error.
+					{ returned: undefined, logged: [logEntry("warn", m1)] },
+				][kind],
+			});
+		}
+		return {
+			before,
+			after,
+			sites,
+			decoys,
+			cases,
+			observe: async (root) => {
+				const { entries } = await import(pathToFileURL(path.join(root, "src/lib/logger.ts")).href);
+				return entries.splice(0);
+			},
+			prompt: LOGGER_PROMPT,
+			brief: `Migrate every call to the deprecated \`log(level, message, error?)\` from src/lib/log.ts to \`logger\` from src/lib/logger.ts (${size} files under src/features), then delete src/lib/log.ts. Map \`log("info" | "warn" | "error", m)\` to \`logger.info/warn/error(m)\` and a non-literal level to \`logger.log(level, m)\`. A third argument becomes \`{ error: <arg> }\` context, but only when it is defined, as the deprecated log() did. Calls may be split over lines, sit inside callbacks, or use an aliased import. Leave a local parameter named log, and log(...) inside strings or template strings, alone. Make no other changes; run \`npm run check\` afterwards.`,
 		};
 	},
 };
@@ -848,6 +1025,7 @@ export const scaleFamilies: Family[] = [
 	moveModule,
 	moveDeclaration,
 	loggerMigration,
+	irregularLogger,
 	impactReport,
 	methodMigration,
 ];

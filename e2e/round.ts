@@ -1,6 +1,7 @@
 /**
  * A benchmark round: every row below, in all four setups, with the same number of attempts. The README's results
- * table is generated from one complete round (see table.ts), never assembled from partial runs.
+ * table is generated from one complete round (see table.ts), never assembled from partial runs. Every setup has
+ * Pi's codemode on, since that is how Pi is used now; stock Pi means Pi with codemode.
  */
 import type { PromptStyle } from "./tasks.ts";
 
@@ -44,6 +45,7 @@ export const roundOptions = {
 	skills: "shorthand",
 	documentation: "shipped",
 	sightread: "off,on",
-	codemode: "off",
+	codemode: "on",
+	"code-exposure": "direct",
 	runs: String(roundAttempts),
 } as const;

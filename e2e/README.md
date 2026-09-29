@@ -127,6 +127,7 @@ them. The `scale` suite generates seven task families, each across 10, 40 and 10
 | `move-module`       | Move a module, updating its own import, re-exports and imports   | Barrel importers and a same-named legacy module                             |
 | `move-declaration`  | Move `formatDate` out of `src/utils/date.ts`, keeping its barrel | A same-named legacy `formatDate` and its importer                           |
 | `logger-migration`  | Replace deprecated `log(level, …)` with `logger`, delete it      | `audit.log`, `Math.log`, strings                                            |
+| `irregular-logger`  | The same, with multi-line, aliased and callback calls            | A local `log` parameter, template strings                                   |
 | `impact-report`     | Report direct and transitive feature callers of `applyDiscount`  | Legacy and local functions, class methods, strings                          |
 | `method-migration`  | Add `{ fresh: true }` to every `Row.get` call                    | Other `get` methods, local functions, strings                               |
 
@@ -174,7 +175,7 @@ without shorthand. `--code-exposure` applies only with codemode and a setup that
 as shipped, which scripts can call and get its result as data, and `model-only` wraps registration to keep
 `code` declared to the model but out of scripts. Without codemode, `code` is as shipped and conditions keep
 their earlier names. Calls a script makes are counted apart from the model's own, as
-`nestedTools`. A round never includes codemode.
+`nestedTools`. A round runs every setup with `--codemode on`.
 
 | `--setups` value | Enabled tools                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------- |

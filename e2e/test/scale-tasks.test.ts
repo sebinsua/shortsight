@@ -68,6 +68,54 @@ test("a partial migration reports the files it missed", async () => {
 	await expect(task.verify(root)).rejects.toThrow();
 });
 
+/** Each consumer file of an irregular-logger fixture, with its migration applied by `rewrite`, and log.ts deleted. */
+async function rewriteConsumers(root: string, rewrite: (text: string) => string) {
+	const task = taskById("irregular-logger-10");
+	for (const file of Object.keys(task.files).filter((name) => name.startsWith("src/features/")))
+		await edit(root, file, (text) =>
+			rewrite(text).replace(
+				/import \{ log(?: as \w+)?(, type LogLevel)? \} from "(.+)\/log";/,
+				'import { logger$1 } from "$2/logger";',
+			),
+		);
+	await rm(path.join(root, "src/lib/log.ts"));
+	return task;
+}
+
+test("a rewrite fitted to one-line calls misses the irregular logger's other call shapes", async () => {
+	const root = await fixture("irregular-logger-10");
+	// As a script fitted to logger-migration's consumers would: whole-line, double-quoted, literal-level calls.
+	const task = await rewriteConsumers(root, (text) =>
+		text.replace(
+			/^(\s*)log\("(info|warn|error)", ("[^"]+")(?:, (\w+))?\);$/gm,
+			(_, indent, level, message, error) =>
+				`${indent}logger.${level}(${message}${error ? `, { error: ${error} }` : ""});`,
+		),
+	);
+	const drift = await task.drift!(root);
+	expect(drift.missed.length).toBeGreaterThan(0);
+	expect(drift.overmatched).toEqual([]);
+	await expect(task.verify(root)).rejects.toThrow();
+});
+
+test("a pattern rewrite of every log(level, message) call also rewrites a local log parameter's call", async () => {
+	const root = await fixture("irregular-logger-10");
+	const task = await rewriteConsumers(root, (text) => {
+		const source = parse(Lang.TypeScript, text).root();
+		const edits = source
+			.findAll("log($LEVEL, $MESSAGE)")
+			.map((call) =>
+				call.replace(`logger.log(${call.getMatch("LEVEL")!.text()}, ${call.getMatch("MESSAGE")!.text()})`),
+			);
+		return source.commitEdits(edits);
+	});
+	// Files 3 and 8 of ten each have a local log parameter.
+	expect((await task.drift!(root)).overmatched).toEqual([
+		"src/features/feature3.ts: the local log parameter's call",
+		"src/features/g0/feature8.ts: the local log parameter's call",
+	]);
+});
+
 test("drift ignores reformatting but reports unrelated edits and scratch files", async () => {
 	const task = taskById("options-migration-10");
 	const root = await fixture(task.id);

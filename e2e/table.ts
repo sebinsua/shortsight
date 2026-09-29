@@ -68,8 +68,7 @@ export function problems(records: (Run | Experiment)[]): string[] {
 		),
 	);
 	for (const item of extra) found.push(`${item}: not part of a round`);
-	if (runs.some((run) => (run.codemode ?? "off") !== "off"))
-		found.push("some attempts ran with codemode, which a round doesn't");
+	if (runs.some((run) => run.codemode !== "on")) found.push("some attempts ran without codemode, which a round needs");
 	const shorthand = runs.filter((run) => run.setup === "code");
 	if (shorthand.some((run) => run.skill !== "shorthand" || run.documentation !== "shipped"))
 		found.push("some shorthand attempts ran without the shipped documentation and skill");
@@ -135,7 +134,7 @@ export function renderTable(records: (Run | Experiment)[]): string {
 		];
 	});
 	return [
-		`Measured on ${date} with \`${model}\` (${runs[0]!.reasoning ?? "default"} reasoning), ${roundAttempts} attempts per setup.`,
+		`Measured on ${date} with \`${model}\` (${runs[0]!.reasoning ?? "default"} reasoning), ${roundAttempts} attempts per setup, and Pi's codemode on in every setup.`,
 		"",
 		line(header),
 		line(header.map((_, index) => (index === 1 || index === 0 ? "---" : "---:"))),

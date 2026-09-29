@@ -21,6 +21,7 @@ function completeRound() {
 				promptStyle: row.prompt,
 				setup: column.setup,
 				sightread: column.sightread,
+				codemode: "on",
 				skill: column.setup === "code" ? "shorthand" : "none",
 				documentation: "shipped",
 				model: "openai-codex/gpt-5.6-sol",
@@ -39,7 +40,9 @@ test("a complete round renders one row per task and prompt, bolding the fastest 
 	const records = completeRound();
 	expect(problems(records)).toEqual([]);
 	const table = renderTable(records);
-	expect(table).toStartWith("Measured on 28 September 2026 with `gpt-5.6-sol` (high reasoning), 2 attempts per setup.");
+	expect(table).toStartWith(
+		"Measured on 28 September 2026 with `gpt-5.6-sol` (high reasoning), 2 attempts per setup, and Pi's codemode on in every setup.",
+	);
 	expect(table).toContain("| `rename-symbol` | brief | 100 | 30s | 30s | **20s** | 30s |");
 	expect(table).toContain("| `empty-average` | outcome | 1 |");
 	expect(table.split("\n").filter((line) => line.startsWith("| `"))).toHaveLength(roundRows.length);
@@ -72,13 +75,13 @@ test("a round is refused if a task didn't finish, or the code was uncommitted or
 	]);
 });
 
-test("a round is refused if any attempt ran with codemode", () => {
+test("a round is refused if any attempt ran without codemode", () => {
 	const records = completeRound();
 	Object.assign(
 		records.find((record) => record.kind === "run")!,
-		{ codemode: "on" },
+		{ codemode: "off" },
 	);
-	expect(problems(records)).toEqual(["some attempts ran with codemode, which a round doesn't"]);
+	expect(problems(records)).toEqual(["some attempts ran without codemode, which a round needs"]);
 });
 
 test("a failed attempt shows in its cell rather than disappearing from the average", () => {
