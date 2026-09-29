@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { allTasks, applySolution, materializeTask, taskById } from "../tasks.ts";
 import { saveChanges } from "../artifacts.ts";
-import { codeOutputSchema, conditionTools, extensionEntry } from "../conditions.ts";
+import { conditionTools, extensionEntry } from "../conditions.ts";
 import { sessionReport } from "../report.ts";
 
 const temporary: string[] = [];
@@ -214,36 +214,25 @@ test("codemode conditions add the codemode tool and expose code to it as each va
 	expect(conditionTools("baseline", "only")).toEqual(["read", "bash", "edit", "write", "codemode"]);
 	expect(conditionTools("code")).toEqual(["read", "bash", "edit", "write", "code"]);
 	const root = await directory();
+	const shipped = path.join(root, "index.ts");
 	await writeFile(
-		path.join(root, "index.ts"),
-		'export default pi => pi.registerTool({ name: "code", description: "shipped", execute: async () => ({ content: [], details: { exitCode: 1, applied: [] } }) });',
+		shipped,
+		'export default pi => pi.registerTool({ name: "code", description: "shipped", outputSchema: { type: "object" }, execute: () => 42 });',
 	);
-	const register = async (exposure: "direct" | "model-only") => {
-		const entry = await extensionEntry(root, "shipped", path.join(root, `${exposure}.ts`), "on", "on", exposure);
-		let tool: any;
-		(await import(entry)).default({
-			registerTool(value: unknown) {
-				tool = value;
-			},
-		});
-		return tool;
-	};
-	const direct = await register("direct");
-	expect(direct.description).toBe("shipped");
-	expect(direct.outputSchema).toEqual(codeOutputSchema);
-	expect(direct.exposure).toBeUndefined();
-	expect(await direct.execute()).toEqual({
-		content: [],
-		details: { exitCode: 1, applied: [] },
-		structuredContent: { exitCode: 1, applied: [] },
+	// `direct` is how code ships, and without codemode exposure doesn't apply, so both load the extension as it is.
+	expect(await extensionEntry(root, "shipped", path.join(root, "direct.ts"), "on", "on", "direct")).toBe(shipped);
+	expect(await extensionEntry(root, "shipped", path.join(root, "off.ts"), "on", "off", "model-only")).toBe(shipped);
+	const entry = await extensionEntry(root, "shipped", path.join(root, "model-only.ts"), "on", "only", "model-only");
+	let tool: any;
+	(await import(entry)).default({
+		registerTool(value: unknown) {
+			tool = value;
+		},
 	});
-	const modelOnly = await register("model-only");
-	expect(modelOnly.exposure).toBe("model-only");
-	expect(modelOnly.outputSchema).toBeUndefined();
-	// Without codemode, the shipped extension is loaded as it is.
-	expect(await extensionEntry(root, "shipped", path.join(root, "off.ts"), "on", "off", "model-only")).toBe(
-		path.join(root, "index.ts"),
-	);
+	expect(tool.exposure).toBe("model-only");
+	expect(tool.description).toBe("shipped");
+	expect(tool.outputSchema).toEqual({ type: "object" });
+	expect(tool.execute()).toBe(42);
 });
 
 test("sightread off hides graph.query from shipped and minimal code registration", async () => {
@@ -653,7 +642,7 @@ test("codemode conditions load Pi's codemode, set its mode, and keep earlier con
 		expect(tools).toContain("codemode");
 		expect(JSON.parse(settings)).toEqual({ codemode: { mode: "only" } });
 		if (run.setup === "baseline") expect(run.codeExposure).toBeNull();
-		else if (run.codeExposure === "direct") expect(entries.join("")).toContain("structuredContent");
+		else if (run.codeExposure === "direct") expect(entries.join("")).toContain("outputSchema: CODE_OUTPUT_SCHEMA");
 		else expect(entries.join("")).toContain('exposure: "model-only"');
 	}
 }, 30_000);

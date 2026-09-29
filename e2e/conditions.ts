@@ -70,37 +70,6 @@ export function conditionTools(setup: Setup, codemode: Codemode = "off"): string
 	return codemode === "off" ? tools : [...tools, "codemode"];
 }
 
-/**
- * What a codemode script receives from `code` under the direct exposure: the run's result rather than its text.
- * A failed run resolves too, as Pi does for any tool with an output schema, so scripts check `exitCode`.
- */
-export const codeOutputSchema = {
-	type: "object",
-	properties: {
-		exitCode: { type: ["number", "null"], description: "0 on success; null when the program was killed" },
-		timedOut: { type: "boolean" },
-		output: { type: "string", description: "The program's stdout and stderr" },
-		errorLine: { type: "string", description: "On failure, the program line the error came from" },
-		changes: {
-			type: "array",
-			items: {
-				type: "object",
-				properties: {
-					path: { type: "string" },
-					kind: { type: "string", enum: ["added", "modified", "deleted"] },
-					patch: { type: "string" },
-				},
-				required: ["path", "kind", "patch"],
-			},
-		},
-		applied: { type: "array", items: { type: "string" }, description: "Changed files written to the repository" },
-		conflicts: { type: "array", items: { type: "string" }, description: "Files changed by others during the run" },
-		rolledBack: { type: "array", items: { type: "string" }, description: "Changed files not kept after a failure" },
-		warnings: { type: "array", items: { type: "string" } },
-		infrastructureError: { type: "string", description: "Set, without the fields above, when the run couldn't start" },
-	},
-} as const;
-
 export function rotateConditions<T>(conditions: T[], repetition: number): T[] {
 	const offset = (repetition - 1) % conditions.length;
 	return [...conditions.slice(offset), ...conditions.slice(0, offset)];
@@ -126,23 +95,16 @@ export async function extensionEntry(
 	exposure: CodeExposure = "direct",
 ): Promise<string> {
 	const entry = await extensionIndex(root);
-	if (documentation === "shipped" && sightread === "on" && codemode === "off") return entry;
+	const modelOnly = codemode !== "off" && exposure === "model-only";
+	if (documentation === "shipped" && sightread === "on" && !modelOnly) return entry;
 	await mkdir(path.dirname(destination), { recursive: true });
 	const description = sightread === "on" ? minimalDescription : minimalDescription.replace(/^graph\.query.*\n/m, "");
 	const documented =
 		documentation === "minimal"
 			? `{ ...tool, description: ${JSON.stringify(description)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }`
 			: "tool";
-	// Without codemode, `code` stays exactly as shipped, so these conditions match earlier results.
-	const exposed =
-		codemode === "off"
-			? documented
-			: exposure === "model-only"
-				? `{ ...${documented}, exposure: "model-only" }`
-				: `{ ...${documented}, outputSchema: ${JSON.stringify(codeOutputSchema)}, async execute(...args) {
-          const result = await tool.execute(...args);
-          return { ...result, structuredContent: result.details };
-        } }`;
+	// `direct`, with its output schema, is how `code` ships; `model-only` takes it out of scripts.
+	const exposed = modelOnly ? `{ ...${documented}, exposure: "model-only" }` : documented;
 	await writeFile(
 		destination,
 		`import extension from ${JSON.stringify(pathToFileURL(entry).href)};

@@ -170,10 +170,10 @@ available), `graph.query` isn't advertised, and a program can't reach the graph 
 
 `--codemode on` adds Pi's `codemode` tool alongside the others; `only` also sets `codemode.mode: "only"`, so
 other tools are reached through scripts rather than declared to the model. With `baseline` it measures codemode
-without shorthand. `--code-exposure` applies only with codemode and a setup that has `code`: `direct` lets scripts
-call `code` and receive its result as data, and `model-only` keeps `code` declared to the model but out of
-scripts. Both wrap registration; the shipped extension is unchanged, and without codemode `code` is as shipped
-and conditions keep their earlier names. Calls a script makes are counted apart from the model's own, as
+without shorthand. `--code-exposure` applies only with codemode and a setup that has `code`: `direct` is `code`
+as shipped, which scripts can call and get its result as data, and `model-only` wraps registration to keep
+`code` declared to the model but out of scripts. Without codemode, `code` is as shipped and conditions keep
+their earlier names. Calls a script makes are counted apart from the model's own, as
 `nestedTools`. A round never includes codemode.
 
 | `--setups` value | Enabled tools                                                                             |

@@ -51,6 +51,51 @@ export function codeDescription(graphAvailable: boolean): string {
 		: DESCRIPTION;
 }
 
+const paths = (description: string) => Type.Array(Type.String(), { description });
+
+/**
+ * What a script gets back from `code`, for example one run by Pi's codemode tool. The model still sees the text.
+ * A failed run resolves to this too, so a script checks `exitCode`.
+ */
+export const CODE_OUTPUT_SCHEMA = Type.Object({
+	exitCode: Type.Optional(
+		Type.Union([Type.Number(), Type.Null()], { description: "0 on success; null when the program was killed" }),
+	),
+	timedOut: Type.Optional(Type.Boolean()),
+	output: Type.Optional(Type.String({ description: "The program's stdout and stderr" })),
+	errorLine: Type.Optional(Type.String({ description: "On failure, the program line the error came from" })),
+	warnings: Type.Optional(Type.Array(Type.String(), { description: "Likely mistakes spotted before it ran" })),
+	changes: Type.Optional(
+		Type.Array(
+			Type.Object({
+				path: Type.String(),
+				kind: StringEnum(["added", "modified", "deleted"] as const),
+				patch: Type.String(),
+			}),
+		),
+	),
+	applied: Type.Optional(paths("Changed files written to the repository")),
+	conflicts: Type.Optional(paths("Files that changed outside the run while it ran; if any, nothing was applied")),
+	rolledBack: Type.Optional(paths("Changed files not kept after a failure")),
+	infrastructureError: Type.Optional(Type.String({ description: "Set, alone, when the program couldn't be run" })),
+});
+
+export function codeOutput(result: RunResult) {
+	const { exitCode, timedOut, output, errorLine, warnings, applied, conflicts, rolledBack } = result;
+	const changes = result.changes.map((change) => ({ path: change.path, kind: change.kind, patch: change.patch }));
+	return {
+		exitCode,
+		timedOut,
+		output,
+		...(errorLine === undefined ? {} : { errorLine }),
+		warnings,
+		changes,
+		applied,
+		conflicts,
+		rolledBack,
+	};
+}
+
 export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknown> = sightreadAvailable) {
 	// The shorthand skill ships with shorthand-code, whose `shorthand --skill` prints it for other agents.
 	pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -90,6 +135,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 				}),
 			),
 		}),
+		outputSchema: CODE_OUTPUT_SCHEMA,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			// While it runs, show how long it's been going and the latest reported step.
@@ -122,6 +168,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 					isError: true,
 					content: [{ type: "text" as const, text: [error.message, ...diagnosticLines(error.diagnostics)].join("\n") }],
 					details: { infrastructureError: error.message, diagnostics: error.diagnostics },
+					structuredContent: { infrastructureError: error.message },
 				};
 			} finally {
 				clearInterval(progress);
@@ -134,6 +181,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 					},
 				],
 				details: result,
+				structuredContent: codeOutput(result),
 			};
 		},
 

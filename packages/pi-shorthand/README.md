@@ -40,6 +40,8 @@ Programs edit a private workspace, with host files outside the repository kept r
 
 The `code` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.
 
+Scripts run by Pi's `codemode` tool can call `code` too. They get back what the run changed as data, not text.
+
 ## Without Pi
 
 The engine is published separately as [shorthand-code](https://github.com/sebinsua/shortsight/tree/main/packages/shorthand-code), with a `shorthand` command that runs a program from a file or stdin and prints the same result. See `shorthand --help`.
