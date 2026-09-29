@@ -1,6 +1,6 @@
 {
 	"name": "sightread",
-	"version": "0.11.0",
+	"version": "0.12.0",
 	"description": "Query a TypeScript project's compiler-resolved code graph from the shell: symbols, edges and exact line ranges for coding agents.",
 	"keywords": [
 		"code-graph",
