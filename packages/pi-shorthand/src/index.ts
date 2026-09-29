@@ -22,7 +22,7 @@ import {
 } from "shorthand-code";
 import { callLine, resultLines, unstructuredResultText } from "./display.ts";
 
-const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Run tests, type-checks and builds separately afterward with the shell tool.
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Tests, type-checks and builds belong outside the program: in a shell call, or, when a codemode script calls code, later in that script.
 
 Common operations:
 - edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
@@ -120,7 +120,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 		label: "Code",
 		description: codeDescription(graphAvailable),
 		promptSnippet:
-			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Run verification separately afterward",
+			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Keep verification outside the program",
 
 		parameters: Type.Object({
 			title: Type.String({ description: "A few words describing the change, shown to the user" }),

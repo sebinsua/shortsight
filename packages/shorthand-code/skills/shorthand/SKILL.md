@@ -7,7 +7,8 @@ description: Edit repository files with Bun programs using plain text edits or s
 
 Use text replacement for known source; use structural matching when it saves enumerating
 occurrences or preserves varying syntax. Ordinary JavaScript strings, loops and Bun APIs work.
-Run tests, type-checks and builds separately with the shell tool after editing.
+Tests, type-checks and builds belong outside the program: in a shell call, or, when your agent calls
+code from a script, later in that script.
 
 ## Replace known text
 
