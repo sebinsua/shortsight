@@ -42,7 +42,8 @@ test("every scale task has a brief and an unchanged starting fixture reports onl
 		expect(drift.missed.length).toBe(drift.sites);
 		expect({ overmatched: drift.overmatched, unrelated: drift.unrelated }).toEqual({ overmatched: [], unrelated: [] });
 	}
-});
+	// Every scale fixture, each committed and formatted: past Bun's five-second default on CI's macOS runners.
+}, 60_000);
 
 test("a textual rename over-matches decoys that a scoped rename leaves alone", async () => {
 	const task = taskById("rename-symbol-10");
