@@ -328,6 +328,28 @@ describe("sections", () => {
 		expect(lines.length).toBeLessThan(15);
 	});
 
+	test("a small edit in several places stays inline, however much context surrounds it", () => {
+		// +10 −5 across five hunks renders to more than 40 lines once context is included.
+		const hunks = [0, 1, 2, 3, 4].flatMap((i) => [
+			`@@ -${i * 20 + 1},${i === 4 ? 6 : 7} +${i * 20 + 1},${i === 4 ? 8 : 9} @@`,
+			" a",
+			" b",
+			" c",
+			...(i === 4 ? [] : ["-old"]),
+			"+new",
+			"+new",
+			...(i === 4 ? ["-old"] : []),
+			" d",
+			" e",
+			" f",
+		]);
+		const patch = ["diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", ...hunks].join("\n");
+		const lines = show(result({ changes: [{ path: "a.ts", kind: "modified", patch }], applied: ["a.ts"] }));
+		expect(lines).toContain("a.ts +10 −5");
+		expect(lines.length).toBeGreaterThan(40);
+		expect(lines.join("\n")).not.toContain("to see the diff");
+	});
+
 	test("a failure's diff is one line until expanded", () => {
 		const run = result({ exitCode: 1, changes: [change("a.ts")] });
 		expect(show(run).at(-1)).toMatch(/^Would have changed 1 file · \+1 −1 \(/);

@@ -25,7 +25,8 @@ const ANSI_CUBE_VALUES = [0, 95, 135, 175, 215, 255];
 const ANSI_GRAY_VALUES = Array.from({ length: 24 }, (_, index) => 8 + index * 10);
 
 const OUTPUT_PREVIEW_LINES = 5; // like Pi's bash tool
-const INLINE_DIFF_LINES = 40; // a longer diff collapses to a list of its files…
+// Changed lines, not context: Pi's edit tool shows every diff, so a small edit in a few places must stay inline.
+const INLINE_CHANGED_LINES = 40; // more changed lines, or more files than are listed, collapse to a list of files…
 const LISTED_FILES = 8; // …showing this many, then "and N more files"
 const EXPANDED_DIFF_LINES = 2000; // even expanded, a diff of hundreds of files stops here
 
@@ -157,14 +158,17 @@ function outputLines(output: string, expanded: boolean, labelled: boolean, theme
 	return [...label, hint, ...lines.slice(-OUTPUT_PREVIEW_LINES)];
 }
 
-/** Each file's diff under its name, in Pi's own diff style. A long diff collapses to a list of files. */
+/** Each file's diff under its name, in Pi's own diff style. A large change collapses to a list of files. */
 function diffLines(changes: FileChange[], expanded: boolean, theme: Theme, background: ToolBackground): string[] {
-	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme, background)]);
-	const total = files.reduce((sum, file) => sum + file.length, 0);
-	if (!expanded && total > INLINE_DIFF_LINES) {
+	const changed = changes.reduce((sum, change) => {
+		const count = countLines(change.patch);
+		return sum + count.additions + count.deletions;
+	}, 0);
+	if (!expanded && (changed > INLINE_CHANGED_LINES || changes.length > LISTED_FILES)) {
 		return [...fileList(changes, theme), theme.fg("muted", `(${keyHint("app.tools.expand", "to see the diff")})`)];
 	}
 
+	const files = changes.map((change) => [fileLine(change, theme), ...renderFileDiff(change, theme, background)]);
 	const lines = files.flatMap((file, index) => (index === 0 ? file : ["", ...file]));
 	if (lines.length <= EXPANDED_DIFF_LINES) return lines;
 	const more = lines.length - EXPANDED_DIFF_LINES;
