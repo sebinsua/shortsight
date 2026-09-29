@@ -96,6 +96,14 @@ export function codeOutput(result: RunResult) {
 	};
 }
 
+/**
+ * Base name of the temporary files that hold a large run's full diff or output. A call a codemode script makes has
+ * an id like `<parent id>/1`, and ids can hold `|`, so anything but a safe file-name character is replaced.
+ */
+export function spillName(toolCallId: string): string {
+	return `pi-shorthand-${toolCallId.replace(/[^\w.-]/g, "_")}`;
+}
+
 export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknown> = sightreadAvailable) {
 	// The shorthand skill ships with shorthand-code, whose `shorthand --skill` prints it for other agents.
 	pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -177,7 +185,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 				content: [
 					{
 						type: "text",
-						text: textForModel(result, { name: `pi-shorthand-${toolCallId}`, truncateHead, truncateTail }),
+						text: textForModel(result, { name: spillName(toolCallId), truncateHead, truncateTail }),
 					},
 				],
 				details: result,

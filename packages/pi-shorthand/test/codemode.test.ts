@@ -35,14 +35,21 @@ test.skipIf(!hasOverlay)(
 		await mkdir(agentDir);
 		await $`git init -q ${repo}`;
 		await Bun.write(path.join(repo, "a.txt"), "a\n");
-		await $`git add a.txt && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init`.cwd(repo);
+		// Enough changed lines that the diff is summarised and written to a file, as a large migration's is.
+		for (let i = 0; i < 40; i++) await Bun.write(path.join(repo, `many/${i}.txt`), `${"x".repeat(500)}\n`);
+		await $`git add . && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init`.cwd(repo);
 
 		const script = `
 const edited = await tools.code({ title: "Edit", program: 'await Bun.write("a.txt", "b\\\\n");' });
 const failed = await tools.code({ title: "Fail", program: 'throw new Error("boom");' });
+const many = await tools.code({
+  title: "Edit many",
+  program: 'for (let i = 0; i < 40; i++) await Bun.write(\`many/\${i}.txt\`, "y".repeat(500));',
+});
 return JSON.stringify({
   edited: { exitCode: edited.exitCode, applied: edited.applied, kinds: edited.changes.map((change) => change.kind) },
   failed: { exitCode: failed.exitCode, errorLine: failed.errorLine, applied: failed.applied },
+  many: { exitCode: many.exitCode, applied: many.applied.length },
 });`;
 		const faux = fauxProvider();
 		faux.setResponses([fauxAssistantMessage(fauxToolCall("codemode", { code: script })), fauxAssistantMessage("Done")]);
@@ -84,6 +91,7 @@ return JSON.stringify({
 		expect(JSON.parse(returned!.text)).toEqual({
 			edited: { exitCode: 0, applied: ["a.txt"], kinds: ["modified"] },
 			failed: { exitCode: 1, errorLine: 'line 1: throw new Error("boom");', applied: [] },
+			many: { exitCode: 0, applied: 40 },
 		});
 		expect(await Bun.file(path.join(repo, "a.txt")).text()).toBe("b\n");
 	},
