@@ -719,20 +719,32 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 		}
 	}
 	if (edits.length === 0) return 0;
-	const ordered = edits.toSorted((a, b) => a.startPos - b.startPos || b.endPos - a.endPos);
+	const source = matches[0].node.getRoot().root().text();
+	// Two matches can reach one place, such as a call found through a class and its interface. The same
+	// edit twice is one edit; only different edits to the same text conflict.
+	const ordered = edits
+		.toSorted((a, b) => a.startPos - b.startPos || b.endPos - a.endPos)
+		.filter(
+			(edit, i, all) =>
+				i === 0 ||
+				edit.startPos !== all[i - 1].startPos ||
+				edit.endPos !== all[i - 1].endPos ||
+				edit.insertedText !== all[i - 1].insertedText,
+		);
 	for (let i = 1; i < ordered.length; i++) {
 		const previous = ordered[i - 1],
 			current = ordered[i];
 		if (current.startPos < previous.endPos || current.startPos === previous.startPos) {
+			const [first, second] = [previous, current].map((edit) => source.slice(0, edit.startPos).split("\n").length);
+			const lines = first === second ? `line ${first}` : `lines ${first} and ${second}`;
 			throw new Error(
-				`sg.rewrite produced overlapping edits in ${JSON.stringify(file)}: [${previous.startPos}, ${previous.endPos}) and [${current.startPos}, ${current.endPos})`,
+				`sg.rewrite produced overlapping edits in ${JSON.stringify(relative(repositoryRoot, resolve(file)))} at ${lines}; return one edit for each place`,
 			);
 		}
 	}
 	// A callback can run arbitrary code, including writes: don't overwrite changes made after selection.
 	const sources = new Map<string, string | null>();
 	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
-	const source = matches[0].node.getRoot().root().text();
 	const output = matches[0].node.getRoot().root().commitEdits(edits);
 	recordRewriteOutput(file, source, output, ordered);
 	writeFileSync(file, output);

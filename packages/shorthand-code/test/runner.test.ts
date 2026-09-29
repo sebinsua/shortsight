@@ -2460,7 +2460,7 @@ const a = matches.find(m => m.file.endsWith("a.ts"));
 const b = matches.find(m => m.file.endsWith("b.ts"));
 for (const edit of [
   () => sg.rewrite({...a}, "next(1)"),
-  () => sg.rewrite([a, a], "next(1)"),
+  () => { let n = 0; sg.rewrite([a, a], () => "next(" + ++n + ")"); },
   () => sg.rewrite(a, "next(1)", "a.ts"),
 ]) { try { edit(); } catch (e) { console.log(e.message); } }
 await Bun.write("b.ts", "changed();\\n");
@@ -2608,7 +2608,7 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("outside match");
 		expect(result.output).toContain("Unsupported callback result");
-		expect(result.output).toContain('overlapping edits in "a.ts": [');
+		expect(result.output).toContain('overlapping edits in "a.ts" at line 1; return one edit for each place');
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("foo(1); foo(2);\n");
 	});
 
@@ -2617,6 +2617,18 @@ sg.rewrite(method, m => m.node.field("body").replace("{ return 2; }"));`,
 		await run(repo, `sg.rewrite("foo($$$ARGS)", "bar($$$ARGS)", "src");`);
 
 		expect(await Bun.file(path.join(repo, "src/x.ts")).text()).toBe("bar();\nbar(1, 2);\n");
+	});
+
+	test("sg.rewrite applies an edit once when two matches reach the same place", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(1);\nfoo(2);\n" });
+		const result = await run(
+			repo,
+			`const twice = [...sg.find("foo($A)", "src/a.ts"), ...sg.find("foo($A)", "src/a.ts")];
+console.log(sg.rewrite(twice, (m) => m.node.replace(\`bar(\${m.A})\`)));`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("bar(1);\nbar(2);\n");
 	});
 
 	test("sg.rewrite rejects overlapping nested edits", async () => {
