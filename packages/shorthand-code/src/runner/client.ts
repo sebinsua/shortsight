@@ -6,7 +6,7 @@ import type { RunOptions, RunResult } from "./runner.ts";
 import { type Diagnostics, completeDiagnostics } from "./diagnostics.ts";
 
 // Runs typically take well under a second. Longer transformations can request more time.
-export const DEFAULT_TIMEOUT_SECONDS = 2;
+export const DEFAULT_TIMEOUT_SECONDS = 5;
 
 export class RunnerError extends Error {
 	constructor(

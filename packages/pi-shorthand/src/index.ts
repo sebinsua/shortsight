@@ -35,7 +35,7 @@ Common operations:
 - await refactor.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
 - await refactor.move({ file, symbol, to }) moves a top-level declaration to another file and updates the imports that follow it.
 
-See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax or use rule objects. The default timeout is two seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
+See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax or use rule objects. The default timeout is five seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
 
 const GRAPH_DESCRIPTION =
 	"- await graph.query(request | request[]) queries symbols and relationships; graph results can be passed to sg as scope. The graph shows the repository before this program's edits.\n";

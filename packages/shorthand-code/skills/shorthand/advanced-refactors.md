@@ -134,7 +134,7 @@ path is inaccessible on macOS. On both platforms, host paths outside the workspa
 (including external symlink targets). `$TMPDIR` is private to the run.
 Writes to `.git` are blocked.
 
-The default timeout is two seconds; request more for longer transformations. Time inside helpers
+The default timeout is five seconds; request more for longer transformations. Time inside helpers
 (`edit`, `glob`, `grep`, `sg`, `refactor`) does not count toward it, up to 60 extra seconds per run.
 By default, rollback happens per file: files involved in failed or interrupted edits are discarded,
 while the others are retained, including after exceptions. Unattributed failures

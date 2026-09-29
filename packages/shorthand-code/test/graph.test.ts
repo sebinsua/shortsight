@@ -267,7 +267,7 @@ test("a program without graph leaves no sightread state", async () => {
 	}
 }, 45_000);
 
-test("a five-second graph cold start is excluded from the default timeout", async () => {
+test("a five-second graph cold start is excluded from a two-second timeout", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(cwd, 'console.log((await graph.query({ type: "lookup", query: "Service" })).shown);', {
 		graphColdStartDelayMs: 5000,
