@@ -57,18 +57,18 @@ update the sentences around the table by hand.
 
 ## Layout
 
-| Path                                             | Contents                                                                   |
-| ------------------------------------------------ | -------------------------------------------------------------------------- |
-| [tasks.ts](tasks.ts)                             | Suite registry, fixture materialization and the evaluator CLI              |
-| [tasks/pilot.ts](tasks/pilot.ts)                 | `pilot`: the original six compact tasks                                    |
-| [tasks/guidance.ts](tasks/guidance.ts)           | `guidance`: three held-out fixtures for documentation comparisons          |
-| [tasks/scale.ts](tasks/scale.ts)                 | `scale`: generated repository-scale refactors at 10, 40 and 100 files      |
-| [tasks/drift.ts](tasks/drift.ts)                 | Missed-site, over-match and unrelated-change measurement                   |
-| [suite.ts](suite.ts), [run.ts](run.ts)           | Planning/execution across tasks, and the per-task session runner           |
-| [round.ts](round.ts), [table.ts](table.ts)       | The tasks and setups of a full round, and the results table built from one |
-| [reference-edits.ts](reference-edits.ts)         | Human-authored shorthand programs replayed through the real backend        |
-| [replay-edit-errors.ts](replay-edit-errors.ts)   | Replays of observed API failures and their minimal corrections             |
-| [transaction-scaling.ts](transaction-scaling.ts) | Backend regression: untouched tree size must not expand observation        |
+| Path                                             | Contents                                                                     |
+| ------------------------------------------------ | ---------------------------------------------------------------------------- |
+| [tasks.ts](tasks.ts)                             | Suite registry, fixture materialization and the evaluator CLI                |
+| [tasks/pilot.ts](tasks/pilot.ts)                 | `pilot`: the original six compact tasks                                      |
+| [tasks/guidance.ts](tasks/guidance.ts)           | `guidance`: three held-out fixtures for documentation comparisons            |
+| [tasks/scale.ts](tasks/scale.ts)                 | `scale`: generated repository-scale refactors at 10, 40 and 100 files        |
+| [tasks/drift.ts](tasks/drift.ts)                 | Missed-site, over-match and unrelated-change measurement                     |
+| [suite.ts](suite.ts), [run.ts](run.ts)           | Planning/execution across tasks, and the per-task session runner             |
+| [round.ts](round.ts), [table.ts](table.ts)       | The tasks and setups of a full round, and the results table built from one   |
+| [reference-edits.ts](reference-edits.ts)         | Human-authored shorthand programs replayed through the real backend          |
+| [replay-edit-errors.ts](replay-edit-errors.ts)   | Replays of observed API failures, and checks that ones since handled succeed |
+| [transaction-scaling.ts](transaction-scaling.ts) | Backend regression: untouched tree size must not expand observation          |
 
 ## Plan without calling a model
 
@@ -285,5 +285,6 @@ results directory; do not combine them blindly with new experiments. Use a fresh
 [reference-programs](reference-programs) holds human-authored ast-grep, `refactor` and source-text
 programs, named `<task-id>-<approach>.ts.txt`; scale references run at 100 files. Run
 `bun e2e/reference-edits.ts` (`--only` selects some) to execute them, or `bun e2e/replay-edit-errors.ts` to
-replay two observed API failures and their corrections. Both use temporary repositories and the real overlay
+replay two observed API failures and their corrections; shorthand now handles both, so it checks their original
+programs succeed. Both use temporary repositories and the real overlay
 backend, evaluate independently afterwards, and never call a model.

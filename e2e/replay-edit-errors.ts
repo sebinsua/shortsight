@@ -27,7 +27,8 @@ for (const name of ["method-pattern", "file-target"]) {
 			return runWithBun({ cwd: root, program, timeoutMs: 15_000, rollback: "all" });
 		};
 		const failed = await execute("failed");
-		const supported = name === "file-target";
+		// Once shorthand handles a recorded failure, its metadata says so, and the original program must succeed.
+		const supported = metadata.succeeds === true;
 		if (!supported && (failed.exitCode === 0 || failed.applied.length))
 			throw new Error(`Expected ${name} to fail without applying changes`);
 		const corrected = supported ? null : await execute("corrected");

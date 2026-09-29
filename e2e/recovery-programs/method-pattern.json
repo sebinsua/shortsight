@@ -1,5 +1,6 @@
 {
 	"task": "extract-table",
 	"sourceSession": "2026-09-20T17-51-28-725Z-replace-candidate-shipped-shorthand-1.md",
-	"changed": "Pattern argument only"
+	"changed": "Pattern argument only",
+	"succeeds": true
 }
