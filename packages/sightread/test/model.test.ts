@@ -292,7 +292,7 @@ test("repository lookup has exact full text", async () => {
 		const value = (await live.query(request)).value;
 		const result = await normalizeResult(request, value, index);
 		expect(renderText(result, { color: false })).toMatch(
-			/^lookup for createDeclarationParser: 1 shown \(truncated; raise lookup.limit\)\n\nhits\n  = createDeclarationParser  exported function  packages\/sightread\/src\/ranges\.ts:\d+-\d+$/,
+			/^lookup for createDeclarationParser: 1 shown \(truncated; pass "limit" to see more\)\n\nhits\n  = createDeclarationParser  exported function  packages\/sightread\/src\/ranges\.ts:\d+-\d+$/,
 		);
 	} finally {
 		await index.close();

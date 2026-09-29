@@ -84,7 +84,7 @@ function summary(result: GraphResult, nodes: Map<string, GraphNode>): string {
 	else if (Array.isArray(request?.reinterpretations))
 		subject = ` for ${request.reinterpretations.map(scalar).join(", ")}`;
 	const count = result.total === undefined ? `${result.shown} shown` : `${result.shown} of ${result.total} shown`;
-	return `${type}${subject}${result.tsconfig && result.tsconfig !== "tsconfig.json" ? ` (${result.tsconfig})` : ""}: ${count}${type === "trace" ? reach(result) : ""}${result.raise ? ` (truncated; raise ${result.raise})` : ""}`;
+	return `${type}${subject}${result.tsconfig && result.tsconfig !== "tsconfig.json" ? ` (${result.tsconfig})` : ""}: ${count}${type === "trace" ? reach(result) : ""}${result.raise ? ` (truncated; pass "${result.raise.split(".").at(-1)}" to see more)` : ""}`;
 }
 
 function overviewText(result: GraphResult, nodes: Map<string, GraphNode>, color: boolean): string {
