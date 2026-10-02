@@ -59,7 +59,7 @@ test("parses every supported declaration and exact source ranges", async () => {
 		{ name: "outer", kind: "function", start: 1, codeStart: 3, end: 6, exported: true },
 	]);
 	expect(entry(declarations, "outer.inner", "variable")).toEqual([
-		{ name: "outer.inner", kind: "variable", start: 4, codeStart: 4, end: 4 },
+		{ name: "outer.inner", kind: "variable", start: 4, codeStart: 4, end: 4, local: true, unindexed: "local" },
 	]);
 	expect(entry(declarations, "Row", "class")[0]?.end).toBe(14);
 	expect(entry(declarations, "Row.field", "property")[0]?.start).toBe(8);

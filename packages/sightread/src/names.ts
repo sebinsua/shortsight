@@ -1,6 +1,7 @@
 // Resolve request names to graph handles in one lookup batch.
 import { fromHandle, object } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
+import { handleFor, type Declaration } from "./ranges.ts";
 import type { GraphClient } from "./upstream.ts";
 
 const fields: Record<string, string[]> = { details: ["handles"], trace: ["from", "to"], references: ["symbol"] };
@@ -63,10 +64,11 @@ const named = (wanted: string) => (handle: string) => {
 
 const withoutKind = (handle: string) => handle.slice(0, handle.lastIndexOf(":"));
 
-// A name may carry its file, `src/lib/pricing.ts#applyDiscount`, to choose among same-named symbols.
+// A name may carry its file, `src/lib/pricing.ts#applyDiscount`, to choose among same-named symbols. The file
+// ends at its extension, since a private member's name has a `#` of its own (`src/row.ts#Row.#count`).
 function qualified(value: string): [file: string, name: string] | undefined {
-	const at = value.lastIndexOf("#");
-	return at > 0 && !fromHandle(value) ? [value.slice(0, at), value.slice(at + 1)] : undefined;
+	const match = /^(.+?\.[cm]?[jt]sx?)#(.+)$/.exec(value);
+	return match && !fromHandle(value) ? [match[1], match[2]] : undefined;
 }
 
 /** Replace bare names in handle fields before sending requests upstream. */
@@ -79,6 +81,8 @@ export async function resolveNamesSettled(
 		file: string,
 		name: string,
 	) => Promise<{ file: string; name: string } | { namespace: string } | undefined>,
+	/** A project file's parsed declarations, which name members the graph keeps no node for. */
+	declarations?: (file: string) => Promise<Declaration[] | undefined>,
 ): Promise<Array<{ request: Record<string, unknown> } | { error: string }>> {
 	const aliased = original.map(withAliases);
 	const requests = aliased.map((request) => (request instanceof Error ? {} : request));
@@ -92,7 +96,7 @@ export async function resolveNamesSettled(
 				(fields[String(request.type)] ?? []).flatMap((field) => {
 					const value = request[field];
 					return (Array.isArray(value) ? value : [value]).filter(
-						(item): item is string => typeof item === "string" && (!item.includes("#") || !!qualified(item)),
+						(item): item is string => typeof item === "string" && !fromHandle(item),
 					);
 				}),
 			),
@@ -103,8 +107,9 @@ export async function resolveNamesSettled(
 		...new Set(
 			names.flatMap((given) => {
 				const name = qualified(given)?.[1] ?? given;
+				const [owner, ...rest] = name.split(".");
 				const last = name.split(".").at(-1)!;
-				return [...(qualified(given) ? [given] : []), name, last, last.slice(0, 3)];
+				return [...(qualified(given) ? [given] : []), name, last, last.slice(0, 3), ...(rest.length ? [owner] : [])];
 			}),
 		),
 	];
@@ -160,6 +165,26 @@ export async function resolveNamesSettled(
 								fromHandle(handle)?.file === declared.file),
 					);
 			}
+		}
+		// A name the graph doesn't use is found in the file of what it's declared in: a member the graph keeps no node
+		// for, such as a type literal's (`Props.onChange`), or a namespace member it names without its namespace.
+		if (!exact.length && namespace === undefined && declarations && name.includes(".")) {
+			const owner = name.slice(0, name.indexOf("."));
+			const files =
+				file !== undefined
+					? [paths?.inputToProjectPath(file) ?? file]
+					: hitsFor(owner).flatMap((handle) => {
+							const parsed = fromHandle(handle);
+							return parsed && (parsed.name === owner || parsed.name.startsWith(`${owner}.`)) ? [parsed.file] : [];
+						});
+			const found = await Promise.all(
+				[...new Set(files)].map(async (path) =>
+					((await declarations(path)) ?? [])
+						.filter((declaration) => declaration.name === name)
+						.map((declaration) => handleFor(path, declaration)),
+				),
+			);
+			exact = [...new Set(found.flat())];
 		}
 		if (exact.length > 1) {
 			const listed = exact.map((id) => paths?.toRepositoryHandle(id) ?? id);

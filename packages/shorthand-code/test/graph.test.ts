@@ -200,13 +200,15 @@ console.log("edge span", sg.find("service.run($N)", result.edges[0].at).length);
 	expect(outcome.output).toContain("edge span 1");
 }, 45_000);
 
-test("a range-free namespace member cannot widen sg to its file", async () => {
+test("a range-free graph node cannot widen sg to its file", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(
 		cwd,
 		`
 const result = await graph.query({ type: "lookup", query: "Helpers.work" });
-const node = result.nodes.find(n => n.name === "Helpers.work");
+const found = result.nodes.find(n => n.name === "Helpers.work");
+console.log("ranged", JSON.stringify(found.ranges));
+const node = { ...found, ranges: null };
 console.log("node", JSON.stringify(node));
 try { sg.find("work", node); } catch (error) { console.log(error.message); }
 console.log("site matches", sg.find("work", { ...node, site: { start: 1, end: 1 } }).length);
@@ -214,6 +216,7 @@ console.log("file matches", sg.find("work", node.file).length);
 `,
 	);
 	expect(outcome.exitCode).toBe(0);
+	expect(outcome.output).toMatch(/ranged \[\{"start":\d+,"end":\d+\}\]/);
 	expect(outcome.output).toContain('"ranges":null');
 	expect(outcome.output).toContain(
 		"graph node client/src/namespace.ts#Helpers.work:function has no line ranges, so it can't limit sg to that symbol; pass node.file to search the whole file",

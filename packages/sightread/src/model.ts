@@ -2,6 +2,7 @@
 // Graph evidence uses 1-based UTF-8 byte columns with exclusive ends; edge columns use UTF-16.
 import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { graphKind, type DeclarationKind } from "./naming.ts";
 import type { RangeIndex } from "./ranges.ts";
 import type { PathMapper } from "./paths.ts";
 
@@ -163,9 +164,21 @@ export function object(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
+// The graph escapes a `#` in a name, as in `Row.\#count`, so only an unescaped one ends the file.
 export function fromHandle(value: string): { file: string; name: string; kind: string } | undefined {
-	const match = /^(.*)#([^#]+):([^:]+)$/.exec(value);
-	return match ? { file: match[1], name: match[2], kind: match[3] } : undefined;
+	const match = /^(.*)(?<!\\)#((?:\\#|[^#])+):([^:]+)$/.exec(value);
+	return match ? { file: match[1], name: match[2].replaceAll("\\#", "#"), kind: match[3] } : undefined;
+}
+
+export function toHandle(file: string, name: string, kind: string): string {
+	return `${file}#${name.replaceAll("#", "\\#")}:${kind}`;
+}
+
+/** Where a handle's file ends: its last `#` that isn't escaped. */
+export function handleSeparator(value: string): number {
+	for (let index = value.lastIndexOf("#"); index >= 0; index = value.lastIndexOf("#", index - 1))
+		if (value[index - 1] !== "\\") return index;
+	return -1;
 }
 
 function truncated(value: unknown): boolean {
@@ -186,7 +199,7 @@ function symbol(
 	if (!file) return undefined;
 	if (kind)
 		return {
-			handle: parsed ? (value.id as string) : `${file}#${value.name}:${kind}`,
+			handle: parsed ? (value.id as string) : toHandle(file, value.name, kind),
 			name: value.name,
 			file,
 			kind,
@@ -299,6 +312,7 @@ export async function normalizeResult(
 	// file. Keep them as edges and member symbols, gathered per list across every node.
 	const neighbours = new Map<string, unknown[]>();
 	const members: Record<string, unknown>[] = [];
+	const aliases: Array<{ file: string; name: string }> = [];
 	const addNeighbours = (item: Record<string, unknown>) => {
 		const from = typeof item.id === "string" ? item.id : undefined;
 		for (const [key, list] of Object.entries(item)) {
@@ -307,7 +321,14 @@ export async function normalizeResult(
 				const neighbour = object(entry);
 				if (!neighbour) return [];
 				if (key === "members") {
-					members.push({ file: item.file, ...neighbour });
+					// An object literal's members come unqualified; an enum's already carry their owner.
+					const name = String(neighbour.name);
+					const owner = String(item.name);
+					members.push({
+						file: item.file,
+						...neighbour,
+						...(typeof neighbour.id === "string" || name.startsWith(`${owner}.`) ? {} : { name: `${owner}.${name}` }),
+					});
 					return [];
 				}
 				if (!from || typeof neighbour.id !== "string" || typeof neighbour.relation !== "string") return [];
@@ -335,6 +356,8 @@ export async function normalizeResult(
 		}
 		const handle = addSymbol(item);
 		if (handle) {
+			if (type === "details" && item.kind === "type" && !Array.isArray(item.members) && typeof item.file === "string")
+				aliases.push({ file: item.file, name: String(item.name) });
 			addNeighbours(item);
 			return handle;
 		}
@@ -360,9 +383,24 @@ export async function normalizeResult(
 			);
 		if (converted !== undefined) sections[key] = converted;
 	}
+	// The graph lists no members for a type alias, so name its type literal's own, as an interface's are.
+	for (const alias of aliases) {
+		const own = ((await ranges.declarations(alias.file)) ?? []).filter(
+			(declaration) =>
+				declaration.unindexed === "member" &&
+				declaration.name.startsWith(`${alias.name}.`) &&
+				!declaration.name.slice(alias.name.length + 1).includes("."),
+		);
+		const limit = typeof request.memberLimit === "number" ? request.memberLimit : Infinity;
+		for (const declaration of [...new Map(own.map((item) => [item.name, item])).values()].slice(0, limit))
+			members.push({ file: alias.file, name: declaration.name, kind: declaration.kind });
+	}
 	// A member can also be a neighbour, under another kind (a property the graph calls a variable), so add members
 	// last and reuse the neighbour's node.
 	for (const member of members) {
+		// Handles name a property as the graph does, a variable, so one written either way finds the same symbol.
+		if (typeof member.id !== "string" && typeof member.kind === "string")
+			member.id = toHandle(String(member.file), String(member.name), graphKind(member.kind as DeclarationKind));
 		const file = paths?.toRepositoryPath(String(member.file)) ?? member.file;
 		const handle =
 			[...nodes.values()].find((node) => node.file === file && node.name === member.name)?.handle ?? addSymbol(member);

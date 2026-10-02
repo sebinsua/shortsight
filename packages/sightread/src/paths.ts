@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { handleSeparator } from "./model.ts";
 
 const roots = new Map<string, string>();
 const slash = (path: string) => path.split(sep).join("/");
@@ -10,7 +11,7 @@ const inside = (root: string, path: string) => {
 	return local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
 };
 const convertHandle = (value: string, convert: (path: string) => string) => {
-	const separator = value.lastIndexOf("#");
+	const separator = handleSeparator(value);
 	return separator < 0 ? value : `${convert(value.slice(0, separator))}${value.slice(separator)}`;
 };
 

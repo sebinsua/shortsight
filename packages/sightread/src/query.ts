@@ -8,6 +8,7 @@ import { createPaths } from "./paths.ts";
 import type { RangeIndex } from "./ranges.ts";
 import type { ReferenceIndex } from "./references.ts";
 import { renderText } from "./render.ts";
+import { traceRefusal, unindexed, withUnindexed } from "./unindexed.ts";
 import type { GraphClient } from "./upstream.ts";
 
 export interface QueryContext {
@@ -99,23 +100,35 @@ const rawSymbol = (handle: string) => {
 	return parsed ? { id: handle, ...parsed } : undefined;
 };
 
-// The graph can return only 32 symbols at once. Follow each direct caller through another graph trace.
+// The graph can return only 32 symbols at once. Follow each direct caller through another graph trace. A start
+// the graph has no node for, such as a type literal's member, gets its direct users from its references.
 async function completeTrace(
 	context: QueryContext,
 	request: Record<string, unknown>,
 	model: GraphResult,
 	paths: ReturnType<typeof createPaths> | undefined,
 ): Promise<void> {
-	if (model.error || model.type !== "trace" || model.raise !== "trace.maxNodes") return;
+	if (model.error || model.type !== "trace") return;
+	const nodeless =
+		request.direction === "reverse" && request.to === undefined && !!(await unindexed(context.ranges, request.from));
+	if (!nodeless && model.raise !== "trace.maxNodes") return;
 	const asked = typeof request.maxNodes === "number" ? request.maxNodes : undefined;
-	if (request.direction === "reverse" && request.to === undefined && asked !== undefined && asked <= GRAPH_TRACE_LIMIT)
+	if (
+		!nodeless &&
+		request.direction === "reverse" &&
+		request.to === undefined &&
+		asked !== undefined &&
+		asked <= GRAPH_TRACE_LIMIT
+	)
 		return;
 	if (
 		request.direction === "reverse" &&
 		request.to === undefined &&
-		(asked === undefined || asked > GRAPH_TRACE_LIMIT)
+		(nodeless || asked === undefined || asked > GRAPH_TRACE_LIMIT)
 	) {
-		const start = paths?.inputToProjectHandle(String(model.sections.start)) ?? String(model.sections.start);
+		const start = nodeless
+			? String(request.from)
+			: (paths?.inputToProjectHandle(String(model.sections.start)) ?? String(model.sections.start));
 		const limit = asked ?? WALK_LIMIT;
 		let maxDepth = Math.min(
 			GRAPH_TRACE_MAX_DEPTH,
@@ -185,6 +198,55 @@ async function completeTrace(
 			}
 			return found;
 		};
+		// A symbol's direct users from its references, as the graph's trace would list them: what each sits in.
+		const fromReferences = async (target: string, level: number) => {
+			if (!context.references || !paths) {
+				skipped++;
+				return;
+			}
+			try {
+				const refs = await context.references.query({ type: "references", symbol: target }, paths);
+				// The graph's trace follows every kind of use, type references and JSX included, so the fallback does too.
+				for (const node of refs.nodes) {
+					if (!node.in) continue;
+					const caller = paths.inputToProjectHandle(node.in.handle);
+					const file = paths.inputToProjectPath(node.file);
+					let content = lines.get(file);
+					if (!content) {
+						content = (await readFile(resolve(paths.project, file), "utf8")).split(/\r\n|\n|\r/);
+						lines.set(file, content);
+					}
+					const byte = (column: number) =>
+						Buffer.byteLength((content[node.line! - 1] ?? "").slice(0, column - 1), "utf8") + 1;
+					add(
+						caller,
+						target,
+						{
+							from: caller,
+							to: target,
+							// A symbol the graph has no node for is a member or a local, whose uses are reads and writes.
+							kind: !node.call
+								? nodeless
+									? "accesses"
+									: "references"
+								: node.call.line === node.line && node.text?.slice(node.call.col - 1).startsWith("new ")
+									? "instantiates"
+									: "calls",
+							evidence: {
+								file,
+								startLine: node.line,
+								startCol: byte(node.col!),
+								endLine: node.line,
+								endCol: byte(node.endCol!),
+							},
+						},
+						level,
+					);
+				}
+			} catch {
+				skipped++;
+			}
+		};
 		while (queue.length) {
 			const frontier = queue.splice(0).filter((target) => depth.get(target)! < maxDepth);
 			const batched = await dependents(frontier.filter((target) => target !== start));
@@ -199,6 +261,10 @@ async function completeTrace(
 						const { relation, evidence, ...symbol } = dependent;
 						add(dependent.id, target, { from: dependent.id, to: target, kind: relation, evidence }, level, symbol);
 					}
+					continue;
+				}
+				if (nodeless && target === start) {
+					await fromReferences(target, level);
 					continue;
 				}
 				let direct: Record<string, unknown> | undefined;
@@ -219,45 +285,7 @@ async function completeTrace(
 				}
 				const reached = direct.reached as unknown[];
 				if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT && context.references && paths) {
-					try {
-						const refs = await context.references.query({ type: "references", symbol: target }, paths);
-						// The graph's trace follows every kind of use, type references and JSX included, so the fallback does too.
-						for (const node of refs.nodes) {
-							if (!node.in) continue;
-							const caller = paths.inputToProjectHandle(node.in.handle);
-							const file = paths.inputToProjectPath(node.file);
-							let content = lines.get(file);
-							if (!content) {
-								content = (await readFile(resolve(paths.project, file), "utf8")).split(/\r\n|\n|\r/);
-								lines.set(file, content);
-							}
-							const byte = (column: number) =>
-								Buffer.byteLength((content[node.line! - 1] ?? "").slice(0, column - 1), "utf8") + 1;
-							add(
-								caller,
-								target,
-								{
-									from: caller,
-									to: target,
-									kind: !node.call
-										? "references"
-										: node.call.line === node.line && node.text?.slice(node.call.col - 1).startsWith("new ")
-											? "instantiates"
-											: "calls",
-									evidence: {
-										file,
-										startLine: node.line,
-										startCol: byte(node.col!),
-										endLine: node.line,
-										endCol: byte(node.endCol!),
-									},
-								},
-								level,
-							);
-						}
-					} catch {
-						skipped++;
-					}
+					await fromReferences(target, level);
 					continue;
 				}
 				if (direct.truncated === true && reached.length >= GRAPH_TRACE_LIMIT) {
@@ -305,11 +333,13 @@ async function completeTrace(
 		// Say so on the first line too, since a hub's direct users alone can look like the whole answer.
 		if (!truncated && hubDepth) model.raise = "trace.maxDepth";
 		model.note = `${
-			unresolvedHub
-				? `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`
-				: truncated
-					? `stopped at ${limit} symbols; trace from a narrower symbol`
-					: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through graph traces`
+			nodeless && !truncated
+				? `complete: ${fromHandle(start)?.name} has no graph node, so its direct users come from its references and theirs from graph traces`
+				: unresolvedHub
+					? `truncated at the graph's ${GRAPH_TRACE_LIMIT}-symbol limit; trace again from the symbols at its edge`
+					: truncated
+						? `stopped at ${limit} symbols; trace from a narrower symbol`
+						: `complete: past the graph's ${GRAPH_TRACE_LIMIT}-symbol limit, callers were followed through graph traces`
 		}${skipped ? `; ${skipped} ${skipped === 1 ? "symbol" : "symbols"} skipped` : ""}${
 			hubDepth
 				? `; only direct users are shown, since there are more than ${GRAPH_TRACE_LIMIT}; pass maxDepth to follow their users too`
@@ -339,7 +369,9 @@ export async function runQuery(
 						: { file: paths.toRepositoryPath(declared.file), name: declared.name };
 				}
 			: undefined;
-	const resolved = await resolveNamesSettled(context.client, requests, paths, reexport);
+	const resolved = await resolveNamesSettled(context.client, requests, paths, reexport, (file) =>
+		context.ranges.declarations(file),
+	);
 	const results = await Promise.all(
 		resolved.map(async (item) => {
 			if ("error" in item) return { error: item.error };
@@ -348,7 +380,12 @@ export async function runQuery(
 					if (!context.references || !paths) throw new Error("references require a project server");
 					return { value: await context.references.query(item.request, paths), local: true as const };
 				}
-				return { value: (await context.client.query(item.request)).value };
+				if (item.request.type === "trace") {
+					const refusal = await traceRefusal(context.ranges, item.request);
+					if (refusal) throw new Error(refusal);
+				}
+				const { value } = await context.client.query(item.request);
+				return item.request.type === "details" ? await withUnindexed(context.ranges, value) : { value };
 			} catch (error) {
 				return { error: error instanceof Error ? error.message : String(error), cause: error };
 			}
@@ -372,7 +409,14 @@ export async function runQuery(
 					: normalizeResult(requests[index], result.value, context.ranges, paths),
 		),
 	);
-	await Promise.all(models.map((model, index) => completeTrace(context, requests[index], model, paths)));
+	for (const [index, result] of results.entries())
+		if ("note" in result && result.note) models[index].note = result.note;
+	await Promise.all(
+		models.map((model, index) => {
+			const item = resolved[index];
+			return completeTrace(context, "request" in item ? item.request : requests[index], model, paths);
+		}),
+	);
 	for (const model of models) if (context.tsconfig) model.tsconfig = context.tsconfig;
 	for (const model of models) model.nestedProjects = context.nestedProjects ?? [];
 	const filtered = options.in

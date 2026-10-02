@@ -6,34 +6,25 @@ import { API, type Snapshot, SymbolFlags } from "typescript/unstable/async";
 import {
 	getTouchingPropertyName,
 	isCallExpression,
-	isClassDeclaration,
 	isConstructorDeclaration,
-	isEnumDeclaration,
-	isFunctionDeclaration,
-	isGetAccessorDeclaration,
-	isIdentifier,
-	isInterfaceDeclaration,
-	isMethodDeclaration,
-	isMethodSignatureDeclaration,
-	isModuleBlock,
-	isModuleDeclaration,
 	isNewExpression,
 	isPropertyAccessExpression,
-	isPropertyDeclaration,
-	isPropertySignatureDeclaration,
-	isSetAccessorDeclaration,
 	isSourceFile,
-	isTypeAliasDeclaration,
-	isVariableDeclaration,
-	isVariableStatement,
 	SyntaxKind,
 	type Node,
 	type SourceFile,
 } from "typescript/unstable/ast";
-import { fromHandle, type GraphNode, type GraphResult } from "./model.ts";
+import { fromHandle, toHandle, type GraphNode, type GraphResult } from "./model.ts";
 import type { PathMapper } from "./paths.ts";
 import { projectFiles, type Project } from "./project.ts";
-import { graphKind, hasModifier, listedExports } from "./ranges.ts";
+import {
+	graphKind,
+	indexDeclarations,
+	inObjectLiteral,
+	type DeclarationIndex,
+	type DeclarationKind,
+	type Declared,
+} from "./naming.ts";
 
 export interface ReferenceIndex {
 	query(request: Record<string, unknown>, paths: PathMapper): Promise<GraphResult>;
@@ -72,64 +63,28 @@ interface Range {
 	endCol: number;
 }
 
-function declarationName(node: Node): string | undefined {
-	if (!isIdentifier(node)) return undefined;
+// The declaration whose own name `node` is, or whose `default` it is when the declaration has no name.
+function declarationNamed(node: Node, index: DeclarationIndex): Declared | undefined {
 	const parent = node.parent;
-	if (!parent || !("name" in parent) || parent.name !== node) return undefined;
-	const named =
-		isFunctionDeclaration(parent) ||
-		isClassDeclaration(parent) ||
-		isInterfaceDeclaration(parent) ||
-		isTypeAliasDeclaration(parent) ||
-		isEnumDeclaration(parent) ||
-		isVariableDeclaration(parent) ||
-		isMethodDeclaration(parent) ||
-		isMethodSignatureDeclaration(parent) ||
-		isPropertyDeclaration(parent) ||
-		isPropertySignatureDeclaration(parent) ||
-		isGetAccessorDeclaration(parent) ||
-		isSetAccessorDeclaration(parent);
-	if (!named) return undefined;
-	let name = node.text;
-	if (
-		isMethodDeclaration(parent) ||
-		isMethodSignatureDeclaration(parent) ||
-		isPropertyDeclaration(parent) ||
-		isPropertySignatureDeclaration(parent) ||
-		isGetAccessorDeclaration(parent) ||
-		isSetAccessorDeclaration(parent)
-	) {
-		const owner = parent.parent;
-		if (isClassDeclaration(owner) || isInterfaceDeclaration(owner))
-			name = `${owner.name?.text ?? "default"}.${node.text}`;
-	}
-	for (let ancestor = parent.parent; ancestor; ancestor = ancestor.parent)
-		if (isModuleDeclaration(ancestor)) name = `${ancestor.name.getText()}.${name}`;
-	return name;
+	if (!parent) return undefined;
+	const name = (parent as { name?: Node }).name;
+	return (name ? name === node : node.kind === SyntaxKind.DefaultKeyword) ? index.of(parent) : undefined;
 }
 
-function findDeclaration(source: SourceFile, name: string, kind: string): Node | undefined {
-	let found: Node | undefined;
-	const visit = (node: Node): void => {
-		if (found) return;
-		if (
-			declarationName(node) === name ||
-			(isConstructorDeclaration(node) &&
-				isClassDeclaration(node.parent) &&
-				`${node.parent.name?.text ?? "default"}.__constructor` === name) ||
-			(name === "default" &&
-				!(node as { name?: Node }).name &&
-				hasModifier(node, SyntaxKind.DefaultKeyword) &&
-				((kind === "function" && isFunctionDeclaration(node)) || (kind === "class" && isClassDeclaration(node))))
-		) {
-			found = node;
-			return;
-		}
-		node.forEachChild(visit);
-	};
-	visit(source);
-	return found;
+// The declaration a handle names, by its full name or else the graph's, preferring one of its kind, since a type and
+// a value can share a name. A name the graph gives several declarations names none of them.
+function findDeclaration(index: DeclarationIndex, name: string, kind: string): Node | undefined {
+	const of = (named: Declared[]) =>
+		(named.find((declaration) => graphKind(declaration.kind) === graphKind(kind as DeclarationKind)) ?? named[0])?.node;
+	return (
+		of(index.declarations.filter((declaration) => declaration.name === name)) ??
+		of(index.declarations.filter((declaration) => !declaration.unindexed && declaration.graphName === name))
+	);
 }
+
+// The declarations the graph merges under one name, which a reference search has to be told apart.
+const merged = (index: DeclarationIndex, name: string) =>
+	index.declarations.filter((declaration) => declaration.unindexed === "shared" && declaration.graphName === name);
 
 // The call or `new` a reference is the callee of, so a call split over lines can be shown whole.
 function enclosingCall(reference: Node): Node | undefined {
@@ -140,87 +95,30 @@ function enclosingCall(reference: Node): Node | undefined {
 	return call && (isCallExpression(call) || isNewExpression(call)) && call.expression === callee ? call : undefined;
 }
 
-// The declaration a reference sits in, named the way the graph names symbols: a class member, or else the
-// top-level function, class, variable or type. Imports, re-exports and module-level statements have none.
-function containerOf(reference: Node, source: SourceFile, file: string): Container | undefined {
-	let member: Node | undefined;
-	let namespaceMember: Node | undefined;
-	const namespaces: string[] = [];
-	let top: Node | undefined;
-	for (let node = reference.parent; node; node = node.parent) {
-		const owner = node.parent;
-		if (!namespaceMember && owner && isModuleBlock(owner)) namespaceMember = node;
-		if (isModuleDeclaration(node)) namespaces.unshift(node.name.getText(source));
-		if (
-			!member &&
-			owner &&
-			(isClassDeclaration(owner) || isInterfaceDeclaration(owner)) &&
-			(isMethodDeclaration(node) ||
-				isMethodSignatureDeclaration(node) ||
-				isGetAccessorDeclaration(node) ||
-				isSetAccessorDeclaration(node) ||
-				isPropertyDeclaration(node) ||
-				isPropertySignatureDeclaration(node) ||
-				isConstructorDeclaration(node))
-		)
-			member = node;
-		if (owner && isSourceFile(owner)) {
-			top = node;
-			break;
-		}
+// The innermost declaration the graph has a node for that a reference sits in: a member, a function or a
+// variable holding one, or a top-level declaration. Imports, re-exports and module-level statements have none.
+function containerOf(
+	reference: Node,
+	source: SourceFile,
+	index: DeclarationIndex,
+	file: string,
+): Container | undefined {
+	for (let node = reference.parent; node && !isSourceFile(node); node = node.parent) {
+		const declaration = index.of(node);
+		if (!declaration || declaration.unindexed) continue;
+		const line = (position: number) => source.getLineAndCharacterOfPosition(position).line + 1;
+		const { extent } = declaration;
+		const graphName = declaration.graphName!;
+		const kind = graphKind(declaration.kind);
+		return {
+			handle: toHandle(file, graphName, kind),
+			name: graphName,
+			kind,
+			start: line(extent.getStart(source)),
+			end: line(Math.max(extent.getStart(source), extent.end - 1)),
+			...(declaration.exported ? { exported: true as const } : {}),
+		};
 	}
-	if (!top) return undefined;
-	const line = (position: number) => source.getLineAndCharacterOfPosition(position).line + 1;
-	const span = (node: Node) => ({
-		start: line(node.getStart(source)),
-		end: line(Math.max(node.getStart(source), node.end - 1)),
-	});
-	const exported = (name: string) =>
-		hasModifier(top, SyntaxKind.ExportKeyword) || listedExports(source).has(name) ? { exported: true as const } : {};
-	const named = (name: string, kind: string, node: Node, exports = true): Container => ({
-		handle: `${file}#${name}:${kind}`,
-		name,
-		kind,
-		...span(node),
-		...(exports ? exported(name) : {}),
-	});
-	if (isFunctionDeclaration(top) && (top.name || hasModifier(top, SyntaxKind.DefaultKeyword)))
-		return named(top.name?.text ?? "default", "function", top);
-	if (isClassDeclaration(top) && (top.name || hasModifier(top, SyntaxKind.DefaultKeyword))) {
-		if (!member) return named(top.name?.text ?? "default", "class", top);
-		const name = isConstructorDeclaration(member)
-			? "__constructor"
-			: (member as unknown as { name: Node }).name.getText(source);
-		return named(
-			`${top.name?.text ?? "default"}.${name}`,
-			graphKind(isPropertyDeclaration(member) ? "property" : "method"),
-			member,
-			false,
-		);
-	}
-	if (isVariableStatement(top)) {
-		const declaration = top.declarationList.declarations.find(
-			(item) => item.pos <= reference.pos && reference.end <= item.end && isIdentifier(item.name),
-		);
-		return declaration && isIdentifier(declaration.name) ? named(declaration.name.text, "variable", top) : undefined;
-	}
-	if (isInterfaceDeclaration(top)) {
-		if (!member) return named(top.name.text, "interface", top);
-		const name = (member as unknown as { name: Node }).name.getText(source);
-		return named(
-			`${top.name.text}.${name}`,
-			graphKind(isPropertySignatureDeclaration(member) ? "property" : "method"),
-			member,
-			false,
-		);
-	}
-	if (isModuleDeclaration(top) && namespaceMember) {
-		const name = namespaces.join(".");
-		if (isFunctionDeclaration(namespaceMember) && namespaceMember.name)
-			return named(`${name}.${namespaceMember.name.text}`, "function", namespaceMember, false);
-	}
-	if (isTypeAliasDeclaration(top)) return named(top.name.text, "type", top);
-	if (isEnumDeclaration(top)) return named(top.name.text, "enum", top);
 	return undefined;
 }
 
@@ -293,11 +191,33 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 		if (!inRepository(file)) throw new Error(`${handle} not found`);
 		const home = await active.getDefaultProjectForFile(file);
 		const source = await home?.program.getSourceFile(file);
-		const declaration = source && findDeclaration(source, ref.name, ref.kind);
+		// Each file is named once per query, however many of its references there are.
+		const indexes = new Map<string, DeclarationIndex>();
+		const indexOf = (sourceFile: SourceFile) => {
+			let index = indexes.get(sourceFile.fileName);
+			if (!index) indexes.set(sourceFile.fileName, (index = indexDeclarations(sourceFile)));
+			return index;
+		};
+		const declaration = source && findDeclaration(indexOf(source), ref.name, ref.kind);
+		const shared = source && !declaration ? merged(indexOf(source), ref.name) : [];
+		if (shared.length)
+			throw new Error(
+				`${handle} is ${shared.length} declarations the graph merges; use one: ${shared.map((item) => toHandle(paths.toRepositoryPath(local.split(sep).join("/")), item.name, graphKind(item.kind))).join(", ")}`,
+			);
 		if (!home || !source || !declaration) throw new Error(`${handle} not found`);
+		// Its overloads and merged declarations share its full name.
+		const own = indexOf(source).of(declaration)!.name;
 		const start = declaration.getStart(source);
-		const subject = isConstructorDeclaration(declaration) ? declaration : getTouchingPropertyName(source, start);
-		const entries = await home.checker.getReferencedSymbolsForNode(subject, start);
+		// Ask from the declaration's name, or for an anonymous default export its `default` keyword: its start is a
+		// modifier such as `export`, which names nothing.
+		const named =
+			(declaration as { name?: Node }).name ??
+			(declaration as { modifiers?: readonly Node[] }).modifiers?.find(
+				(modifier) => modifier.kind === SyntaxKind.DefaultKeyword,
+			);
+		const asked = named?.getStart(source) ?? start;
+		const subject = isConstructorDeclaration(declaration) ? declaration : getTouchingPropertyName(source, asked);
+		const entries = await home.checker.getReferencedSymbolsForNode(subject, asked);
 		const found: Found[] = [];
 		const seen = new Set<string>();
 		const lines = new Map<string, string[]>();
@@ -307,11 +227,13 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 		};
 		for (const entry of entries.flatMap((item) => item.references)) {
 			const reference = await entry.resolve(home);
-			if (!reference) continue;
+			// A constructor's own entry resolves to an empty placeholder at the start of its file, which is no occurrence.
+			if (!reference || reference.end <= reference.pos) continue;
 			const origin = reference.getSourceFile();
 			const offset = reference.getStart(origin);
-			const declaredName = declarationName(reference);
-			if (declaredName && (!includeDeclaration || declaredName !== ref.name)) continue;
+			// Another symbol's declaration is left out, except an object literal's member: writing it uses its type's.
+			const declared = declarationNamed(reference, indexOf(origin));
+			if (declared && (declared.name === own ? !includeDeclaration : !inObjectLiteral(reference.parent!))) continue;
 			if (!inRepository(origin.fileName)) continue;
 			const path = relative(project.root, origin.fileName);
 			const key = `${origin.fileName}:${offset}:${reference.end}`;
@@ -327,7 +249,7 @@ export function createReferenceIndex(project: Project): ReferenceIndex {
 			const call = enclosingCall(reference);
 			const last = call ? position(call.end).line : line;
 			const outputFile = paths.toRepositoryPath(path.split(sep).join("/"));
-			const container = containerOf(reference, origin, outputFile);
+			const container = containerOf(reference, origin, indexOf(origin), outputFile);
 			found.push({
 				file: outputFile,
 				line: line + 1,

@@ -2,7 +2,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GraphNode } from "../model.ts";
-import { graphKind, handleFor, indexedDeclarations, type Declaration, type DeclarationParser } from "../ranges.ts";
+import { graphKind } from "../naming.ts";
+import { handleFor, indexedDeclarations, type Declaration, type DeclarationParser } from "../ranges.ts";
 import type { GitChanges, GitFile } from "./git.ts";
 import { isTypeScript } from "./git.ts";
 

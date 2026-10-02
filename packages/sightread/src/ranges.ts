@@ -4,33 +4,13 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { API } from "typescript/unstable/async";
-import {
-	SyntaxKind,
-	isClassDeclaration,
-	isConstructorDeclaration,
-	isEnumDeclaration,
-	isExportAssignment,
-	isExportDeclaration,
-	isFunctionDeclaration,
-	isGetAccessorDeclaration,
-	isIdentifier,
-	isInterfaceDeclaration,
-	isMethodDeclaration,
-	isMethodSignatureDeclaration,
-	isNamedExports,
-	isPropertyDeclaration,
-	isPropertySignatureDeclaration,
-	isSetAccessorDeclaration,
-	isTypeAliasDeclaration,
-	isVariableStatement,
-	type Node,
-	type SourceFile,
-} from "typescript/unstable/ast";
+import type { Node, SourceFile } from "typescript/unstable/ast";
 import type { FileSystem } from "typescript/unstable/fs";
-
-export type DeclarationKind = "function" | "class" | "method" | "property" | "variable" | "interface" | "type" | "enum";
+import { toHandle } from "./model.ts";
+import { graphKind, indexDeclarations, type DeclarationKind, type Unindexed } from "./naming.ts";
 
 export interface Declaration {
+	/** Qualified by everything it's declared in, as `NS.helper`. */
 	name: string;
 	kind: DeclarationKind;
 	start: number;
@@ -38,21 +18,27 @@ export interface Declaration {
 	codeStart: number;
 	/** A top-level declaration the module exports, by an `export` modifier or its own export list. */
 	exported?: true;
+	/** Declared inside a function. */
+	local?: true;
+	/** The graph's name for it where that differs, as `helper` for a namespace member it doesn't export. */
+	graphName?: string;
+	/** Why the graph has no node of its own for it, when it has none. */
+	unindexed?: Unindexed;
 }
 
-/** Use the graph's kind for a parsed declaration. */
-export function graphKind(kind: DeclarationKind): DeclarationKind {
-	return kind === "property" ? "variable" : kind;
+/** The graph's name for a declaration's node, if it has one. */
+export function graphNameOf(declaration: Declaration): string | undefined {
+	return declaration.unindexed ? undefined : (declaration.graphName ?? declaration.name);
 }
 
+/** The graph's handle for a declaration, or for one it has no node for, the same form with its full name. */
 export function handleFor(file: string, declaration: Declaration): string {
-	return `${file}#${declaration.name}:${graphKind(declaration.kind)}`;
+	return toHandle(file, graphNameOf(declaration) ?? declaration.name, graphKind(declaration.kind));
 }
 
-/** A function-local variable is parsed for ranges but is not a graph symbol. */
+/** The declarations a diff reports on its own: graph nodes, other than locals, which belong to their function. */
 export function indexedDeclarations(items: Declaration[]): Declaration[] {
-	const functions = new Set(items.filter((item) => item.kind === "function").map((item) => item.name));
-	return items.filter((item) => ![...functions].some((name) => item.name.startsWith(`${name}.`)));
+	return items.filter((item) => !item.local && !item.unindexed);
 }
 
 export interface SymbolRef {
@@ -155,8 +141,6 @@ export function createDeclarationParser(): DeclarationParser {
 	};
 }
 
-const isDefault = (node: Node) => hasModifier(node, SyntaxKind.DefaultKeyword);
-
 // A declaration's own doc comments belong to it; a file's leading `@module` comment does not.
 const fileDoc = /@(?:module|packageDocumentation|file|fileoverview)\b/;
 function documentedStart(sourceFile: SourceFile, node: Node): number {
@@ -172,79 +156,21 @@ function documentedStart(sourceFile: SourceFile, node: Node): number {
 	return start;
 }
 
-export function hasModifier(node: Node, kind: SyntaxKind): boolean {
-	return (
-		"modifiers" in node &&
-		Array.isArray(node.modifiers) &&
-		node.modifiers.some((modifier: Node) => modifier.kind === kind)
-	);
-}
-
-/** Names a module exports through its own `export { a, b as c }` or `export default a`. */
-export function listedExports(sourceFile: SourceFile): Set<string> {
-	const listed = new Set<string>();
-	for (const statement of sourceFile.statements) {
-		if (
-			isExportDeclaration(statement) &&
-			!statement.moduleSpecifier &&
-			statement.exportClause &&
-			isNamedExports(statement.exportClause)
-		)
-			for (const element of statement.exportClause.elements) listed.add((element.propertyName ?? element.name).text);
-		else if (isExportAssignment(statement) && isIdentifier(statement.expression)) listed.add(statement.expression.text);
-	}
-	return listed;
-}
-
 function collectDeclarations(sourceFile: SourceFile): Declaration[] {
-	const declarations: Declaration[] = [];
 	const line = (position: number) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-	const listed = listedExports(sourceFile);
-	const add = (name: string, kind: DeclarationKind, node: Node, topLevel = false) => {
-		declarations.push({
+	return indexDeclarations(sourceFile).declarations.map(
+		({ name, kind, graphName, unindexed, local, exported, extent }) => ({
 			name,
 			kind,
-			start: line(documentedStart(sourceFile, node)),
-			end: line(Math.max(node.getStart(sourceFile), node.end - 1)),
-			codeStart: line(node.getStart(sourceFile)),
-			...(topLevel && (hasModifier(node, SyntaxKind.ExportKeyword) || listed.has(name))
-				? { exported: true as const }
-				: {}),
-		});
-	};
-	const addVariables = (statement: Node, prefix = "") => {
-		if (!isVariableStatement(statement)) return;
-		for (const variable of statement.declarationList.declarations) {
-			if (isIdentifier(variable.name)) add(`${prefix}${variable.name.text}`, "variable", statement, prefix === "");
-		}
-	};
-	for (const statement of sourceFile.statements) {
-		if (isFunctionDeclaration(statement) && (statement.name || isDefault(statement))) {
-			const name = statement.name?.text ?? "default";
-			add(name, "function", statement, true);
-			for (const inner of statement.body?.statements ?? []) addVariables(inner, `${name}.`);
-		} else if (isClassDeclaration(statement) && (statement.name || isDefault(statement))) {
-			const name = statement.name?.text ?? "default";
-			add(name, "class", statement, true);
-			for (const member of statement.members) {
-				if (isConstructorDeclaration(member)) add(`${name}.__constructor`, "method", member);
-				else if (isMethodDeclaration(member) || isGetAccessorDeclaration(member) || isSetAccessorDeclaration(member))
-					add(`${name}.${member.name.getText(sourceFile)}`, "method", member);
-				else if (isPropertyDeclaration(member)) add(`${name}.${member.name.getText(sourceFile)}`, "property", member);
-			}
-		} else if (isInterfaceDeclaration(statement)) {
-			const name = statement.name.text;
-			add(name, "interface", statement, true);
-			for (const member of statement.members) {
-				if (isMethodSignatureDeclaration(member)) add(`${name}.${member.name.getText(sourceFile)}`, "method", member);
-				else if (isPropertySignatureDeclaration(member))
-					add(`${name}.${member.name.getText(sourceFile)}`, "property", member);
-			}
-		} else if (isTypeAliasDeclaration(statement)) add(statement.name.text, "type", statement, true);
-		else if (isEnumDeclaration(statement)) add(statement.name.text, "enum", statement, true);
-		else addVariables(statement);
-	}
-	return declarations;
+			start: line(documentedStart(sourceFile, extent)),
+			end: line(Math.max(extent.getStart(sourceFile), extent.end - 1)),
+			codeStart: line(extent.getStart(sourceFile)),
+			...(exported ? { exported: true as const } : {}),
+			...(local ? { local: true as const } : {}),
+			...(graphName === undefined || graphName === name ? {} : { graphName }),
+			...(unindexed ? { unindexed } : {}),
+		}),
+	);
 }
 
 /** Parse source held in memory, using its extension to select TypeScript's script kind. */
@@ -343,10 +269,8 @@ export function createRangeIndex(root: string, options: { maxFiles?: number; wit
 		if (!parsed) return [];
 		return parsed.filter(
 			(declaration) =>
-				declaration.name === ref.name &&
-				(declaration.kind === ref.kind ||
-					(ref.kind === "property" && declaration.kind === "variable") ||
-					(ref.kind === "variable" && declaration.kind === "property")),
+				(declaration.name === ref.name || graphNameOf(declaration) === ref.name) &&
+				graphKind(declaration.kind) === graphKind(ref.kind as DeclarationKind),
 		);
 	}
 }
