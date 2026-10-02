@@ -147,27 +147,33 @@ test("the graph has a node, under the graph name given, for exactly the declarat
 });
 
 test("every member resolves by name, and references find each use", () => {
-	const lines = (symbol: string) =>
-		query<{ nodes: Array<{ file: string; line: number }> }>({ type: "references", symbol }).nodes.map(
-			({ file, line }) => `${file.replace("src/", "")}:${line}`,
-		);
-	expect(lines("Lit.lprop")).toEqual(["use.tsx:4", "use.tsx:5", "use.tsx:11", "use.tsx:12"]);
-	expect(lines("Lit.nested.deep")).toEqual(["use.tsx:5", "use.tsx:11", "use.tsx:12"]);
-	expect(lines("Inter.xprop")).toEqual(["use.tsx:5"]);
-	expect(lines("Color.Red")).toEqual(["use.tsx:5"]);
-	expect(lines("obj.ofield")).toEqual(["use.tsx:5"]);
-	expect(lines("obj.omethod")).toEqual(["use.tsx:5"]);
-	expect(lines("Cls.#priv")).toEqual(["decl.ts:11", "decl.ts:12"]);
-	expect(lines("Cls.paramProp")).toEqual(["use.tsx:8"]);
-	expect(lines("ClassExpr.ce")).toEqual(["use.tsx:8"]);
-	expect(lines("Aug.augprop")).toEqual(["use.tsx:5"]);
-	expect(lines("arrow.inner")).toEqual(["decl.ts:16"]);
-	expect(lines("fn.blockLocal")).toEqual(["decl.ts:17"]);
-	expect(lines("src/decl.ts#default")).toEqual(["use.tsx:1", "use.tsx:8"]);
-	expect(lines("Cls.__constructor")).toEqual(["use.tsx:8"]);
-	expect(run("--json", JSON.stringify({ type: "references", symbol: "Lit.missing" })).err).toContain(
-		"Lit.missing not found",
+	const expected: Record<string, string[]> = {
+		"Lit.lprop": ["use.tsx:4", "use.tsx:5", "use.tsx:11", "use.tsx:12"],
+		"Lit.nested.deep": ["use.tsx:5", "use.tsx:11", "use.tsx:12"],
+		"Inter.xprop": ["use.tsx:5"],
+		"Color.Red": ["use.tsx:5"],
+		"obj.ofield": ["use.tsx:5"],
+		"obj.omethod": ["use.tsx:5"],
+		"Cls.#priv": ["decl.ts:11", "decl.ts:12"],
+		"Cls.paramProp": ["use.tsx:8"],
+		"ClassExpr.ce": ["use.tsx:8"],
+		"Aug.augprop": ["use.tsx:5"],
+		"arrow.inner": ["decl.ts:16"],
+		"fn.blockLocal": ["decl.ts:17"],
+		"src/decl.ts#default": ["use.tsx:1", "use.tsx:8"],
+		"Cls.__constructor": ["use.tsx:8"],
+	};
+	// One batch, as an agent would ask: a process per symbol is too slow for the test's time limit.
+	const symbols = [...Object.keys(expected), "Lit.missing"];
+	const output = run("--json", JSON.stringify(symbols.map((symbol) => ({ type: "references", symbol }))));
+	const results = JSON.parse(output.out) as Array<{ error?: string; nodes: Array<{ file: string; line: number }> }>;
+	const found = Object.fromEntries(
+		symbols.map((symbol, index) => [
+			symbol,
+			results[index]!.error ?? results[index]!.nodes.map(({ file, line }) => `${file.replace("src/", "")}:${line}`),
+		]),
 	);
+	expect(found).toEqual({ ...expected, "Lit.missing": expect.stringContaining("Lit.missing not found") });
 });
 
 test("a reference names the innermost declaration the graph has a node for", () => {
