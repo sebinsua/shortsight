@@ -13,7 +13,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, readFileSync, type Stats, writeSync } from "node:fs";
+import { constants, existsSync, readFileSync, realpathSync, type Stats, writeSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -22,7 +22,7 @@ import { $ } from "bun";
 import { structuredPatch } from "diff";
 import { openLinuxOverlay } from "../linux/overlay-linux.ts";
 import { openMacOverlay } from "../macos/overlay-macos.ts";
-import { discardedEdits, typeScriptApiHint } from "./program-lint.ts";
+import { discardedEdits, outsideRepositoryHint, typeScriptApiHint } from "./program-lint.ts";
 import { ProgramClock } from "./program-clock.ts";
 import { supportsFormatting } from "./format.ts";
 import {
@@ -317,7 +317,10 @@ console.log(JSON.stringify(await formatChanged(${JSON.stringify(files)}, process
 			warnings: [
 				...lint(options.program),
 				...(program.exitCode !== 0 && !program.timedOut
-					? typeScriptApiHint(options.program, program.output, typeScriptVersion(cwd))
+					? [
+							...typeScriptApiHint(options.program, program.output, typeScriptVersion(cwd)),
+							...outsideRepositoryHint(program.output, repo, (file) => insideRepository(repo, file)),
+						]
 					: []),
 				...formatWarnings,
 				...applicationWarnings,
@@ -547,10 +550,33 @@ function typeScriptVersion(cwd: string): string | undefined {
 	return undefined;
 }
 
+/** A run that can't start because of where it was asked to run. Reported as its message alone, without a stack. */
+class OutsideRepositoryError extends Error {}
+
 async function findRepository(cwd: string): Promise<string> {
 	const result = await $`git rev-parse --show-toplevel`.cwd(cwd).nothrow().quiet();
-	if (result.exitCode !== 0) throw new Error("shorthand only works inside a git repository.");
+	if (result.exitCode !== 0)
+		throw new OutsideRepositoryError(
+			`shorthand only works inside a git repository, and ${cwd} isn't in one. Edit files outside a repository directly.`,
+		);
 	return fs.realpath(result.text().trim());
+}
+
+/** Whether `file` is inside `repo`, comparing real paths so /tmp and /private/tmp agree. */
+function insideRepository(repo: string, file: string): boolean {
+	let existing = path.resolve(file);
+	const rest: string[] = [];
+	while (!existsSync(existing) && path.dirname(existing) !== existing) {
+		rest.unshift(path.basename(existing));
+		existing = path.dirname(existing);
+	}
+	let real: string;
+	try {
+		real = path.join(realpathSync(existing), ...rest);
+	} catch {
+		real = path.resolve(file);
+	}
+	return real === repo || real.startsWith(repo + path.sep);
 }
 
 // ── Running the program ───────────────────────────────────────────────────────────
@@ -1328,7 +1354,7 @@ if (import.meta.main) {
 		completed.value.diagnostics = completed.diagnostics;
 		console.log(JSON.stringify(completed.value));
 	} catch (error) {
-		console.error(error);
+		console.error(error instanceof OutsideRepositoryError ? error.message : error);
 		if (diagnostics && !hasDiagnosticChannel) console.error(diagnosticLines(diagnostics).join("\n"));
 		process.exitCode = 1;
 	}

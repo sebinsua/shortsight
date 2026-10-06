@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Lang, parse } from "@ast-grep/napi";
-import { discardedEdits, typeScriptApiHint } from "../src/runner/program-lint.ts";
+import { discardedEdits, outsideRepositoryHint, typeScriptApiHint } from "../src/runner/program-lint.ts";
 
 const warnings = (program: string) => discardedEdits(parse(Lang.TypeScript, program).root());
 
@@ -63,4 +63,23 @@ test("the TypeScript API hint needs a TypeScript import, a TypeError and TypeScr
 	expect(typeScriptApiHint(program, "Error: missing file", "7.0.2")).toEqual([]);
 	expect(typeScriptApiHint('const ts = require("typescript");', error, "7.0.2")).toHaveLength(1);
 	expect(typeScriptApiHint('import { x } from "typescript-helper";', error, "7.0.2")).toEqual([]);
+});
+
+const insideRepo = (file: string) => file.startsWith("/repo/");
+const hint = (output: string) => outsideRepositoryHint(output, "/repo", insideRepo);
+
+test("the outside-repository hint names the refused path from the error, not from stack frames", () => {
+	expect(hint("EPERM: operation not permitted, open '/home/me/.zshrc'\n    path: \"/home/me/.zshrc\",")).toEqual([
+		"/home/me/.zshrc is outside the repository, /repo. Programs can only change files inside it; edit files outside it directly.",
+	]);
+	// Bun's shell prints its error with no newline before the next line's source excerpt.
+	expect(hint("bun: Operation not permitted: /tmp/z.txt1 | await $`echo hi > /tmp/z.txt`;")).toEqual([
+		expect.stringMatching(/^\/tmp\/z\.txt is outside/),
+	]);
+	expect(hint("EROFS: read-only file system, open '/etc/a'\nEROFS: read-only file system, open '/etc/b'")).toEqual([
+		expect.stringMatching(/^\/etc\/a \(and 1 more\) is outside/),
+	]);
+	expect(hint("EPERM: operation not permitted, open '/repo/.git/hooks/x'")).toEqual([]);
+	expect(hint("Error: boom\n    at run (/opt/bun/prelude.ts:12:3)")).toEqual([]);
+	expect(hint("EACCES: permission denied, open '/root/secret'")).toEqual([]);
 });

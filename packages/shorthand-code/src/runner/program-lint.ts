@@ -123,3 +123,26 @@ export function typeScriptApiHint(program: string, output: string, version: stri
 		`typescript resolves to ${version} here, which no longer has the classic compiler API (ts.createSourceFile, ts.SyntaxKind and so on); its unstable replacement is typescript/unstable/sync. Use sg to read and edit syntax, or refactor.rename and refactor.renameFile for refactors.`,
 	];
 }
+
+/**
+ * After a failure: a write the sandbox refused, to a path outside the repository. Programs can only change files
+ * inside it, but the error itself doesn't say so: EPERM from AgentFS on macOS, EROFS from bubblewrap on Linux.
+ * (EACCES is the host's own permissions, so it isn't counted.)
+ */
+export function outsideRepositoryHint(output: string, repo: string, inside: (file: string) => boolean): string[] {
+	const refused = /\b(?:EPERM|EROFS)\b|Operation not permitted|Read-only file system|^\s*path:/i;
+	// Paths on the error's own lines, not in stack frames or the quoted program. Bun's shell prints its error
+	// without a newline, so the next line's "1 | source" excerpt can run straight on from the path.
+	const paths = new Set(
+		output
+			.split("\n")
+			.filter((line) => refused.test(line))
+			.flatMap((line) => [...line.matchAll(/(?:^|[\s'"(:])(\/[^\s'"`,)]+?)(?=\d+ \||[\s'"`,)]|$)/g)])
+			.map((match) => match[1]!),
+	);
+	const outside = [...paths].filter((file) => !inside(file));
+	if (!outside.length) return [];
+	return [
+		`${outside[0]}${outside.length > 1 ? ` (and ${outside.length - 1} more)` : ""} is outside the repository, ${repo}. Programs can only change files inside it; edit files outside it directly.`,
+	];
+}

@@ -2882,3 +2882,43 @@ console.log(JSON.stringify([files(scopes), [...new Set(scopes.flatMap(files))].t
 		expect(result.output.trim()).toBe('""');
 	});
 });
+
+test("outside a git repository, the runner names the directory it checked, without a stack trace", async () => {
+	const repo = await makeRepo({ "a.txt": "a\n" });
+	const outside = path.join(path.dirname(repo), "outside");
+	await mkdir(outside);
+	const { stderr, exitCode } = await runnerOutcome(startRunner(outside, "1"));
+	expect(exitCode).toBe(1);
+	// Then the timing detail every runner failure has, but no stack trace or source excerpt.
+	expect(stderr.split("\n")[0]).toBe(
+		`shorthand only works inside a git repository, and ${outside} isn't in one. Edit files outside a repository directly.`,
+	);
+	expect(stderr).not.toContain("findRepository");
+});
+
+describe.skipIf(!hasOverlay)("writes outside the repository", () => {
+	test("say which file was outside it, for Bun's file API and its shell", async () => {
+		const repo = await makeRepo({ "a.txt": "a\n" });
+		const outside = path.join(path.dirname(repo), "outside");
+		await mkdir(outside);
+		const relative = `${repo}/../outside/c.txt`;
+		for (const [program, file] of [
+			[`await Bun.write(${JSON.stringify(path.join(outside, "a.txt"))}, "x");`, path.join(outside, "a.txt")],
+			[`await $\`echo x > ${path.join(outside, "b.txt")}\`;`, path.join(outside, "b.txt")],
+			[`await Bun.write(${JSON.stringify(relative)}, "x");`, relative],
+		]) {
+			const result = await run(repo, program!);
+			expect(result.exitCode).toBe(1);
+			expect(result.warnings).toContain(
+				`${file} is outside the repository, ${repo}. Programs can only change files inside it; edit files outside it directly.`,
+			);
+		}
+	});
+
+	test("say nothing for a refused write inside it", async () => {
+		const repo = await makeRepo({ "a.txt": "a\n" });
+		const result = await run(repo, `await Bun.write(".git/hooks/x", "x");`);
+		expect(result.exitCode).toBe(1);
+		expect(result.warnings.some((warning) => warning.includes("outside the repository"))).toBe(false);
+	});
+});
