@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { parse } from "@ast-grep/napi";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -103,10 +103,12 @@ export async function references(root: string, options: ReferencesOptions): Prom
 /**
  * The server renames without aliases, so imports and re-exports follow the new name (see lsp-client.ts). That
  * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
- * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
+ * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes. When the renamed
+ * symbol is the property itself (`User.name`), it's the other way round: `{ name }` becomes `{ fullName: name }`.
  */
 function keepShorthandPropertyNames(symbol: string, declarationFile: string, declaration: Position): AdjustEdit {
 	const shorthands = new Map<string, Map<number, string>>();
+	let renamingProperty: boolean | undefined;
 	return (file, source, start, end, text) => {
 		if (source.slice(start, end) !== symbol) return text;
 		let kinds = shorthands.get(file);
@@ -131,8 +133,24 @@ function keepShorthandPropertyNames(symbol: string, declarationFile: string, dec
 			kind === "shorthand_property_identifier_pattern" &&
 			file === declarationFile &&
 			start === offsetOf(source, declaration);
-		return kind === "shorthand_property_identifier" || renamingBinding ? `${symbol}: ${text}` : text;
+		if (kind === "shorthand_property_identifier") {
+			renamingProperty ??= declaresProperty(declarationFile, declaration);
+			return renamingProperty ? `${text}: ${symbol}` : `${symbol}: ${text}`;
+		}
+		return renamingBinding ? `${symbol}: ${text}` : text;
 	};
+}
+
+/** Whether the name at `position` declares a property (an interface or class member, say) rather than a value. */
+function declaresProperty(file: string, position: Position): boolean {
+	const lang = scriptLanguage(file);
+	if (!lang) return false;
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, position);
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { any: [{ kind: "property_identifier" }, { kind: "private_property_identifier" }] } })
+		.some((node) => node.range().start.index === offset);
 }
 
 function offsetOf(source: string, position: Position): number {

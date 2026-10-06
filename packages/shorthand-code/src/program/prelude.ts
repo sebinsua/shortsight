@@ -30,6 +30,7 @@ import {
 	move,
 	remember,
 	remove,
+	syntaxErrorAt,
 	type FileTarget,
 } from "../refactor/placement.ts";
 import type {
@@ -725,20 +726,65 @@ type RewriteArgs =
 	| [pattern: string | NapiConfig, replacement: Replacement, files?: FileScope]
 	| [matches: SgMatch | readonly SgMatch[], replacement: Replacement];
 
-function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, file: string): number {
-	const edits: Edit[] = [];
-	let count = 0;
+const METAVARIABLE = /(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g;
+
+/** A template's metavariables that the pattern doesn't capture: a typo would otherwise be written out literally. */
+function checkTemplate(template: string, captured: ReadonlySet<string>): void {
+	const unknown = [...new Set([...template.matchAll(METAVARIABLE)].map((match) => match[0]))].filter(
+		(name) => !captured.has(name.replace(/^\$+/, "")),
+	);
+	if (unknown.length)
+		throw new Error(
+			`sg.rewrite: the replacement uses ${unknown.join(", ")}, which the pattern doesn't capture${captured.size ? ` (it captures ${[...captured].map((name) => `$${name}`).join(", ")})` : ""}. For literal text like that, return it from a callback.`,
+		);
+}
+
+const matchRange = (match: SgMatch) => match.node.range();
+
+/** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
+function conflicting(a: Edit, b: Edit): boolean {
+	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
+	return a.startPos === b.startPos || (a.startPos < b.endPos && b.startPos < a.endPos);
+}
+
+function applyRewrites(
+	matches: readonly SgMatch[],
+	replacement: Replacement,
+	file: string,
+	nested: SgMatch[] = [],
+): number {
+	const planned: { match: SgMatch; edits: Edit[] }[] = [];
 	for (const match of matches) {
+		if (typeof replacement === "string") checkTemplate(replacement, new Set(Object.keys(match.vars)));
 		const result =
 			typeof replacement === "function"
 				? programCode(() => replacement(match))
-				: replacement.replace(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g, (text, _, name) => match.vars[name] ?? text);
+				: replacement.replace(METAVARIABLE, (text, _, name) => match.vars[name] ?? text);
 		const changes = replacementEdits(result, match, file);
-		if (changes.length > 0) {
-			edits.push(...changes);
-			count++;
-		}
+		if (changes.length > 0) planned.push({ match, edits: changes });
 	}
+	// Outer matches first. A match inside one whose edits it clashes with is left alone, as ast-grep's CLI does:
+	// in p.then(a).then(b), rewriting the outer call already rewrote from the original text of the inner one.
+	planned.sort(
+		(a, b) =>
+			matchRange(a.match).start.index - matchRange(b.match).start.index ||
+			matchRange(b.match).end.index - matchRange(a.match).end.index,
+	);
+	const kept: typeof planned = [];
+	for (const entry of planned) {
+		const outer = kept.find((other) => other.edits.some((edit) => entry.edits.some((mine) => conflicting(edit, mine))));
+		const [o, e] = outer ? [matchRange(outer.match), matchRange(entry.match)] : [];
+		const inside =
+			o &&
+			e &&
+			o.start.index <= e.start.index &&
+			e.end.index <= o.end.index &&
+			(o.start.index !== e.start.index || o.end.index !== e.end.index);
+		if (inside) nested.push(entry.match);
+		else kept.push(entry);
+	}
+	const edits = kept.flatMap((entry) => entry.edits);
+	const count = kept.length;
 	if (edits.length === 0) return 0;
 	const source = matches[0].node.getRoot().root().text();
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
@@ -773,6 +819,14 @@ function applyRewrites(matches: readonly SgMatch[], replacement: Replacement, fi
 	const sources = new Map<string, string | null>();
 	for (const match of matches) getMatchSnapshot(match, sources, rewriteStaleAdvice);
 	const output = matches[0].node.getRoot().root().commitEdits(ordered);
+	const lang = LANGUAGES[file.split(".").pop()!];
+	if (lang && !syntaxErrorAt(matches[0].node.getRoot().root())) {
+		const error = syntaxErrorAt(parse(lang, output).root());
+		if (error)
+			throw new Error(
+				`sg.rewrite would leave invalid syntax in ${JSON.stringify(relative(repositoryRoot, resolve(file)))} at line ${error.range().start.line + 1}: ${output.split("\n")[error.range().start.line]!.trim().slice(0, 120)}`,
+			);
+	}
 	recordRewriteOutput(file, source, output, ordered);
 	writeFileSync(file, output);
 	return count;
@@ -819,6 +873,14 @@ function insideEarlierOutput(file: string, source: string, matches: readonly SgM
 	);
 }
 
+function explainNested(nested: readonly SgMatch[]): void {
+	if (!nested.length) return;
+	const example = nested[0]!;
+	console.error(
+		`warning: sg.rewrite left ${nested.length} match${nested.length === 1 ? "" : "es"} inside another match unchanged, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. The outer match was rewritten from the original text. To rewrite the inner ones too, select them again with sg.find and pass the matches to sg.rewrite.`,
+	);
+}
+
 /** Rewrites patterns or existing selections; returns matches producing edits, not individual edits. */
 function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	const selected = Array.isArray(target) || (typeof target === "object" && target !== null && "node" in target);
@@ -838,17 +900,22 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 			groups.set(file, group);
 		}
 		let count = 0;
+		const nested: SgMatch[] = [];
 		for (const [file, matches] of groups) {
 			count += editingFiles([file], () => {
 				const currentSources = new Map<string, string | null>();
 				for (const match of matches) getMatchSnapshot(match, currentSources, rewriteStaleAdvice);
-				return applyRewrites(matches, replacement, file);
+				return applyRewrites(matches, replacement, file, nested);
 			});
 		}
+		explainNested(nested);
 		return count;
 	}
 	const pattern = target as string | NapiConfig;
+	if (typeof replacement === "string")
+		checkTemplate(replacement, new Set([...JSON.stringify(pattern).matchAll(METAVARIABLE)].map((match) => match[2]!)));
 	const scope = files ?? ".";
+	const nested: SgMatch[] = [];
 	const ranges = scopeRanges("sg.rewrite", scope);
 	let count = 0,
 		matched = 0;
@@ -867,9 +934,11 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 				matches.filter((match) => !earlier.has(match)),
 				replacement,
 				file,
+				nested,
 			);
 		});
 	}
+	explainNested(nested);
 	if (matched === 0) {
 		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(scope)}`);
 	}

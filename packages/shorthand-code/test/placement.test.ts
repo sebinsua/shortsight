@@ -104,6 +104,20 @@ test("remove preserves adjacent comments", () => {
 	expect(statements(path)).toEqual(["// keep this", "// and this", "b();"]);
 });
 
+test("remove and move take a statement's doc comment with it, and leave other comments", () => {
+	const path = fixture(
+		"// header\n\n/** About a. */\n// note\na();\n/** Stays: a blank line follows. */\n\nb(); // trailing\n/** About c. */ c();\n",
+	);
+	remove(match(path, "a();"));
+	expect(readFileSync(path, "utf8")).toBe(
+		"// header\n\n/** Stays: a blank line follows. */\n\nb(); // trailing\n/** About c. */ c();\n",
+	);
+	move(match(path, "c();"), { startOf: file(path) });
+	expect(readFileSync(path, "utf8")).toBe(
+		"/** About c. */ c();\n// header\n\n/** Stays: a blank line follows. */\n\nb(); // trailing\n",
+	);
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

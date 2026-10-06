@@ -226,7 +226,7 @@ function topLevel(root: SgNode): TopLevel {
 		}
 		if (statement.kind() === "export_statement" && !statement.field("source")) {
 			const clause = statement.children().find((child) => child.kind() === "export_clause");
-			for (const specifier of clause?.namedChildren() ?? []) listed.add(specifier.field("name")!.text());
+			for (const specifier of clause ? specifiersOf(clause) : []) listed.add(specifier.field("name")!.text());
 		}
 	}
 	return { declarations, listed };
@@ -372,6 +372,13 @@ function importStatement(
 	return `${keyword} ${namedClause(texts, allTypes)} from ${quote}${module}${quote}${attributes};`;
 }
 
+/** The specifiers of a `{ … }` import or export list, without the comments that can sit between them. */
+function specifiersOf(list: SgNode): SgNode[] {
+	return list
+		.namedChildren()
+		.filter((child) => ["import_specifier", "export_specifier"].includes(String(child.kind())));
+}
+
 /**
  * Rebuild an import or re-export without the bindings `drop` picks by imported and local name (a default or
  * namespace import has no imported name); empty when nothing is left.
@@ -385,13 +392,14 @@ function withoutSpecifiers(statement: SgNode, drop: (imported: string, local: st
 	const parts: string[] = [];
 	const named: string[] = [];
 	const collect = (list: SgNode) => {
-		for (const specifier of list.namedChildren()) {
+		for (const specifier of specifiersOf(list)) {
 			const imported = specifier.field("name")!.text();
 			if (!drop(imported, (specifier.field("alias") ?? specifier.field("name"))!.text())) named.push(specifier.text());
 		}
 	};
 	if (clause?.kind() === "export_clause") collect(clause);
 	for (const part of clause?.kind() === "import_clause" ? clause.namedChildren() : []) {
+		if (part.kind() === "comment") continue;
 		if (part.kind() === "named_imports") collect(part);
 		else if (!drop("", part.kind() === "namespace_import" ? part.namedChildren().at(-1)!.text() : part.text()))
 			parts.push(part.text());
@@ -626,14 +634,13 @@ export function planImports(input: MoveInput): ImportPlan | null {
 					anchorEnd ??= statement.range().end.index;
 					continue;
 				}
-				const specifiers = (
+				const specifierList =
 					clause?.kind() === "export_clause"
-						? clause.namedChildren()
-						: (clause
-								?.namedChildren()
-								.find((part) => part.kind() === "named_imports")
-								?.namedChildren() ?? [])
-				).filter((specifier) => names.has(specifier.field("name")!.text()));
+						? clause
+						: clause?.namedChildren().find((part) => part.kind() === "named_imports");
+				const specifiers = (specifierList ? specifiersOf(specifierList) : []).filter((specifier) =>
+					names.has(specifier.field("name")!.text()),
+				);
 				if (!specifiers.length) continue;
 				const list = statement.kind() === "import_statement" ? imports : reexports;
 				for (const specifier of specifiers)

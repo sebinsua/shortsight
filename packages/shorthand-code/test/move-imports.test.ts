@@ -420,6 +420,21 @@ test("imports only the moved declaration used leave the source with it", async (
 	await typeCheck(root);
 });
 
+test("comments inside import lists don't stop a move", async () => {
+	const root = project({
+		"src/dep.ts": "export const a = 1;\nexport const b = 2;\n",
+		"src/m.ts":
+			'import {\n\ta, // first\n\tb,\n} from "./dep";\nexport function f() {\n\treturn a;\n}\nexport const g = b;\n',
+		"src/use.ts": 'import {\n\tf, // the function\n\tg,\n} from "./m";\nexport const r = f() + g;\n',
+	});
+
+	await moveDeclaration(join(root, "src/m.ts"), "f", join(root, "src/n.ts"), everyFile(root));
+
+	expect(read(root, "src/n.ts")).toBe('import { a } from "./dep";\nexport function f() {\n\treturn a;\n}\n');
+	expect(read(root, "src/use.ts")).toContain('import { f } from "./n";');
+	await typeCheck(root);
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

@@ -287,6 +287,24 @@ await refactor.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 			expect(await Bun.file(path.join(repo, "src/other.ts")).text()).toContain('"parseUser"');
 		});
 
+		test("renaming a property keeps the value in an object literal shorthand", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/user.ts":
+					"export interface User { name: string }\nexport function make(name: string): User { return { name }; }\nexport function read(u: User) { const { name } = u; return name.length; }\n",
+			});
+
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/user.ts", symbol: "User.name", to: "fullName" });`,
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/user.ts")).text()).toBe(
+				"export interface User { fullName: string }\nexport function make(name: string): User { return { fullName: name }; }\nexport function read(u: User) { const { fullName } = u; return fullName.length; }\n",
+			);
+		});
+
 		test("rejects a missing or ambiguous declaration without writing", async () => {
 			const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
 			for (const symbol of ["missing", "value"]) {
@@ -2669,13 +2687,53 @@ sg.rewrite(twice, (m) => ({ startPos: m.node.range().start.index, endPos: m.node
 		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("void foo(1);\n");
 	});
 
-	test("sg.rewrite rejects overlapping nested edits", async () => {
+	test("sg.rewrite rewrites the outer of two nested matches and says it left the inner one", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(foo(1));\np.then(a).then(b);\n" });
+		const result = await run(
+			repo,
+			`sg.rewrite("foo($A)", "bar($A)", "src/a.ts");
+sg.rewrite("$P.then($F)", "$P.andThen($F)", "src/a.ts");`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("sg.rewrite left 1 match inside another match unchanged, e.g. src/a.ts:1 foo(1)");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("bar(foo(1));\np.then(a).andThen(b);\n");
+	});
+
+	test("sg.rewrite applies nested matches whose edits don't clash", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(foo(1));\n" });
-		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A)", "src/a.ts");`);
+		const result = await run(
+			repo,
+			`sg.rewrite("foo($A)", (m) => m.node.field("function").replace("bar"), "src/a.ts");`,
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).not.toContain("inside another match");
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("bar(bar(1));\n");
+	});
+
+	test("sg.rewrite refuses a template metavariable the pattern doesn't capture", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
+		for (const program of [
+			`sg.rewrite("foo($A)", "bar($B)", "src/a.ts");`,
+			`sg.rewrite(sg.find("foo($A)", "src/a.ts"), "bar($$$B)");`,
+		]) {
+			const result = await run(repo, program);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toMatch(
+				/the replacement uses \$(\$\$)?B, which the pattern doesn't capture \(it captures \$A\)/,
+			);
+		}
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("foo(1);\n");
+	});
+
+	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
+		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
+		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A", "src/a.ts");`);
 
 		expect(result.exitCode).toBe(1);
-		expect(result.output).toContain('sg.rewrite produced overlapping edits in "src/a.ts"');
-		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("foo(foo(1));\n");
+		expect(result.output).toContain('sg.rewrite would leave invalid syntax in "src/a.ts" at line 1: bar(1;');
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("foo(1);\n");
 	});
 
 	test("sg accepts a list of directories, and null to leave a match alone", async () => {
@@ -2915,9 +2973,15 @@ describe.skipIf(!hasOverlay)("writes outside the repository", () => {
 		}
 	});
 
-	test("say nothing for a refused write inside it", async () => {
+	test("say nothing for a failed run whose refused write was inside it", async () => {
 		const repo = await makeRepo({ "a.txt": "a\n" });
-		const result = await run(repo, `await Bun.write(".git/hooks/x", "x");`);
+		// macOS refuses writes to .git and Linux lets them land in the overlay and ignores them, so the
+		// program fails either way: the hint must not count a path inside the repository.
+		const hook = JSON.stringify(path.join(repo, ".git/hooks/x"));
+		const result = await run(
+			repo,
+			`try { await Bun.write(${hook}, "x"); } catch (error) { console.log(error.message); }\nthrow new Error("stop");`,
+		);
 		expect(result.exitCode).toBe(1);
 		expect(result.warnings.some((warning) => warning.includes("outside the repository"))).toBe(false);
 	});

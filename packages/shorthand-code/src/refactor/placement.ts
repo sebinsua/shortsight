@@ -123,17 +123,39 @@ interface Edit {
 	text: string;
 }
 
-/** Removes a statement, and the line break after it when it has whole lines to itself. */
+/**
+ * Where a statement's doc comment starts, so it moves and goes with the statement rather than ending up on the
+ * next one. That's the nearest JSDoc-style block comment above it, with any comments in between, when each starts its own line
+ * and no blank line separates them. Other comments stay where they are.
+ */
+function leadingCommentsStart(node: SgNode, source: string): number {
+	let start = node.range().start.index;
+	let docStart: number | undefined;
+	for (let previous = node.prev(); previous?.kind() === "comment"; previous = previous.prev()) {
+		const { start: from, end: to } = previous.range();
+		const ownLine = !source.slice(source.lastIndexOf("\n", from.index - 1) + 1, from.index).trim();
+		if (!ownLine || !/^[\t ]*(\r?\n)?[\t ]*$/.test(source.slice(to.index, start))) break;
+		start = from.index;
+		if (previous.text().startsWith("/**")) {
+			docStart = start;
+			break;
+		}
+	}
+	return docStart ?? node.range().start.index;
+}
+
+/** Removes a statement with its doc comment, and the line break after it when it has whole lines to itself. */
 function removal(saved: Snapshot): Edit {
 	statement(saved.node);
-	const { start, end } = saved.node.range();
+	const { end } = saved.node.range();
 	const { source } = saved;
-	const lineStart = source.lastIndexOf("\n", start.index - 1) + 1;
+	const start = leadingCommentsStart(saved.node, source);
+	const lineStart = source.lastIndexOf("\n", start - 1) + 1;
 	const newline = source.startsWith("\r\n", end.index) ? 2 : source.startsWith("\n", end.index) ? 1 : 0;
-	const wholeLines = !source.slice(lineStart, start.index).trim() && newline > 0;
+	const wholeLines = !source.slice(lineStart, start).trim() && newline > 0;
 	return wholeLines
 		? { parent: saved.node.parent()!, start: lineStart, end: end.index + newline, text: "" }
-		: { parent: saved.node.parent()!, start: start.index, end: end.index, text: "" };
+		: { parent: saved.node.parent()!, start, end: end.index, text: "" };
 }
 
 function placement(text: string, destination: Destination) {
@@ -268,13 +290,18 @@ function validateBoundaries(saved: Snapshot, edits: Edit[], root: SgNode) {
 }
 
 function hasSyntaxError(node: SgNode): boolean {
-	return (
-		node.kind() === "ERROR" ||
-		node.children().some((child) => {
-			const { start, end } = child.range();
-			return start.index === end.index || hasSyntaxError(child);
-		})
-	);
+	return syntaxErrorAt(node) !== undefined;
+}
+
+/** The first ERROR node, or node the parser had to invent (an empty one), in this tree. */
+export function syntaxErrorAt(node: SgNode): SgNode | undefined {
+	if (node.kind() === "ERROR") return node;
+	for (const child of node.children()) {
+		const { start, end } = child.range();
+		const error = start.index === end.index ? child : syntaxErrorAt(child);
+		if (error) return error;
+	}
+	return undefined;
 }
 
 function apply(plans: { saved: Snapshot; edits: Edit[] }[]) {
@@ -361,7 +388,14 @@ function moveNodes(
 ): void {
 	const source = snapshot(match);
 	const deletion = removal(source);
-	const text = transform ? transform(source.node.text()) : source.node.text();
+	// A doc comment travels with the declaration; a transform sees only the declaration itself.
+	const comments = source.source.slice(
+		leadingCommentsStart(source.node, source.source),
+		source.node.range().start.index,
+	);
+	const declaration = transform ? transform(source.node.text()) : source.node.text();
+	// A transform's result is checked as it is: joining a non-string to the comment would hide what it returned.
+	const text = comments && typeof declaration === "string" ? comments + declaration : declaration;
 	const target = placement(text, destination);
 	// A transform is arbitrary user code: recheck both snapshots before any writes.
 	snapshot(match);
@@ -393,7 +427,7 @@ function moveNodes(
 				: null;
 		const placed = { ...target.edit };
 		// The source still uses a declaration it did not export, so the target now has to export it.
-		if (plan?.exportMoved) placed.text = placed.text.replace(text, `export ${text}`);
+		if (plan?.exportMoved) placed.text = placed.text.replace(text, `${comments}export ${declaration}`);
 		const targetEdits: Edit[] = [];
 		for (const edit of plan?.target ?? []) {
 			// Edits at the declaration's insertion point are combined with it: imports inserted there come
