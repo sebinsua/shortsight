@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import registerCode from "../src/index.ts";
+import registerShorthand from "../src/index.ts";
 
 test("Pi loads the shorthand skill from shorthand-code", async () => {
 	const handlers = new Map<string, () => unknown>();
-	await registerCode(
+	await registerShorthand(
 		{
 			on(event: string, handler: () => unknown) {
 				handlers.set(event, handler);
@@ -44,5 +44,5 @@ test("the extension loads under Node, the way Pi loads it", () => {
 	const result = Bun.spawnSync(["node", "--input-type=module", "-e", script]);
 	expect(result.stderr.toString()).toBe("");
 	// sightread is a workspace package here, so Node must find it and the tool must offer graph.query.
-	expect(result.stdout.toString().trim()).toBe("code true");
+	expect(result.stdout.toString().trim()).toBe("shorthand true");
 });

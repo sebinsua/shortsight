@@ -1,5 +1,5 @@
 /**
- * The `code` tool: the model writes one Bun program that makes a multi-step change to the repository.
+ * The `shorthand` tool: the model writes one Bun program that makes a multi-step change to the repository.
  * Its writes go to a copy-on-write overlay; if it succeeds, they're applied and the diff is returned.
  */
 
@@ -22,7 +22,7 @@ import {
 } from "shorthand-code";
 import { callLine, resultLines, unstructuredResultText } from "./display.ts";
 
-const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Tests, type-checks and builds belong outside the program: in a shell call, or, when a codemode script calls code, later in that script.
+const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Tests, type-checks and builds belong outside the program: in a shell call, or, when a codemode script calls shorthand, later in that script.
 
 Common operations:
 - edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
@@ -45,7 +45,7 @@ export const SKILLS_DIRECTORY = path.join(
 	"skills",
 );
 
-export function codeDescription(graphAvailable: boolean): string {
+export function shorthandDescription(graphAvailable: boolean): string {
 	return graphAvailable
 		? DESCRIPTION.replace("\n\nSee the shorthand skill", `\n${GRAPH_DESCRIPTION}\nSee the shorthand skill`)
 		: DESCRIPTION;
@@ -54,10 +54,10 @@ export function codeDescription(graphAvailable: boolean): string {
 const paths = (description: string) => Type.Array(Type.String(), { description });
 
 /**
- * What a script gets back from `code`, for example one run by Pi's codemode tool. The model still sees the text.
+ * What a script gets back from `shorthand`, for example one run by Pi's codemode tool. The model still sees the text.
  * A failed run resolves to this too, so a script checks `exitCode`.
  */
-export const CODE_OUTPUT_SCHEMA = Type.Object({
+export const SHORTHAND_OUTPUT_SCHEMA = Type.Object({
 	exitCode: Type.Optional(
 		Type.Union([Type.Number(), Type.Null()], { description: "0 on success; null when the program was killed" }),
 	),
@@ -80,7 +80,7 @@ export const CODE_OUTPUT_SCHEMA = Type.Object({
 	infrastructureError: Type.Optional(Type.String({ description: "Set, alone, when the program couldn't be run" })),
 });
 
-export function codeOutput(result: RunResult) {
+export function shorthandOutput(result: RunResult) {
 	const { exitCode, timedOut, output, errorLine, warnings, applied, conflicts, rolledBack } = result;
 	const changes = result.changes.map((change) => ({ path: change.path, kind: change.kind, patch: change.patch }));
 	return {
@@ -112,13 +112,13 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 	// rather than throwing, since a thrown error loses them.)
 	pi.on("tool_result", async (event) => {
 		const run = event.details as RunResult | undefined;
-		if (event.toolName === "code" && run && runFailed(run)) return { isError: true };
+		if (event.toolName === "shorthand" && run && runFailed(run)) return { isError: true };
 	});
 
 	pi.registerTool({
-		name: "code",
-		label: "Code",
-		description: codeDescription(graphAvailable),
+		name: "shorthand",
+		label: "Shorthand",
+		description: shorthandDescription(graphAvailable),
 		promptSnippet:
 			"Make multi-file, repetitive or rename/move changes with one Bun program; a small change to one file is quicker as a direct edit. Keep verification outside the program",
 
@@ -143,7 +143,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 				}),
 			),
 		}),
-		outputSchema: CODE_OUTPUT_SCHEMA,
+		outputSchema: SHORTHAND_OUTPUT_SCHEMA,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			// While it runs, show how long it's been going and the latest reported step.
@@ -189,7 +189,7 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 					},
 				],
 				details: result,
-				structuredContent: codeOutput(result),
+				structuredContent: shorthandOutput(result),
 			};
 		},
 
@@ -198,12 +198,12 @@ export default async function (pi: ExtensionAPI, findGraph: () => Promise<unknow
 		},
 
 		renderResult(result, options, theme) {
-			return renderCodeResult(result, options, theme);
+			return renderShorthandResult(result, options, theme);
 		},
 	});
 }
 
-export function renderCodeResult(
+export function renderShorthandResult(
 	result: { content: readonly unknown[]; details?: unknown },
 	{ expanded, isPartial }: { expanded: boolean; isPartial: boolean },
 	theme: Theme,

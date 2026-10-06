@@ -9,7 +9,7 @@ Each works on its own.
 
 ## `shorthand`
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
+![A shorthand call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
 
 Instead of a patch, the agent writes a Bun program that can search, rewrite syntax, and rename or move TypeScript symbols. The program edits a private copy of the repository, and the agent sees the diff of what it changed. Agents are good at improving things a step at a time, so changes are applied a whole file at a time and the agent is told which worked and which didn't.
 
@@ -35,7 +35,7 @@ apt-cache policy bubblewrap
 sudo apt install bubblewrap build-essential lsof
 ```
 
-Then install it for [Pi](https://github.com/earendil-works/pi), which gives Pi a `code` tool:
+Then install it for [Pi](https://github.com/earendil-works/pi), which gives Pi a `shorthand` tool:
 
 ```sh
 pi install npm:pi-shorthand

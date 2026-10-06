@@ -549,7 +549,7 @@ function typeScriptVersion(cwd: string): string | undefined {
 
 async function findRepository(cwd: string): Promise<string> {
 	const result = await $`git rev-parse --show-toplevel`.cwd(cwd).nothrow().quiet();
-	if (result.exitCode !== 0) throw new Error("The code tool only works inside a git repository.");
+	if (result.exitCode !== 0) throw new Error("shorthand only works inside a git repository.");
 	return fs.realpath(result.text().trim());
 }
 

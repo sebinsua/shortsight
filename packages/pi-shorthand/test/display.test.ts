@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { highlightCode, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { callLine, resultLines, unstructuredResultText } from "../src/display.ts";
 import { Text } from "@earendil-works/pi-tui";
-import { FitsScreen, renderCodeResult } from "../src/index.ts";
+import { FitsScreen, renderShorthandResult } from "../src/index.ts";
 import { textForModel, type FileChange, type RunResult } from "shorthand-code";
 
 // Plain text: no colours, so the tests read the words and layout.
@@ -180,10 +180,10 @@ describe("the verdict", () => {
 
 	test("the call line names a non-default rollback mode and the timeout", () => {
 		expect(callLine({ title: "Rename", rollback: "all", timeout: 5 }, theme)).toBe(
-			"code Rename (rollback all, program timeout 5s)",
+			"shorthand Rename (rollback all, program timeout 5s)",
 		);
-		expect(callLine({ title: "Rename" }, theme)).toBe("code Rename");
-		expect(callLine({ title: "Rename", cwd: "child" }, theme)).toBe("code Rename (cwd child)");
+		expect(callLine({ title: "Rename" }, theme)).toBe("shorthand Rename");
+		expect(callLine({ title: "Rename", cwd: "child" }, theme)).toBe("shorthand Rename (cwd child)");
 	});
 });
 
@@ -197,7 +197,7 @@ describe("unstructured completed results", () => {
 				return text;
 			},
 		} as unknown as Theme;
-		renderCodeResult(
+		renderShorthandResult(
 			{
 				content: [],
 				details: {
@@ -244,27 +244,27 @@ describe("unstructured completed results", () => {
 	test("show the final infrastructure error instead of pending progress", () => {
 		expect(unstructuredResultText([{ type: "text", text: "runner failed: EACCES" }])).toBe("runner failed: EACCES");
 
-		const partial = renderCodeResult(
+		const partial = renderShorthandResult(
 			{ content: [{ type: "text", text: "running" }], details: { progress: "1.0 s · grep" } },
 			{ expanded: false, isPartial: true },
 			theme,
 		);
 		expect(Bun.stripANSI(partial.render(200).join("\n")).trimEnd()).toBe("running… 1.0 s · grep");
 
-		const completed = renderCodeResult(
+		const completed = renderShorthandResult(
 			{ content: [{ type: "text", text: "runner failed: EACCES" }] },
 			{ expanded: false, isPartial: false },
 			theme,
 		);
 		expect(Bun.stripANSI(completed.render(200).join("\n")).trimEnd()).toBe("runner failed: EACCES");
 
-		const empty = renderCodeResult(
+		const empty = renderShorthandResult(
 			{ content: [{ type: "image", data: "ignored" }] },
 			{ expanded: false, isPartial: false },
 			theme,
 		);
 		const emptyText = Bun.stripANSI(empty.render(200).join("\n")).trimEnd();
-		expect(emptyText).toBe("Code failed without result details");
+		expect(emptyText).toBe("Shorthand failed without result details");
 		expect(emptyText).not.toContain("running");
 	});
 });
@@ -302,7 +302,7 @@ describe("what went wrong", () => {
 });
 
 describe("sections", () => {
-	test("code diffs combine syntax highlighting with colored change gutters", () => {
+	test("shorthand diffs combine syntax highlighting with colored change gutters", () => {
 		const typescript = change("src/example.ts");
 		typescript.patch = typescript.patch
 			.replace("-old 0", "-export const oldValue = 1;")

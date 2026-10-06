@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import type { JsonEvent } from "./harness.ts";
+import { SHORTHAND_TOOL_NAMES, type JsonEvent } from "./harness.ts";
 
 const fence = (value: string) => {
 	const ticks = "`".repeat(Math.max(3, ...[...value.matchAll(/`+/g)].map((m) => m[0].length + 1)));
@@ -51,7 +51,11 @@ export function sessionReport(events: JsonEvent[], summary?: JsonEvent): string 
 				`Result (${event.toolCallId ?? event.toolName}): ${label}${details?.durationMs !== undefined ? `; ${details.durationMs} ms` : ""}.`,
 				"",
 			);
-			if (event.toolName === "code" && Array.isArray(details?.changes) && details.changes.length === 0)
+			if (
+				SHORTHAND_TOOL_NAMES.includes(event.toolName) &&
+				Array.isArray(details?.changes) &&
+				details.changes.length === 0
+			)
 				lines.push("No candidate file changes (may be an intentional inspection/check).", "");
 			lines.push(
 				fence(

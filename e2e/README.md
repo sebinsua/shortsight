@@ -171,18 +171,21 @@ available), `graph.query` isn't advertised, and a program can't reach the graph 
 
 `--codemode on` adds Pi's `codemode` tool alongside the others; `only` also sets `codemode.mode: "only"`, so
 other tools are reached through scripts rather than declared to the model. With `baseline` it measures codemode
-without shorthand. `--code-exposure` applies only with codemode and a setup that has `code`: `direct` is `code`
-as shipped, which scripts can call and get its result as data, and `model-only` wraps registration to keep
-`code` declared to the model but out of scripts. Without codemode, `code` is as shipped and conditions keep
+without shorthand. `--code-exposure` applies only with codemode and a setup that has `shorthand`: `direct` is
+`shorthand` as shipped, which scripts can call and get its result as data, and `model-only` wraps registration to
+keep `shorthand` declared to the model but out of scripts. Without codemode, `shorthand` is as shipped and conditions keep
 their earlier names. Calls a script makes are counted apart from the model's own, as
 `nestedTools`. A round runs every setup with `--codemode on`.
 
-| `--setups` value | Enabled tools                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------------- |
-| `baseline`       | `read,bash,edit,write` (stock coding tools)                                               |
-| `code`           | Stock tools plus `code`; measures optional adoption                                       |
-| `replace`        | `read,bash,code`; replaces dedicated editing tools, retaining exploration/test facilities |
-| `read-code`      | `read,code`; a separately constrained workflow                                            |
+| `--setups` value | Enabled tools                                                                                  |
+| ---------------- | ---------------------------------------------------------------------------------------------- |
+| `baseline`       | `read,bash,edit,write` (stock coding tools)                                                    |
+| `code`           | Stock tools plus `shorthand`; measures optional adoption                                       |
+| `replace`        | `read,bash,shorthand`; replaces dedicated editing tools, retaining exploration/test facilities |
+| `read-code`      | `read,shorthand`; a separately constrained workflow                                            |
+
+Setup names come from when the tool was called `code`, and stay so earlier results still compare. Checkouts from
+then are loaded with the tool registered as `shorthand`.
 
 Shell writes remain possible in `baseline`, `code`, and `replace`. The report exposes shell commands for review;
 it does not assume every shell call writes files or that all successful changes used shorthand.

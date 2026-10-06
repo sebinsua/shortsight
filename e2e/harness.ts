@@ -109,6 +109,9 @@ export async function runVerification(command: string, cwd: string, budgetMs: nu
 
 const zeroCost = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
 
+/** The shorthand tool's name now, and in logs from before it was renamed. */
+export const SHORTHAND_TOOL_NAMES: readonly string[] = ["shorthand", "code"];
+
 export function summarizeEvents(events: JsonEvent[]): EventSummary {
 	const tools: Record<string, number> = {};
 	const failedTools: Record<string, number> = {};
@@ -161,7 +164,10 @@ export function summarizeEvents(events: JsonEvent[]): EventSummary {
 		failedTools,
 		nestedTools,
 		nestedFailedTools,
-		failedCodeCalls: (failedTools.code ?? 0) + (nestedFailedTools.code ?? 0),
+		failedCodeCalls: SHORTHAND_TOOL_NAMES.reduce(
+			(total, name) => total + (failedTools[name] ?? 0) + (nestedFailedTools[name] ?? 0),
+			0,
+		),
 		toolOutcomes,
 		usage,
 		...(providerError ? { providerError } : {}),
@@ -170,7 +176,7 @@ export function summarizeEvents(events: JsonEvent[]): EventSummary {
 
 function structuredToolFailure(event: JsonEvent, details: JsonEvent | undefined): boolean {
 	if (event.isError === true) return true;
-	if (event.toolName !== "code" || !details) return false;
+	if (!SHORTHAND_TOOL_NAMES.includes(event.toolName) || !details) return false;
 	return (
 		details.timedOut === true ||
 		(typeof details.exitCode === "number" && details.exitCode !== 0) ||

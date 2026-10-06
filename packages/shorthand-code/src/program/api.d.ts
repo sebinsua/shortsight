@@ -1,4 +1,4 @@
-/** Types for programs executed by the code tool. Type-only: this does not install runtime globals. */
+/** Types for programs executed by shorthand. Type-only: this does not install runtime globals. */
 import type { ShorthandGlobals } from "./prelude.ts";
 
 declare global {

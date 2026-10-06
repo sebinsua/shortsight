@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import registerCode from "../src/index.ts";
+import registerShorthand from "../src/index.ts";
 import type { RunResult } from "shorthand-code";
 
 const hasOverlay =
@@ -18,7 +18,7 @@ afterEach(async () => {
 	temporaryRoot = undefined;
 });
 
-test("code targets a child worktree from a bare worktree container", async () => {
+test("shorthand targets a child worktree from a bare worktree container", async () => {
 	temporaryRoot = await mkdtemp(path.join(tmpdir(), "pi-shorthand-code-worktree-"));
 	const container = path.join(temporaryRoot, "container");
 	const child = path.join(container, "child");
@@ -29,7 +29,7 @@ test("code targets a child worktree from a bare worktree container", async () =>
 	await $`git -c user.name=test -c user.email=test@test -c commit.gpgsign=false commit -qm init`.cwd(child);
 
 	let registered: unknown;
-	await registerCode({
+	await registerShorthand({
 		on() {},
 		registerTool(tool: unknown) {
 			registered = tool;

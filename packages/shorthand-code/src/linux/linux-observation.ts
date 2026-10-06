@@ -149,7 +149,7 @@ async function observerHelper(): Promise<string> {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	const compiler = Bun.which("cc") ?? Bun.which("gcc");
-	if (!compiler) throw new Error("The Linux code tool needs a C compiler to build its cached observation helper.");
+	if (!compiler) throw new Error("shorthand needs a C compiler on Linux to build its cached observation helper.");
 	const temporary = `${helper}.${randomBytes(8).toString("hex")}.tmp`;
 	try {
 		await $`${compiler} -O2 -Wall -Wextra ${source} -o ${temporary}`.quiet();

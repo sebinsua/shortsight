@@ -8,7 +8,7 @@ import { $ } from "bun";
 import { Lang, parse } from "@ast-grep/napi";
 import { openGraphProxy, resolveSightread } from "../src/runner/graph-proxy.ts";
 import type { RunOptions, RunResult } from "../src/runner/runner.ts";
-import registerCode from "../../pi-shorthand/src/index.ts";
+import registerShorthand from "../../pi-shorthand/src/index.ts";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
 const cli = join(repoRoot, "packages/sightread/src/cli.ts");
@@ -506,13 +506,13 @@ test("aborted graph sockets leave the host proxy serving and do not change its c
 
 async function description(available: boolean) {
 	let result = "";
-	await registerCode(
+	await registerShorthand(
 		{
 			on() {},
 			registerTool(tool: { description: string }) {
 				result = tool.description;
 			},
-		} as unknown as Parameters<typeof registerCode>[0],
+		} as unknown as Parameters<typeof registerShorthand>[0],
 		async () =>
 			available
 				? {

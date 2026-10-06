@@ -1,7 +1,7 @@
 {
 	"name": "shorthand-code",
 	"version": "0.13.0",
-	"description": "Edit repositories with Bun programs, with first-class support for TypeScript and JavaScript: a CLI and a library that Pi's code tool is built on.",
+	"description": "Edit repositories with Bun programs, with first-class support for TypeScript and JavaScript: a CLI and a library that Pi's shorthand tool is built on.",
 	"keywords": [
 		"ast-grep",
 		"bun",

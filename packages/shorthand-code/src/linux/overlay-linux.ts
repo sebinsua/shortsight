@@ -14,7 +14,7 @@ import type { TransactionJournal } from "../transaction/transaction-journal.ts";
 
 export async function openLinuxOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const bwrap = Bun.which("bwrap");
-	if (!bwrap) throw new Error("The code tool needs bubblewrap (0.11 or later) on Linux.");
+	if (!bwrap) throw new Error("shorthand needs bubblewrap (0.11 or later) on Linux.");
 
 	// Best-effort live lower: validation does not remove OverlayFS's documented
 	// restriction on concurrent external modifications of an underlying layer.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * The `shorthand` command: runs one program the way Pi's `code` tool does and prints what the model would
+ * The `shorthand` command: runs one program the way Pi's `shorthand` tool does and prints what the model would
  * read, so an agent can use it from its shell tool. Exit codes: 0 applied (or nothing to apply), 1 the run
  * failed (a failed program, a conflict or a rollback), 2 a usage error or the runner itself failing, 130 stopped with Ctrl-C.
  */

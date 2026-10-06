@@ -124,7 +124,7 @@ type Condition = {
 	skill: string;
 	sightread: Sightread;
 	codemode: Codemode;
-	codeExposure: CodeExposure | null; // null without codemode or `code`
+	codeExposure: CodeExposure | null; // null without codemode or `shorthand`
 	extension?: FrozenExtension;
 };
 type ExtensionCopies = { on: FrozenExtension; off?: FrozenExtension };

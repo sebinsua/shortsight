@@ -1,5 +1,5 @@
 /**
- * How a code call looks in Pi. (The model gets a separate plain-text version: see textForModel.)
+ * How a shorthand call looks in Pi. (The model gets a separate plain-text version: see textForModel.)
  *
  * A verdict line first, whose colour carries the outcome. Lines indented under it belong to it: what
  * went wrong, or what to watch out for. A blank line starts a new section. The sections come in the
@@ -38,7 +38,7 @@ export function callLine(
 		args.timeout && `program timeout ${args.timeout}s`,
 	];
 	const suffix = settings.filter(Boolean).join(", ");
-	return `${theme.fg("toolTitle", theme.bold("code"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
+	return `${theme.fg("toolTitle", theme.bold("shorthand"))} ${args.title ?? ""}${suffix ? theme.fg("muted", ` (${suffix})`) : ""}`;
 }
 
 /** Text to show when a completed tool result has no structured RunResult details. */
@@ -51,7 +51,7 @@ export function unstructuredResultText(content: readonly unknown[]): string {
 		)
 		.join("\n")
 		.trim();
-	return text || "Code failed without result details";
+	return text || "Shorthand failed without result details";
 }
 
 /** Lines that belong to the verdict line above them. */

@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import registerCode from "../src/index.ts";
+import registerShorthand from "../src/index.ts";
 
 const hasOverlay =
 	process.platform === "darwin"
@@ -25,9 +25,9 @@ afterEach(async () => {
 	temporaryRoot = undefined;
 });
 
-// A scripted model, so this checks Pi's side of the contract: what a codemode script gets back from `code`.
+// A scripted model, so this checks Pi's side of the contract: what a codemode script gets back from `shorthand`.
 test.skipIf(!hasOverlay)(
-	"a codemode script gets code's result as data, for a failed run too",
+	"a codemode script gets shorthand's result as data, for a failed run too",
 	async () => {
 		temporaryRoot = await mkdtemp(path.join(tmpdir(), "pi-shorthand-codemode-"));
 		const repo = path.join(temporaryRoot, "repo");
@@ -40,9 +40,9 @@ test.skipIf(!hasOverlay)(
 		await $`git add . && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init`.cwd(repo);
 
 		const script = `
-const edited = await tools.code({ title: "Edit", program: 'await Bun.write("a.txt", "b\\\\n");' });
-const failed = await tools.code({ title: "Fail", program: 'throw new Error("boom");' });
-const many = await tools.code({
+const edited = await tools.shorthand({ title: "Edit", program: 'await Bun.write("a.txt", "b\\\\n");' });
+const failed = await tools.shorthand({ title: "Fail", program: 'throw new Error("boom");' });
+const many = await tools.shorthand({
   title: "Edit many",
   program: 'for (let i = 0; i < 40; i++) await Bun.write(\`many/\${i}.txt\`, "y".repeat(500));',
 });
@@ -62,7 +62,10 @@ return JSON.stringify({
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: repo,
 			agentDir,
-			extensionFactories: [createCodemodeExtension({ mode: "on" }), (pi) => registerCode(pi, async () => undefined)],
+			extensionFactories: [
+				createCodemodeExtension({ mode: "on" }),
+				(pi) => registerShorthand(pi, async () => undefined),
+			],
 		});
 		await resourceLoader.reload();
 		const { session } = await createAgentSession({
@@ -73,7 +76,7 @@ return JSON.stringify({
 			resourceLoader,
 			settingsManager: SettingsManager.inMemory(),
 			sessionManager: SessionManager.inMemory(),
-			tools: ["code", "codemode"],
+			tools: ["shorthand", "codemode"],
 		});
 		let scriptOutput: unknown;
 		try {

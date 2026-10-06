@@ -1,5 +1,5 @@
 /**
- * Preloaded into every `code` program. On top of ordinary Bun and Node it adds these globals:
+ * Preloaded into every shorthand program. On top of ordinary Bun and Node it adds these globals:
  * $ (Bun shell), edit, glob, grep, sg (ast-grep) and refactor (renames and file moves).
  *
  * sg is ast-grep's own JavaScript API plus file-backed search, rewrite and placement helpers.

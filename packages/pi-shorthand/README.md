@@ -1,6 +1,6 @@
 # pi-shorthand
 
-![A code call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
+![A shorthand call in Pi](https://raw.githubusercontent.com/sebinsua/shortsight/main/docs/shorthand.png)
 
 A [Pi](https://github.com/earendil-works/pi) tool for editing repositories with Bun programs, with first-class support for TypeScript and JavaScript.
 
@@ -38,9 +38,9 @@ pi-shorthand gives Pi a programming environment instead of a patch format. This 
 
 Programs edit a private workspace, with host files outside the repository kept read-only. Agents are good at improving things a step at a time, so changes are applied a whole file at a time and the agent is told which worked and which didn't. Concurrent edits can cause a run to be rejected; conflict detection is best-effort, not an atomic commit.
 
-The `code` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.
+The `shorthand` tool uses Pi's working directory by default. Pass `cwd` to target another checkout; relative paths are resolved from Pi's working directory. For example, when Pi starts in a bare worktree container, `cwd: "child"` targets its `child` worktree. The chosen directory must be inside a Git worktree.
 
-Scripts run by Pi's `codemode` tool can call `code` too. They get back what the run changed as data, not text.
+Scripts run by Pi's `codemode` tool can call `shorthand` too. They get back what the run changed as data, not text.
 
 ## Without Pi
 

@@ -125,7 +125,7 @@ const files = await $`git ls-files`.text();
 
 `glob`, `grep` and `sg` are synchronous. Bun's `$` needs `await`; interpolated values are
 quoted as single arguments, and arrays become multiple arguments. These globals and bundled CLIs
-belong to `code`, not necessarily ordinary shell calls. `node:fs` and ordinary Bun APIs also work.
+belong to shorthand programs, not necessarily ordinary shell calls. `node:fs` and ordinary Bun APIs also work.
 
 ## Execution options
 

@@ -206,22 +206,34 @@ test("minimal documentation wrapper changes registration without changing execut
 	expect(tool.description).not.toContain("batch everything");
 	expect(tool.promptGuidelines).toEqual([]);
 	expect(tool.execute()).toBe(42);
-	expect(conditionTools("replace")).toEqual(["read", "bash", "code"]);
+	expect(conditionTools("replace")).toEqual(["read", "bash", "shorthand"]);
 });
 
-test("codemode conditions add the codemode tool and expose code to it as each variant", async () => {
-	expect(conditionTools("code", "on")).toEqual(["read", "bash", "edit", "write", "code", "codemode"]);
+test("codemode conditions add the codemode tool and expose shorthand to it as each variant", async () => {
+	expect(conditionTools("code", "on")).toEqual(["read", "bash", "edit", "write", "shorthand", "codemode"]);
 	expect(conditionTools("baseline", "only")).toEqual(["read", "bash", "edit", "write", "codemode"]);
-	expect(conditionTools("code")).toEqual(["read", "bash", "edit", "write", "code"]);
+	expect(conditionTools("code")).toEqual(["read", "bash", "edit", "write", "shorthand"]);
 	const root = await directory();
 	const shipped = path.join(root, "index.ts");
 	await writeFile(
 		shipped,
-		'export default pi => pi.registerTool({ name: "code", description: "shipped", outputSchema: { type: "object" }, execute: () => 42 });',
+		'export default pi => pi.registerTool({ name: "shorthand", description: "shipped", outputSchema: { type: "object" }, execute: () => 42 });',
 	);
-	// `direct` is how code ships, and without codemode exposure doesn't apply, so both load the extension as it is.
-	expect(await extensionEntry(root, "shipped", path.join(root, "direct.ts"), "on", "on", "direct")).toBe(shipped);
-	expect(await extensionEntry(root, "shipped", path.join(root, "off.ts"), "on", "off", "model-only")).toBe(shipped);
+	// `direct` is how shorthand ships, and without codemode exposure doesn't apply, so both register it as it is.
+	for (const [file, codemode, exposure] of [
+		["direct.ts", "on", "direct"],
+		["off.ts", "off", "model-only"],
+	] as const) {
+		const entry = await extensionEntry(root, "shipped", path.join(root, file), "on", codemode, exposure);
+		let tool: any;
+		(await import(entry)).default({
+			registerTool(value: unknown) {
+				tool = value;
+			},
+		});
+		expect(tool.exposure).toBeUndefined();
+		expect(tool.description).toBe("shipped");
+	}
 	const entry = await extensionEntry(root, "shipped", path.join(root, "model-only.ts"), "on", "only", "model-only");
 	let tool: any;
 	(await import(entry)).default({
@@ -233,6 +245,29 @@ test("codemode conditions add the codemode tool and expose code to it as each va
 	expect(tool.description).toBe("shipped");
 	expect(tool.outputSchema).toEqual({ type: "object" });
 	expect(tool.execute()).toBe(42);
+});
+
+test("a checkout from before the rename registers shorthand, and its listeners still see code", async () => {
+	const root = await directory();
+	await writeFile(
+		path.join(root, "index.ts"),
+		'export default pi => { pi.on("tool_result", (event) => event.toolName); pi.registerTool({ name: "code", description: "old", execute: () => 42 }); };',
+	);
+	const entry = await extensionEntry(root, "shipped", path.join(root, "legacy.ts"));
+	let tool: any;
+	let listener: any;
+	(await import(entry)).default({
+		on(_event: string, handler: unknown) {
+			listener = handler;
+		},
+		registerTool(value: unknown) {
+			tool = value;
+		},
+	});
+	expect(tool.name).toBe("shorthand");
+	expect(tool.execute()).toBe(42);
+	expect(listener({ toolName: "shorthand" })).toBe("code");
+	expect(listener({ toolName: "bash" })).toBe("bash");
 });
 
 test("sightread off hides graph.query from shipped and minimal code registration", async () => {
@@ -262,7 +297,7 @@ test("session report distinguishes observations from inferred failure causes", (
 		{ type: "tool_execution_start", toolName: "bash", args: { command: "echo '```'" } },
 		{
 			type: "tool_execution_end",
-			toolName: "code",
+			toolName: "shorthand",
 			isError: true,
 			result: { details: { exitCode: 1, changes: [] }, content: [{ type: "text", text: "test failed" }] },
 		},
@@ -642,7 +677,7 @@ test("codemode conditions load Pi's codemode, set its mode, and keep earlier con
 		expect(tools).toContain("codemode");
 		expect(JSON.parse(settings)).toEqual({ codemode: { mode: "only" } });
 		if (run.setup === "baseline") expect(run.codeExposure).toBeNull();
-		else if (run.codeExposure === "direct") expect(entries.join("")).toContain("outputSchema: CODE_OUTPUT_SCHEMA");
+		else if (run.codeExposure === "direct") expect(entries.join("")).not.toContain("exposure:");
 		else expect(entries.join("")).toContain('exposure: "model-only"');
 	}
 }, 30_000);

@@ -18,7 +18,7 @@ import type { FilesystemEntry, Overlay } from "../runner/runner.ts";
 
 export async function openMacOverlay(repo: string, tempDir: string): Promise<Overlay> {
 	const agentfs = process.env.AGENTFS_BIN ?? Bun.which("agentfs");
-	if (!agentfs) throw new Error("The code tool needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
+	if (!agentfs) throw new Error("shorthand needs AgentFS: curl -fsSL https://agentfs.ai/install | bash");
 	const gitMetadata = await measure("resolving macOS Git metadata", () => gitMetadataDirectories(repo));
 	const cleanupHelper = await measure("preparing macOS cleanup helper", macProcessCleanupHelper);
 	const processDeniedCanary = path.join(tempDir, `process-denied-${randomUUID()}`);
@@ -296,7 +296,7 @@ async function macProcessCleanupHelper(): Promise<string> {
 	}
 
 	const compiler = Bun.which("clang") ?? Bun.which("cc");
-	if (!compiler) throw new Error("The macOS code tool needs clang to build its process-lifecycle helper.");
+	if (!compiler) throw new Error("shorthand needs clang on macOS to build its process-lifecycle helper.");
 	const temporary = `${helper}.${randomUUID()}.tmp`;
 	try {
 		const compilation = await $`${compiler} -O2 ${source} -o ${temporary}`.nothrow().quiet();

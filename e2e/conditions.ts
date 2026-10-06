@@ -8,7 +8,7 @@ export type Documentation = "shipped" | "minimal";
 export type Sightread = "off" | "on";
 /** Pi's codemode tool: absent, alongside the declared tools (`codemode.mode: "on"`), or in place of them ("only"). */
 export type Codemode = "off" | "on" | "only";
-/** How `code` meets codemode: callable from scripts with a structured result, or declared to the model only. */
+/** How `shorthand` meets codemode: callable from scripts with a structured result, or declared to the model only. */
 export type CodeExposure = "direct" | "model-only";
 
 function distinctMembers<T extends string>(option: string, value: string, members: readonly T[]): T[] {
@@ -63,10 +63,10 @@ export function conditionTools(setup: Setup, codemode: Codemode = "off"): string
 	const common = ["read", "bash"];
 	const tools =
 		setup === "read-code"
-			? ["read", "code"]
+			? ["read", "shorthand"]
 			: setup === "replace"
-				? [...common, "code"]
-				: [...common, "edit", "write", ...(setup === "code" ? ["code"] : [])];
+				? [...common, "shorthand"]
+				: [...common, "edit", "write", ...(setup === "code" ? ["shorthand"] : [])];
 	return codemode === "off" ? tools : [...tools, "codemode"];
 }
 
@@ -85,7 +85,11 @@ async function extensionIndex(root: string): Promise<string> {
 	return path.join(root, entry ?? "index.ts");
 }
 
-/** Wrap registration rather than changing the shipped extension or its execution behaviour. */
+/**
+ * Wrap registration rather than changing the shipped extension or its execution behaviour. Checkouts from before
+ * the tool was renamed register it as `code`, so the wrapper registers it as `shorthand` and gives their
+ * listeners the name they expect. Every run loads through the wrapper, so old and new checkouts pair.
+ */
 export async function extensionEntry(
 	root: string,
 	documentation: Documentation,
@@ -96,23 +100,27 @@ export async function extensionEntry(
 ): Promise<string> {
 	const entry = await extensionIndex(root);
 	const modelOnly = codemode !== "off" && exposure === "model-only";
-	if (documentation === "shipped" && sightread === "on" && !modelOnly) return entry;
 	await mkdir(path.dirname(destination), { recursive: true });
 	const description = sightread === "on" ? minimalDescription : minimalDescription.replace(/^graph\.query.*\n/m, "");
 	const documented =
 		documentation === "minimal"
 			? `{ ...tool, description: ${JSON.stringify(description)}, promptSnippet: "Transactional Bun program for repository changes", promptGuidelines: [] }`
 			: "tool";
-	// `direct`, with its output schema, is how `code` ships; `model-only` takes it out of scripts.
+	// `direct`, with its output schema, is how `shorthand` ships; `model-only` takes it out of scripts.
 	const exposed = modelOnly ? `{ ...${documented}, exposure: "model-only" }` : documented;
 	await writeFile(
 		destination,
 		`import extension from ${JSON.stringify(pathToFileURL(entry).href)};
 export default function(pi) {
+  let legacy = false;
   const proxy = new Proxy(pi, { get(target, key) {
-    if (key === "registerTool") return (tool) => target.registerTool(tool.name === "code"
-      ? ${exposed}
-      : tool);
+    if (key === "registerTool") return (tool) => {
+      if (tool.name !== "code" && tool.name !== "shorthand") return target.registerTool(tool);
+      legacy = tool.name === "code";
+      return target.registerTool({ ...${exposed}, name: "shorthand" });
+    };
+    if (key === "on") return (event, handler) => target.on(event, (payload, ...rest) =>
+      handler(legacy && payload?.toolName === "shorthand" ? { ...payload, toolName: "code" } : payload, ...rest));
     const value = Reflect.get(target, key);
     return typeof value === "function" ? value.bind(target) : value;
   }});

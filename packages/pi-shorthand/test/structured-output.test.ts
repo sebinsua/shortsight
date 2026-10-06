@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunResult } from "shorthand-code";
 import { Value } from "typebox/value";
-import registerCode, { CODE_OUTPUT_SCHEMA, codeOutput } from "../src/index.ts";
+import registerShorthand, { SHORTHAND_OUTPUT_SCHEMA, shorthandOutput } from "../src/index.ts";
 
 let temporaryRoot: string | undefined;
 afterEach(async () => {
@@ -34,8 +34,8 @@ const failedRun: RunResult = {
 };
 
 test("a script gets what the run did, as the declared schema, without the runner's own bookkeeping", () => {
-	const output = codeOutput(failedRun);
-	expect(Value.Check(CODE_OUTPUT_SCHEMA, output)).toBe(true);
+	const output = shorthandOutput(failedRun);
+	expect(Value.Check(SHORTHAND_OUTPUT_SCHEMA, output)).toBe(true);
 	expect(output).toEqual({
 		exitCode: 1,
 		timedOut: false,
@@ -48,13 +48,13 @@ test("a script gets what the run did, as the declared schema, without the runner
 		rolledBack: ["a.ts"],
 	});
 	// Structured content must be JSON, so a missing line is left out rather than undefined.
-	expect("errorLine" in codeOutput({ ...failedRun, errorLine: undefined })).toBe(false);
+	expect("errorLine" in shorthandOutput({ ...failedRun, errorLine: undefined })).toBe(false);
 });
 
 test("a program that can't be run still gives a script a structured result", async () => {
 	temporaryRoot = await mkdtemp(path.join(tmpdir(), "pi-shorthand-structured-"));
 	let registered: unknown;
-	await registerCode(
+	await registerShorthand(
 		{
 			on() {},
 			registerTool(tool: unknown) {
@@ -73,7 +73,7 @@ test("a program that can't be run still gives a script a structured result", asy
 			context: { cwd: string },
 		): Promise<{ isError?: boolean; structuredContent: unknown }>;
 	};
-	expect(code.outputSchema).toBe(CODE_OUTPUT_SCHEMA);
+	expect(code.outputSchema).toBe(SHORTHAND_OUTPUT_SCHEMA);
 	// Not a Git worktree, so the run fails before the program starts.
 	const outcome = await code.execute(
 		"outside-git",
@@ -83,6 +83,6 @@ test("a program that can't be run still gives a script a structured result", asy
 		{ cwd: temporaryRoot },
 	);
 	expect(outcome.isError).toBe(true);
-	expect(Value.Check(CODE_OUTPUT_SCHEMA, outcome.structuredContent)).toBe(true);
+	expect(Value.Check(SHORTHAND_OUTPUT_SCHEMA, outcome.structuredContent)).toBe(true);
 	expect(Object.keys(outcome.structuredContent as object)).toEqual(["infrastructureError"]);
 });

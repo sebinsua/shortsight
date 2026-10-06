@@ -20,4 +20,4 @@ Pass a program on stdin, or as a file:
 echo 'edit({ path: "README.md", oldText: "Hello", newText: "Hi" })' | shorthand
 ```
 
-Programs get the same helpers as pi-shorthand's `code` tool. `shorthand --skill` prints the skill that explains them, and `shorthand --help` lists the options.
+Programs get the same helpers as pi-shorthand's `shorthand` tool. `shorthand --skill` prints the skill that explains them, and `shorthand --help` lists the options.
