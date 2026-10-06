@@ -92,8 +92,9 @@ export function installFileOutcomeTracking(): void {
 function inspectWriters(): string[] | null {
 	if (!root || forceInspectionFailure) return null;
 	// bubblewrap replaces /dev, hiding the host's message-queue mount. Exempt that unrelated
-	// mount from stat probes; otherwise lsof reports incomplete output for every Linux run.
-	const args = ["-n", "-P", "-F", "an", ...(process.platform === "linux" ? ["-e", "/dev/mqueue"] : [])];
+	// mount from stat probes; otherwise lsof reports incomplete output for every Linux run. -w drops other
+	// warnings, such as one about a file system lsof can't stat (a Time Machine network share).
+	const args = ["-w", "-n", "-P", "-F", "an", ...(process.platform === "linux" ? ["-e", "/dev/mqueue"] : [])];
 	const result = spawnSync("lsof", args, {
 		encoding: "utf8",
 		timeout: 2000,

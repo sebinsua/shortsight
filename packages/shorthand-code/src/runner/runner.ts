@@ -916,7 +916,9 @@ async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<
 	// -F an: one field per line. "a" is the access mode (r, w, or u for read/write), "n" the file name.
 	// Filter lsof's output by the unique overlay path ourselves. Unlike -g, this includes writers that
 	// detached or were reparented; unlike lsof +D, it doesn't walk every file in a large repository.
-	const result = await $`lsof -n -P -F an`.nothrow().quiet();
+	// -w drops warnings, such as one about a file system lsof can't stat (a Time Machine network share), which
+	// would otherwise count as a failed inspection; real failures still exit nonzero.
+	const result = await $`lsof -w -n -P -F an`.nothrow().quiet();
 	if (result.exitCode !== 0 || result.stderr.length > 0) return null;
 	return parseOpenWriters(result.stdout.toString(), dir);
 }
