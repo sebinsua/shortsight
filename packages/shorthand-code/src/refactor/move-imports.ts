@@ -5,7 +5,7 @@
  * before anything is written.
  */
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, extname, relative, resolve, sep } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import type { MoveAnalysis } from "./move-analysis.ts";
 import { scriptLanguage } from "./placement.ts";
@@ -335,8 +335,40 @@ const SOURCE_FOR_JS: Record<string, string[]> = {
  * spelling of a `.ts` file; others go through Bun's resolver, which follows tsconfig `paths` and packages
  * in node_modules, including workspace packages linked into the repository.
  */
+/** The prefixes of the nearest tsconfig's `paths` aliases: "@app/" for "@app/*". */
+function pathAliases(from: string): string[] {
+	for (let directory = dirname(from); ; directory = dirname(directory)) {
+		const config = resolve(directory, "tsconfig.json");
+		if (existsSync(config)) {
+			const paths = /"paths"\s*:\s*\{([^}]*)\}/.exec(readFileSync(config, "utf8"))?.[1] ?? "";
+			return [...paths.matchAll(/"([^"]+)"\s*:/g)].map((match) => match[1]!.replace(/\*.*$/, ""));
+		}
+		if (dirname(directory) === directory) return [];
+	}
+}
+
+/** Whether a bare specifier's package is in a node_modules above `from`, or on NODE_PATH. Paths and aliases pass. */
+function installed(from: string, specifier: string): boolean {
+	if (specifier.startsWith("/") || specifier.includes(":")) return true;
+	const parts = specifier.split("/");
+	const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+	// A tsconfig path alias such as "@app/x" or "~/x" isn't a package; let Bun resolve it as before.
+	if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(name) || pathAliases(from).some((alias) => specifier.startsWith(alias)))
+		return true;
+	for (let directory = dirname(from); ; directory = dirname(directory)) {
+		if (existsSync(resolve(directory, "node_modules", name))) return true;
+		if (dirname(directory) === directory) break;
+	}
+	return (process.env.NODE_PATH ?? "")
+		.split(delimiter)
+		.some((directory) => directory && existsSync(resolve(directory, name)));
+}
+
 export function resolveModule(from: string, specifier: string): string | undefined {
 	if (!specifier.startsWith(".")) {
+		// Bun would try to install a package that isn't, into a temporary directory the sandbox can't write,
+		// failing the whole run; and it isn't a file of this repository to repoint anyway.
+		if (!installed(from, specifier)) return undefined;
 		try {
 			return realpathSync(Bun.resolveSync(specifier, dirname(from)));
 		} catch {

@@ -420,6 +420,21 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain("A.decode(s) + p(s)");
 		});
 
+		test("moving code that imports a package that isn't installed doesn't try to install it", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": "{}",
+				"src/a.ts":
+					'import { widget } from "not-installed-package-for-shorthand-tests";\nexport function make() { return widget(); }\nexport const keep = 1;\n',
+			});
+			const result = await run(repo, `await refactor.move({ file: "src/a.ts", symbol: "make", to: "src/b.ts" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toStartWith(
+				'import { widget } from "not-installed-package-for-shorthand-tests";',
+			);
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
