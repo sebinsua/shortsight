@@ -336,7 +336,7 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 				timeoutMs: 15_000,
 			});
 			expect(refused.exitCode).toBe(1);
-			expect(refused.output).toContain('max is already declared where "limit" is used, at src/a.ts:2');
+			expect(refused.output).toContain("max would refer to src/a.ts:2 instead");
 			const allowed = await run(
 				repo,
 				`await refactor.rename({ file: "src/a.ts", symbol: "other.total", to: "max" });`,
@@ -373,7 +373,7 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 					},
 				);
 				expect(result.exitCode).toBe(1);
-				expect(result.output).toContain(`${to} is already declared`);
+				expect(result.output).toContain(`${to} would refer to src/a.ts`);
 			}
 			const allowed = await run(
 				repo,
@@ -385,7 +385,7 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(allowed.exitCode).toBe(0);
 		});
 
-		test("the rename scope check covers types and destructured properties, and skips what can't be captured", async () => {
+		test("a rename that collides with a type is refused, a destructured property keeps its local, and a namespace import isn't captured", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({
 					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
@@ -395,20 +395,26 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 				"src/use.ts":
 					'import type { User, Options } from "./user";\nimport * as A from "./user";\nimport { parse as p } from "./user";\nconst fullName = "outer";\nexport function greet(u: User) { const { name } = u; return name + fullName; }\nexport const o: Options = {};\nexport function decode(s: string) { return A.parse(s) + p(s); }\n',
 			});
-			for (const [symbol, to] of [
-				["User.name", "fullName"],
-				["Options", "Config"],
-			]) {
-				const result = await run(
-					repo,
-					`await refactor.rename({ file: "src/user.ts", symbol: "${symbol}", to: "${to}" });`,
-					{
-						timeoutMs: 15_000,
-					},
-				);
-				expect(result.exitCode).toBe(1);
-				expect(result.output).toContain(`${to} is already declared`);
-			}
+			const collision = await run(
+				repo,
+				`await refactor.rename({ file: "src/user.ts", symbol: "Options", to: "Config" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(collision.exitCode).toBe(1);
+			expect(collision.output).toContain("Config would refer to src/user.ts:3 instead");
+			const member = await run(
+				repo,
+				`await refactor.rename({ file: "src/user.ts", symbol: "User.name", to: "fullName" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(member.exitCode, member.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain(
+				"const { fullName: name } = u; return name + fullName;",
+			);
 			const allowed = await run(
 				repo,
 				`await refactor.rename({ file: "src/user.ts", symbol: "parse", to: "decode" });`,
@@ -466,7 +472,7 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 				},
 			);
 			expect(collision.exitCode).toBe(1);
-			expect(collision.output).toContain("would become a second member named fullName");
+			expect(collision.output).toContain("Duplicate identifier 'fullName'");
 		});
 
 		test("renames on the first line of a file with a byte order mark land where TypeScript means", async () => {
@@ -524,7 +530,9 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 				},
 			);
 			expect(barrel.exitCode).toBe(1);
-			expect(barrel.output).toContain("src/utils/index.ts re-exports src/utils/date.ts and already exports format");
+			expect(barrel.output).toContain(
+				"src/utils/index.ts:2: Module \"./date\" has already exported a member named 'format'",
+			);
 		});
 
 		test("members of a type alias's object types can be renamed, and a bare member name stays ambiguous", async () => {
@@ -563,9 +571,9 @@ await refactor.rename({ file: "src/a.ts", symbol: "Props.label", to: "title" });
 			});
 			for (const [symbol, to, message] of [
 				["Session.refresh", "Session.renew", 'give the new name alone, such as "renew"'],
-				["del", "delete", "delete is a reserved word"],
-				["Repo.connection", "db", "second member named db"],
-				["Color.Red", "Blue", "second member named Blue"],
+				["del", "delete", "'delete' is a reserved word"],
+				["Repo.connection", "db", "Duplicate identifier 'db'"],
+				["Color.Red", "Blue", "Duplicate identifier 'Blue'"],
 			]) {
 				const result = await run(
 					repo,
@@ -666,7 +674,7 @@ console.log((await refactor.references({ file: "src/b.ts", symbol: "log", includ
 			);
 		});
 
-		test("a member's parameter property renames with it, destructuring elsewhere keeps its local, and a shorthand member is refused", async () => {
+		test("a member's parameter property renames with it, destructuring elsewhere keeps its local, and a shorthand member keeps its value", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 				"src/a.ts":
@@ -696,8 +704,10 @@ console.log((await refactor.references({ file: "src/b.ts", symbol: "log", includ
 					timeoutMs: 15_000,
 				},
 			);
-			expect(shorthand.exitCode).toBe(1);
-			expect(shorthand.output).toContain("is a shorthand for a variable");
+			expect(shorthand.exitCode, shorthand.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/c.ts")).text()).toBe(
+				"function parseUser() { return 1; }\nexport const api = { decodeUser: parseUser };\n",
+			);
 		});
 
 		test("an enum member renames inside its enum, a constructor shorthand keeps its key, and a lookup's exact match comes first", async () => {
@@ -760,7 +770,7 @@ await refactor.move({ file: "src/keys.ts", symbol: "DEFAULT_TIMEOUT", to: "src/c
 					},
 				);
 				expect(refused.exitCode).toBe(1);
-				expect(refused.output).toContain("through a type that also has another member of that name");
+				expect(refused.output).toContain("Property 'renamed' does not exist on type");
 			}
 			const merged = await run(
 				repo,

@@ -46,40 +46,69 @@ export function projectPath(root: string, file: string): string {
 	return absolute;
 }
 
-/** Replacement text for one edit, given its file, source and UTF-16 offsets. */
-export type AdjustEdit = (file: string, source: string, start: number, end: number, text: string) => string;
+/** An edit's range in a file's old contents, and where its text landed in the new contents. */
+export interface PlacedEdit {
+	oldStart: number;
+	oldEnd: number;
+	start: number;
+	text: string;
+}
+
+/** Where an offset in a file's old contents is in its new contents, after these edits (in order). */
+export function shiftedOffset(offset: number, edits: PlacedEdit[]): number {
+	let shift = 0;
+	for (const edit of edits) {
+		if (offset < edit.oldStart) break;
+		if (offset < edit.oldEnd) return edit.start;
+		shift += edit.text.length - (edit.oldEnd - edit.oldStart);
+	}
+	return offset + shift;
+}
 
 /** Validate every edit and construct all new contents before any file is written. */
-export function planWorkspaceEdit(root: string, edit: WorkspaceEdit | null, adjust?: AdjustEdit): Map<string, string> {
+export function planWorkspaceEdit(
+	root: string,
+	edit: WorkspaceEdit | null,
+	placed?: Map<string, PlacedEdit[]>,
+): Map<string, string> {
+	return new Map(
+		[...editsByUri(edit)].map(([uri, edits]) => {
+			const url = new URL(uri);
+			if (url.protocol !== "file:")
+				throw new Error(`TypeScript returned an edit for unsupported URI ${JSON.stringify(uri)}`);
+			const file = existingProjectFile(root, fileURLToPath(url));
+			const source = readFileSync(file, "utf8");
+			return [file, applyTextEdits(source, edits, file, (landed) => placed?.set(file, landed))];
+		}),
+	);
+}
+
+/** A workspace edit's text edits by document. */
+export function editsByUri(edit: WorkspaceEdit | null): Map<string, TextEdit[]> {
 	const byUri = new Map<string, TextEdit[]>();
 	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) append(byUri, uri, edits);
 	for (const change of edit?.documentChanges ?? []) {
 		if ("kind" in change) throw new Error(`TypeScript returned an unsupported ${change.kind} operation`);
 		append(byUri, change.textDocument.uri, change.edits);
 	}
-
-	return new Map(
-		[...byUri].map(([uri, edits]) => {
-			const url = new URL(uri);
-			if (url.protocol !== "file:")
-				throw new Error(`TypeScript returned an edit for unsupported URI ${JSON.stringify(uri)}`);
-			const file = existingProjectFile(root, fileURLToPath(url));
-			const source = readFileSync(file, "utf8");
-			return [file, applyTextEdits(source, edits, file, adjust)];
-		}),
-	);
+	return byUri;
 }
 
 function append(byUri: Map<string, TextEdit[]>, uri: string, edits: TextEdit[]): void {
 	byUri.set(uri, [...(byUri.get(uri) ?? []), ...edits]);
 }
 
-function applyTextEdits(source: string, edits: TextEdit[], file: string, adjust?: AdjustEdit): string {
+function applyTextEdits(
+	source: string,
+	edits: TextEdit[],
+	file: string,
+	report?: (placed: PlacedEdit[]) => void,
+): string {
 	const ranges = edits
 		.map((edit) => {
 			const start = offsetAt(source, edit.range.start, file);
 			const end = offsetAt(source, edit.range.end, file);
-			return { start, end, text: adjust ? adjust(file, source, start, end, edit.newText) : edit.newText };
+			return { start, end, text: edit.newText };
 		})
 		.toSorted((a, b) => b.start - a.start || b.end - a.end);
 	for (const range of ranges)
@@ -89,6 +118,15 @@ function applyTextEdits(source: string, edits: TextEdit[], file: string, adjust?
 			throw new Error(`TypeScript returned overlapping edits for ${JSON.stringify(file)}`);
 	let output = source;
 	for (const edit of ranges) output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
+	// Each edit's start in the new contents: earlier edits shift it by how much they grew or shrank.
+	let shift = 0;
+	report?.(
+		ranges.toReversed().map((edit) => {
+			const start = edit.start + shift;
+			shift += edit.text.length - (edit.end - edit.start);
+			return { oldStart: edit.start, oldEnd: edit.end, start, text: edit.text };
+		}),
+	);
 	return output;
 }
 

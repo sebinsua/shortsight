@@ -86,6 +86,35 @@ export function recordTypeScriptFiles(connection: MessageConnection, files: stri
 	}
 }
 
+export interface Diagnostic {
+	code?: number | string;
+	/** 1 is an error; warnings, hints and suggestions such as an unused name are higher. */
+	severity?: number;
+	message: string;
+	range: { start: { line: number; character: number } };
+}
+
+/**
+ * A file's type errors and other diagnostics, as the server sees the file on disk now. The server only checks open
+ * documents, so a file that isn't open is opened for the request and closed again.
+ */
+export async function documentDiagnostics(connection: MessageConnection, file: string): Promise<Diagnostic[]> {
+	const uri = pathToFileURL(file).href;
+	const open = current?.connection === connection && current.opened.has(file);
+	if (!open)
+		await connection.sendNotification("textDocument/didOpen", {
+			textDocument: { uri, languageId: languageId(file), version: 1, text: documentText(file) },
+		});
+	try {
+		const report = await connection.sendRequest<{ items?: Diagnostic[] } | null>("textDocument/diagnostic", {
+			textDocument: { uri },
+		});
+		return report?.items ?? [];
+	} finally {
+		if (!open) await connection.sendNotification("textDocument/didClose", { textDocument: { uri } });
+	}
+}
+
 /** A file's text as the server reads it from disk: without a byte order mark, which it doesn't count. */
 function documentText(file: string): string {
 	return readFileSync(file, "utf8").replace(/^\uFEFF/, "");
@@ -141,9 +170,8 @@ async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
 		await connection.sendRequest("initialize", {
 			processId: process.pid,
 			rootUri: pathToFileURL(root).href,
-			// Rename without aliases: by default a renamed declaration is re-exported as `new as old`, so importers
-			// through a barrel keep the old name. typescript-refactors.ts keeps object literal keys unchanged instead.
-			initializationOptions: { userPreferences: { providePrefixAndSuffixTextForRename: false } },
+			// Renames keep what other code sees, as aliases typescript-refactors.ts then follows: `{ old: new }`.
+			initializationOptions: { userPreferences: { providePrefixAndSuffixTextForRename: true } },
 			capabilities: {
 				workspace: {
 					workspaceEdit: { documentChanges: true },

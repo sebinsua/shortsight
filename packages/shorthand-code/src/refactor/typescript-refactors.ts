@@ -14,17 +14,24 @@ import {
 } from "node:fs";
 import { parse } from "@ast-grep/napi";
 import { dirname, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
-import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
+import {
+	documentDiagnostics,
+	notifyTypeScriptServer,
+	recordTypeScriptFiles,
+	withTypeScriptServer,
+	type Diagnostic,
+} from "./lsp-client.ts";
 import { relativeCandidates, resolveModule } from "./move-imports.ts";
 import { scriptLanguage, withoutComments } from "./placement.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
 	projectPath,
+	shiftedOffset,
+	type PlacedEdit,
 	type Position,
-	type AdjustEdit,
 	type Range,
 	type WorkspaceEdit,
 } from "./workspace-edit.ts";
@@ -66,11 +73,12 @@ interface SymbolInformation {
 export async function rename(root: string, options: RenameOptions): Promise<void> {
 	validateRename(options);
 	const file = existingProjectFile(root, options.file);
-	const uri = pathToFileURL(file).href;
+	const from = options.symbol.split(".").at(-1)!;
+	const { to } = options;
 	await withTypeScriptServer(root, async (server) => {
 		const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
 			"textDocument/documentSymbol",
-			{ textDocument: { uri } },
+			{ textDocument: { uri: pathToFileURL(file).href } },
 		);
 		const position = symbolPosition(
 			symbols ?? [],
@@ -79,22 +87,216 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			"refactor.rename",
 			readFileSync(file, "utf8"),
 		);
-		const edit = await server.sendRequest<WorkspaceEdit | null>("textDocument/rename", {
-			textDocument: { uri },
-			position,
-			newName: options.to,
-		});
-		const changes = planWorkspaceEdit(
-			root,
-			edit,
-			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position),
-		);
-		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
-		editingFiles([...changes.keys()], () => {
-			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
-		});
-		await filesChanged(server, [...changes.keys()]);
+		const checked = checkedEdits(server, root);
+		// Where the new name was written, as offsets in each file's current contents.
+		const sites = new Map<string, number[]>();
+		const place = async (changes: Map<string, string>, placed: Map<string, PlacedEdit[]>) => {
+			await checked.write(changes);
+			for (const [changed, edits] of placed) {
+				const kept = (sites.get(changed) ?? []).map((offset) => shiftedOffset(offset, edits));
+				for (const edit of edits) {
+					const at = edit.text.search(wholeWord(to));
+					if (at >= 0) kept.push(edit.start + at);
+				}
+				sites.set(changed, kept);
+			}
+		};
+		const renameAt = async (target: string, at: Position) => {
+			const placed = new Map<string, PlacedEdit[]>();
+			const edit = await server.sendRequest<WorkspaceEdit | null>("textDocument/rename", {
+				textDocument: { uri: pathToFileURL(target).href },
+				position: at,
+				newName: to,
+			});
+			const changes = planWorkspaceEdit(root, edit, placed);
+			await place(changes, placed);
+			return changes.size;
+		};
+
+		try {
+			// TypeScript renames the variable behind `{ parseUser }`, so a member written that way is spelled out
+			// first, as `{ parseUser: parseUser }`, and its key renamed.
+			if (options.symbol.includes(".")) {
+				const source = readFileSync(file, "utf8");
+				const offset = offsetOf(source, position);
+				const lang = scriptLanguage(file);
+				const shorthand = lang
+					? parse(lang, source)
+							.root()
+							.findAll({ rule: { kind: "shorthand_property_identifier" } })
+							.some((node) => node.range().start.index === offset)
+					: false;
+				if (shorthand) {
+					const text = `${from}: `;
+					await place(
+						new Map([[file, source.slice(0, offset) + text + source.slice(offset)]]),
+						new Map([[file, [{ oldStart: offset, oldEnd: offset, start: offset, text }]]]),
+					);
+				}
+			}
+			if ((await renameAt(file, position)) === 0)
+				throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
+			// TypeScript renames without changing what other code sees: an object literal keeps its key
+			// (`{ from: to }`), and a module keeps its export's name (`export { to as from }`), as does an importer
+			// its local name. The keys stay; each alias is renamed in turn, so the new name goes everywhere else.
+			for (let round = 0; round < 100; round++) {
+				const alias = findAlias([...sites.keys()], to, from);
+				if (!alias) break;
+				await renameAt(alias.file, positionOf(alias.source, alias.offset));
+				const collapsed = collapseAliases(readFileSync(alias.file, "utf8"), to);
+				if (!collapsed) break;
+				await place(new Map([[alias.file, collapsed.source]]), new Map([[alias.file, collapsed.edits]]));
+			}
+			await checked.verify(
+				`refactor.rename of ${JSON.stringify(options.symbol)} to ${to}`,
+				(message) => message.replaceAll(`'${to}'`, `'${from}'`),
+				await capturedPlaces(server, checked.root, sites, to),
+			);
+		} catch (error) {
+			await checked.restore();
+			throw error;
+		}
 	});
+}
+
+const escaped = (name: string) => name.replaceAll("$", "\\$");
+const wholeWord = (name: string) => new RegExp(`(?<![\\w$])${escaped(name)}(?![\\w$])`);
+
+/** An import or export specifier `to as from` that a rename introduced, and the offset of its `from`. */
+function findAlias(
+	files: string[],
+	to: string,
+	from: string,
+): { file: string; source: string; offset: number } | undefined {
+	const specifier = new RegExp(`([{,]\\s*(?:type\\s+)?${escaped(to)} as )${escaped(from)}(?=\\s*[,}])`);
+	for (const file of files) {
+		const source = readFileSync(file, "utf8");
+		const match = specifier.exec(source);
+		if (match) return { file, source, offset: match.index + match[1]!.length };
+	}
+	return undefined;
+}
+
+/** `{ to as to }` as `{ to }`, once its alias has been renamed. */
+function collapseAliases(source: string, to: string): { source: string; edits: PlacedEdit[] } | undefined {
+	const specifier = new RegExp(`([{,]\\s*(?:type\\s+)?)${escaped(to)} as ${escaped(to)}(?=\\s*[,}])`, "g");
+	const edits: PlacedEdit[] = [];
+	let shift = 0;
+	for (const match of source.matchAll(specifier)) {
+		const oldStart = match.index + match[1]!.length;
+		const oldEnd = match.index + match[0].length;
+		edits.push({ oldStart, oldEnd, start: oldStart + shift, text: to });
+		shift += to.length - (oldEnd - oldStart);
+	}
+	if (!edits.length) return undefined;
+	let output = source;
+	for (const edit of edits.toReversed())
+		output = output.slice(0, edit.oldStart) + edit.text + output.slice(edit.oldEnd);
+	return { source: output, edits };
+}
+
+/**
+ * Writes a refactor's files and then checks the result with TypeScript instead of predicting it: the files it
+ * touched, and the files that import them, must have no type errors they didn't have before. Otherwise the
+ * caller puts the files back and the refactor is refused with what went wrong.
+ */
+function checkedEdits(server: Parameters<typeof notifyTypeScriptServer>[0], projectRoot: string) {
+	const root = realpathSync(projectRoot);
+	const originals = new Map<string, string>();
+	const before = new Map<string, Diagnostic[]>();
+	const errors = async (file: string) =>
+		(await documentDiagnostics(server, file)).filter((diagnostic) => (diagnostic.severity ?? 1) === 1);
+	return {
+		root,
+		async write(changes: Map<string, string>) {
+			const fresh = [...changes.keys()].filter((file) => !originals.has(file));
+			for (const file of fresh) originals.set(file, readFileSync(file, "utf8"));
+			// A file that imports a changed one can break without changing, such as a barrel whose `export *`
+			// now exports the same name twice.
+			for (const file of [...fresh, ...importersOf(root, fresh)])
+				if (!before.has(file)) before.set(file, await errors(file));
+			editingFiles([...changes.keys()], () => {
+				for (const [file, source] of changes) writeFileSync(file, source);
+			});
+			await filesChanged(server, [...changes.keys()]);
+		},
+		async restore() {
+			if (!originals.size) return;
+			editingFiles([...originals.keys()], () => {
+				for (const [file, source] of originals) writeFileSync(file, source);
+			});
+			await filesChanged(server, [...originals.keys()]);
+			originals.clear();
+		},
+		/** `same` maps an error's message to how it would have read before, such as with the old name. */
+		async verify(what: string, same: (message: string) => string, problems: string[]) {
+			const key = (diagnostic: Diagnostic) => `${diagnostic.code}:${same(diagnostic.message)}`;
+			for (const [file, earlier] of before) {
+				const existing = new Map<string, number>();
+				for (const diagnostic of earlier) existing.set(key(diagnostic), (existing.get(key(diagnostic)) ?? 0) + 1);
+				for (const diagnostic of await errors(file)) {
+					const left = existing.get(key(diagnostic)) ?? 0;
+					if (left > 0) existing.set(key(diagnostic), left - 1);
+					else problems.push(`${relative(root, file)}:${diagnostic.range.start.line + 1}: ${diagnostic.message}`);
+				}
+			}
+			if (problems.length)
+				throw new Error(
+					`${what} would break the code, so nothing was changed:\n${problems
+						.slice(0, 10)
+						.map((problem) => `  ${problem}`)
+						.join("\n")}`,
+				);
+		},
+	};
+}
+
+const where = (uri: string, position: Position) => `${uri}:${position.line}:${position.character}`;
+
+/** Places given the new name that now resolve to a declaration other than one of those places. */
+async function capturedPlaces(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	root: string,
+	sites: Map<string, number[]>,
+	name: string,
+): Promise<string[]> {
+	const places = [...sites].flatMap(([file, offsets]) => {
+		const source = readFileSync(file, "utf8");
+		return offsets.map((offset) => ({ file, position: positionOf(source, offset) }));
+	});
+	const renamed = new Set(places.map(({ file, position }) => where(pathToFileURL(file).href, position)));
+	const problems: string[] = [];
+	for (const { file, position } of places.slice(0, 500)) {
+		const definitions =
+			(await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
+				"textDocument/definition",
+				{ textDocument: { uri: pathToFileURL(file).href }, position },
+			)) ?? [];
+		const other = [definitions]
+			.flat()
+			.find((definition) => !renamed.has(where(definition.uri, definition.range.start)));
+		if (other)
+			problems.push(
+				`${relative(root, file)}:${position.line + 1}: ${name} would refer to ${relative(root, fileURLToPath(other.uri))}:${other.range.start.line + 1} instead`,
+			);
+	}
+	return problems;
+}
+
+/** The offset of a position the server gave, which counts characters after a byte order mark. */
+function offsetOf(source: string, position: Position): number {
+	let offset = source.startsWith("\uFEFF") ? 1 : 0;
+	for (let line = 0; line < position.line; line++) offset = source.indexOf("\n", offset) + 1;
+	return offset + position.character;
+}
+
+/** The position of an offset, as the server counts it: after a byte order mark. */
+function positionOf(source: string, offset: number): Position {
+	const bom = source.startsWith("﻿") ? 1 : 0;
+	const before = source.slice(0, offset);
+	const line = before.split("\n").length - 1;
+	const lineStart = before.lastIndexOf("\n") + 1;
+	return { line, character: offset - lineStart - (line === 0 ? bom : 0) };
 }
 
 /** Compiler-resolved reference spans, kept as LSP locations for the caller to turn into sg matches. */
@@ -131,43 +333,6 @@ export async function references(root: string, options: ReferencesOptions): Prom
  * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
  * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
  */
-function keepShorthandPropertyNames(symbol: string, declarationFile: string, declaration: Position): AdjustEdit {
-	const shorthands = new Map<string, Map<number, string>>();
-	return (file, source, start, end, text) => {
-		if (source.slice(start, end) !== symbol) return text;
-		let kinds = shorthands.get(file);
-		if (!kinds) {
-			const lang = scriptLanguage(file);
-			const nodes = lang
-				? parse(lang, source)
-						.root()
-						.findAll({
-							rule: {
-								any: [{ kind: "shorthand_property_identifier" }, { kind: "shorthand_property_identifier_pattern" }],
-							},
-						})
-				: [];
-			kinds = new Map(nodes.map((node) => [node.range().start.index, String(node.kind())]));
-			shorthands.set(file, kinds);
-		}
-		const kind = kinds.get(start);
-		// In `const { parseUser } = api` the key names a property: it keeps its name when the renamed symbol is
-		// this local binding, and follows the rename when it is the export being read.
-		const renamingBinding =
-			kind === "shorthand_property_identifier_pattern" &&
-			file === declarationFile &&
-			start === offsetOf(source, declaration);
-		return kind === "shorthand_property_identifier" || renamingBinding ? `${symbol}: ${text}` : text;
-	};
-}
-
-function offsetOf(source: string, position: Position): number {
-	const lines = source.split("\n");
-	// TypeScript counts characters after a byte order mark; the source and ast-grep's offsets include it.
-	const bom = source.startsWith("\uFEFF") && position.line === 0 ? 1 : 0;
-	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character + bom;
-}
-
 /**
  * Moves a file by writing it anew and removing the old one. A rename within one directory, such as `a.ts` to
  * `a.tsx`, isn't recorded correctly by the macOS workspace (AgentFS), and the run can't be applied.
@@ -217,6 +382,28 @@ function repointMovedPaths(text: string, from: string, to: string): string {
  * Git-visible scripts with a relative import, export, require or import() of `target` that won't still lead to it
  * once it's at `destination`: TypeScript rightly leaves `./a` alone when `a.ts` becomes `a.tsx` or `a/index.ts`.
  */
+const relativeSpecifier = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*["'](\.{1,2}\/[^"']*)["']/g;
+
+/** The project's files that import one of these files by a relative path, up to a few hundred. */
+function importersOf(root: string, targets: string[]): string[] {
+	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+		cwd: root,
+		encoding: "utf8",
+	});
+	if (listed.status !== 0) return [];
+	const reals = new Set(targets.map((target) => realpathSync(target)));
+	return listed.stdout
+		.split("\0")
+		.filter((file) => /\.[cm]?[jt]sx?$/.test(file))
+		.map((file) => resolve(root, file))
+		.filter((file) => {
+			if (reals.has(file) || !existsSync(file)) return false;
+			const text = withoutComments(file, readFileSync(file, "utf8"));
+			return [...text.matchAll(relativeSpecifier)].some((match) => reals.has(resolveModule(file, match[1]!) ?? ""));
+		})
+		.slice(0, 300);
+}
+
 function relativeImporters(root: string, target: string, destination: string, edited: Map<string, string>): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
 		cwd: root,
@@ -224,7 +411,6 @@ function relativeImporters(root: string, target: string, destination: string, ed
 	});
 	if (listed.status !== 0) return [];
 	const real = realpathSync(target);
-	const specifier = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*["'](\.{1,2}\/[^"']*)["']/g;
 	return listed.stdout
 		.split("\0")
 		.filter((file) => /\.[cm]?[jt]sx?$/.test(file))
@@ -234,7 +420,7 @@ function relativeImporters(root: string, target: string, destination: string, ed
 			// As TypeScript would leave it: an edited importer can still have a path it didn't update, such as a
 			// `require()` beside an updated import.
 			const text = withoutComments(file, edited.get(file) ?? readFileSync(file, "utf8"));
-			return [...text.matchAll(specifier)].some(
+			return [...text.matchAll(relativeSpecifier)].some(
 				(match) => resolveModule(file, match[1]!) === real && !stillLeadsTo(file, match[1]!, target, destination),
 			);
 		});

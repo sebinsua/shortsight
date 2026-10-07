@@ -64,7 +64,7 @@ test("rename follows re-exports while keeping object literal keys and explicit a
 		'import { formatPrice } from "./lib";\nimport { formatPrice as fmt } from "./lib/money";\nexport const api = { "😀": 1, formatAmount: formatPrice };\nexport const x = api.formatAmount(1) + fmt(2);\n',
 	);
 	expect(await read("src/ns.ts")).toBe(
-		'import * as money from "./lib/money";\nconst { formatPrice } = money;\nexport const y = formatPrice(3);\n',
+		'import * as money from "./lib/money";\nconst { formatPrice: formatAmount } = money;\nexport const y = formatAmount(3);\n',
 	);
 });
 
