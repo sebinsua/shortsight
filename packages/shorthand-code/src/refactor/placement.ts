@@ -167,8 +167,12 @@ interface Edit {
 const DIRECTIVE =
 	/^\/[/*]\s*(?:@ts-(?:expect-error|ignore)\b|(?:eslint|oxlint)-disable-next-line\b|prettier-ignore\b|biome-ignore\b|deno-lint-ignore(?!-file)\b|(?:istanbul|c8|v8) ignore (?:next|if|else)\b)/;
 
+/** Comments that act on the whole file, so must stay at its top: TypeScript, Flow and JSX pragmas, file-wide lint. */
+export const PRAGMA =
+	/^\/[/*]\s*(?:@ts-nocheck|@ts-check|@flow|@jsx|@jsxImportSource|@jsxRuntime|eslint-disable(?!-next-line)|biome-ignore-all|prettier-ignore-file)\b/;
+
 /** A file's header comment, such as a licence, which belongs to the file rather than to its first statement. */
-const HEADER = /@license|@preserve|@copyright|@file(?:overview)?\b|SPDX-License-Identifier|\bCopyright\b/i;
+export const HEADER = /@license|@preserve|@copyright|@file(?:overview)?\b|SPDX-License-Identifier|\bCopyright\b/i;
 
 /** Statements a doc comment describes: declarations, exported or not. */
 const DOCUMENTED = new Set([
@@ -265,11 +269,14 @@ function placement(text: string, destination: Destination) {
 		if (node.kind() === "program") {
 			// A shebang must remain the first line of a file, and directives such as "use client" or "use strict"
 			// must stay first after it, or they stop being directives.
+			// Comments can come before a directive (`// Copyright` then `"use client"`), and pragmas such as
+			// `// @ts-nocheck` or a licence header must stay at the top too.
 			const prologue = [];
 			for (const child of children) {
 				const directive = child.kind() === "expression_statement" && child.namedChildren()[0]?.kind() === "string";
-				if (child.kind() !== "hash_bang_line" && !directive) break;
-				prologue.push(child);
+				const pragma = child.kind() === "comment" && (HEADER.test(child.text()) || PRAGMA.test(child.text()));
+				if (child.kind() === "hash_bang_line" || directive || pragma) prologue.push(child);
+				else if (child.kind() !== "comment") break;
 			}
 			const last = prologue.at(-1);
 			const lineEnd = last ? source.indexOf("\n", last.range().end.index) : -1;

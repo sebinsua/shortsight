@@ -590,6 +590,25 @@ await refactor.rename({ file: "src/a.ts", symbol: "Props.label", to: "title" });
 			);
 		});
 
+		test("renameFile to .tsx or into an index file leaves importers whose path still leads there", async () => {
+			for (const to of ["src/a.tsx", "src/a/index.ts"]) {
+				const repo = await makeRepo({
+					"tsconfig.json": JSON.stringify({
+						compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler", jsx: "react-jsx" },
+					}),
+					"src/a.ts": "export const a = 1;\n",
+					"src/c.ts": 'import { a } from "./a";\nexport const c = a;\n',
+				});
+				const result = await run(repo, `await refactor.renameFile({ from: "src/a.ts", to: "${to}" });`, {
+					timeoutMs: 15_000,
+				});
+				expect(result.exitCode, result.output).toBe(0);
+				expect(await Bun.file(path.join(repo, to)).text()).toBe("export const a = 1;\n");
+				expect(await Bun.file(path.join(repo, "src/a.ts")).exists()).toBe(false);
+				expect(await Bun.file(path.join(repo, "src/c.ts")).text()).toStartWith('import { a } from "./a";');
+			}
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3274,6 +3293,44 @@ console.log(grep("foo", "app/(marketing)/[slug]/*.tsx").length);`,
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
 			'const config = loadSettings("dev");\n[primary, secondary].forEach((s) => s.start());\n',
 		);
+	});
+
+	test("semicolons follow the replacement's last statement, and a shorthand reference keeps its key", async () => {
+		const repo = await makeRepo({
+			"tsconfig.json": "{}",
+			"c.ts": "const config = loadConfig();\n(async () => { run(); })();\nfoo()\n;[1, 2].forEach(f);\n",
+			"u.ts": "export function parseUser() { return 1; }\nexport const api = { parseUser };\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("const config = $V", "const config = { ...defaults, ...$V }", "c.ts");
+sg.rewrite("foo()", "bar() // migrated", "c.ts");
+const refs = await refactor.references({ file: "u.ts", symbol: "parseUser" });
+sg.rewrite(refs, () => "decodeUser");`,
+			{ timeoutMs: 15_000 },
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "c.ts")).text()).toBe(
+			"const config = { ...defaults, ...loadConfig() };\n(async () => { run(); })();\nbar() // migrated\n;[1, 2].forEach(f);\n",
+		);
+		expect(await Bun.file(path.join(repo, "u.ts")).text()).toBe(
+			"export function parseUser() { return 1; }\nexport const api = { parseUser: decodeUser };\n",
+		);
+	});
+
+	test("renameFile from a subdirectory names files from there", async () => {
+		const repo = await makeRepo({
+			"tsconfig.json": "{}",
+			"src/a.ts": "export const root = 1;\n",
+			"pkg/src/a.ts": "export const pkg = 1;\n",
+		});
+		const result = await run(repo, `await refactor.renameFile({ from: "src/a.ts", to: "src/b.ts" });`, {
+			cwd: path.join(repo, "pkg"),
+			timeoutMs: 15_000,
+		});
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "pkg/src/b.ts")).exists()).toBe(true);
+		expect(await Bun.file(path.join(repo, "src/a.ts")).exists()).toBe(true);
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

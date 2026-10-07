@@ -210,6 +210,17 @@ test("startOf a file with a byte order mark goes after the mark", () => {
 	expect(readFileSync(path, "utf8")).toBe(`${bom}const y = 2;\nexport const x = 1;\n`);
 });
 
+test("startOf a file goes after comments before its directives, and after file-wide pragmas", () => {
+	const path = fixture('// Copyright Example\n"use client";\nimport { x } from "./x";\n');
+	insert('import { z } from "./z";', { startOf: file(path) });
+	expect(readFileSync(path, "utf8")).toBe(
+		'// Copyright Example\n"use client";\nimport { z } from "./z";\nimport { x } from "./x";\n',
+	);
+	const pragma = fixture("// @ts-nocheck\nmain();\n");
+	insert("const a = 1;", { startOf: file(pragma) });
+	expect(readFileSync(pragma, "utf8")).toBe("// @ts-nocheck\nconst a = 1;\nmain();\n");
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

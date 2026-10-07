@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { delimiter, dirname, extname, relative, resolve, sep } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import type { MoveAnalysis } from "./move-analysis.ts";
-import { scriptLanguage } from "./placement.ts";
+import { HEADER, PRAGMA, scriptLanguage } from "./placement.ts";
 
 export interface TextEdit {
 	start: number;
@@ -382,6 +382,18 @@ export function exportsName(text: string, name: string): boolean {
 	return declared.test(text) || listed.test(text);
 }
 
+/** The files a relative specifier could mean, in the order module resolution tries them. */
+export function relativeCandidates(from: string, specifier: string): string[] {
+	const base = resolve(dirname(from), specifier);
+	const extension = extname(base);
+	return [
+		base,
+		...(SOURCE_FOR_JS[extension] ?? []).map((replacement) => base.slice(0, -extension.length) + replacement),
+		...EXTENSIONS.map((suffix) => base + suffix),
+		...EXTENSIONS.map((suffix) => resolve(base, `index${suffix}`)),
+	];
+}
+
 /** The prefixes of the nearest tsconfig's `paths` aliases: "@app/" for "@app/*". */
 function pathAliases(from: string): string[] {
 	for (let directory = dirname(from); ; directory = dirname(directory)) {
@@ -422,15 +434,7 @@ export function resolveModule(from: string, specifier: string): string | undefin
 			return undefined;
 		}
 	}
-	const base = resolve(dirname(from), specifier);
-	const extension = extname(base);
-	const candidates = [
-		base,
-		...(SOURCE_FOR_JS[extension] ?? []).map((replacement) => base.slice(0, -extension.length) + replacement),
-		...EXTENSIONS.map((suffix) => base + suffix),
-		...EXTENSIONS.map((suffix) => resolve(base, `index${suffix}`)),
-	];
-	for (const candidate of candidates)
+	for (const candidate of relativeCandidates(from, specifier))
 		if (existsSync(candidate) && statSync(candidate).isFile()) return realpathSync(candidate);
 	return undefined;
 }
@@ -605,10 +609,13 @@ function importInsertion(root: SgNode, source: string, lines: string[], removed 
 		const end = imports.at(-1)!.range().end.index;
 		return { start: end, end, text: newline + lines.join(newline) };
 	}
-	let offset = 0;
+	let offset = source.startsWith("\uFEFF") ? 1 : 0;
 	for (const child of root.namedChildren()) {
+		// After a shebang, directives and file-wide comments, skipping other comments before a directive.
 		const directive = child.kind() === "expression_statement" && child.namedChildren()[0]?.kind() === "string";
-		if (child.kind() !== "hash_bang_line" && !directive) break;
+		const pragma = child.kind() === "comment" && (HEADER.test(child.text()) || PRAGMA.test(child.text()));
+		if (child.kind() === "comment" && !pragma) continue;
+		if (child.kind() !== "hash_bang_line" && !directive && !pragma) break;
 		const lineEnd = source.indexOf("\n", child.range().end.index);
 		offset = lineEnd < 0 ? source.length : lineEnd + 1;
 	}

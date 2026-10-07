@@ -455,7 +455,7 @@ async function readChangedEntry(mount: string, file: string): Promise<Filesystem
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		throw new RefusedRunError(
-			`${REFUSED}AgentFS recorded a change to ${JSON.stringify(file)} that the workspace doesn't have, which happens on macOS after removing a directory from before the run and then creating files. Remove the directory in a later run.`,
+			`${REFUSED}AgentFS recorded a change to ${JSON.stringify(file)} that the workspace doesn't have. On macOS this follows some renames (such as a.ts to a.tsx) and removing a directory from before the run then creating files. Write the new file and delete the old one instead of renaming, or remove the directory in a later run.`,
 		);
 	}
 }

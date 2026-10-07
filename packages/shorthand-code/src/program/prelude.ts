@@ -891,8 +891,42 @@ function withTrailingComment(template: { text: string; literal: [number, number]
  * without one would drop it: if the next line starts with `[` or `(`, the two statements then run together.
  */
 function keepSemicolon(result: unknown, match: SgMatch): unknown {
-	if (typeof result !== "string" || !result.trim() || !match.node.text().endsWith(";")) return result;
-	return /[;}]\s*$/.test(result) ? result : `${result};`;
+	if (typeof result !== "string") return result;
+	// `{ parseUser }` as a reference: a new name keeps the key, as rename does.
+	if (match.node.kind() === "shorthand_property_identifier" && /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(result))
+		return result === match.node.text() ? result : `${match.node.text()}: ${result}`;
+	if (!result.trim() || !match.node.text().endsWith(";")) return result;
+	// Whether the replacement ends with a statement that needs one: a declaration or block that ends in `}` doesn't,
+	// but `const config = { ...defaults }` does.
+	const statements = parse(Lang.Tsx, result)
+		.root()
+		.children()
+		.filter((node) => node.isNamed() && node.kind() !== "comment");
+	const last = statements.at(-1);
+	const unterminated =
+		last !== undefined &&
+		!last.text().trimEnd().endsWith(";") &&
+		([
+			"expression_statement",
+			"lexical_declaration",
+			"variable_declaration",
+			"import_statement",
+			"type_alias_declaration",
+			"return_statement",
+			"throw_statement",
+		].includes(String(last.kind())) ||
+			(last.kind() === "export_statement" &&
+				![
+					"function_declaration",
+					"class_declaration",
+					"abstract_class_declaration",
+					"interface_declaration",
+					"enum_declaration",
+				].includes(String(last.field("declaration")?.kind()))));
+	if (!unterminated) return result;
+	// Before a trailing line comment, or the `;` would be part of it.
+	const comment = /[ \t]*\/\/[^\n]*$/.exec(result);
+	return comment ? `${result.slice(0, comment.index)};${comment[0]}` : `${result};`;
 }
 
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
@@ -1359,9 +1393,10 @@ const globals = {
 			}),
 		renameFile: (options: RenameFileOptions) =>
 			logged("refactor.renameFile", [options], () => {
+				// Named from the repository root, as renameFile resolves them, whichever directory the program is in.
 				const prepared = {
-					from: pathArgument("refactor.renameFile", options.from),
-					to: pathArgument("refactor.renameFile", options.to),
+					from: gitPath(pathArgument("refactor.renameFile", options.from)),
+					to: gitPath(pathArgument("refactor.renameFile", options.to)),
 				};
 				return import("../refactor/typescript-refactors.ts").then(({ renameFile }) =>
 					renameFile(repositoryRoot, prepared),

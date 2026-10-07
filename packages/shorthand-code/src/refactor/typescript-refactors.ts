@@ -1,11 +1,23 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	statSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { parse, type SgNode } from "@ast-grep/napi";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
-import { exportsName, resolveModule } from "./move-imports.ts";
+import { exportsName, relativeCandidates, resolveModule } from "./move-imports.ts";
 import { scriptLanguage } from "./placement.ts";
 import {
 	existingProjectFile,
@@ -508,6 +520,29 @@ function refuseBarrelCollision(root: string, file: string, symbol: string, to: s
 	}
 }
 
+/**
+ * Moves a file by writing it anew and removing the old one. A rename within one directory, such as `a.ts` to
+ * `a.tsx`, isn't recorded correctly by the macOS workspace (AgentFS), and the run can't be applied.
+ */
+function moveFile(from: string, to: string): void {
+	const stats = lstatSync(from);
+	if (stats.isSymbolicLink()) symlinkSync(readlinkSync(from), to);
+	else {
+		writeFileSync(to, readFileSync(from));
+		chmodSync(to, stats.mode & 0o7777);
+	}
+	unlinkSync(from);
+}
+
+/** Whether `specifier` in `file` will resolve to `destination` once `target` has moved there. */
+function stillLeadsTo(file: string, specifier: string, target: string, destination: string): boolean {
+	for (const candidate of relativeCandidates(file, specifier)) {
+		if (candidate === resolve(destination)) return true;
+		if (candidate !== resolve(target) && existsSync(candidate) && statSync(candidate).isFile()) return false;
+	}
+	return false;
+}
+
 /** Whether a relative specifier leads somewhere from `file`: a file as written, or a module TypeScript-style. */
 function leadsSomewhere(file: string, specifier: string): boolean {
 	return existsSync(resolve(dirname(file), specifier)) || resolveModule(file, specifier) !== undefined;
@@ -544,8 +579,11 @@ function scriptFiles(root: string): string[] {
 		.filter((path) => existsSync(path));
 }
 
-/** Git-visible scripts with a relative import, export, require or import() of `target`. */
-function relativeImporters(root: string, target: string): string[] {
+/**
+ * Git-visible scripts with a relative import, export, require or import() of `target` that won't still lead to it
+ * once it's at `destination`: TypeScript rightly leaves `./a` alone when `a.ts` becomes `a.tsx` or `a/index.ts`.
+ */
+function relativeImporters(root: string, target: string, destination: string): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
 		cwd: root,
 		encoding: "utf8",
@@ -560,7 +598,9 @@ function relativeImporters(root: string, target: string): string[] {
 		.filter((file) => {
 			if (file === target || !existsSync(file)) return false;
 			const text = readFileSync(file, "utf8");
-			return [...text.matchAll(specifier)].some((match) => resolveModule(file, match[1]!) === real);
+			return [...text.matchAll(specifier)].some(
+				(match) => resolveModule(file, match[1]!) === real && !stillLeadsTo(file, match[1]!, target, destination),
+			);
 		});
 }
 
@@ -582,7 +622,7 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 		if (repointed !== moved) changes.set(from, repointed);
 		// The server can return no edits at all, as when a file augments this one with `declare module`. Check its
 		// answer against the files that import this one by a relative path, rather than leave them broken.
-		const missed = relativeImporters(root, from).filter((file) => !changes.has(file));
+		const missed = relativeImporters(root, from, to).filter((file) => !changes.has(file));
 		if (missed.length)
 			throw new Error(
 				`refactor.renameFile: TypeScript didn't update the import of ${JSON.stringify(options.from)} in ${missed.map((file) => JSON.stringify(relative(root, file))).join(", ")}, so nothing was renamed. A \`declare module\` augmentation of the file can cause this; update those imports with sg.rewrite and move the file with Bun.`,
@@ -590,7 +630,7 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 		editingFiles([...changes.keys(), from, to], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
 			mkdirSync(dirname(to), { recursive: true });
-			renameSync(from, to);
+			moveFile(from, to);
 		});
 		await notifyTypeScriptServer(server, "workspace/didRenameFiles", { files });
 		await filesChanged(
