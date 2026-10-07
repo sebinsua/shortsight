@@ -666,6 +666,40 @@ console.log((await refactor.references({ file: "src/b.ts", symbol: "log", includ
 			);
 		});
 
+		test("a member's parameter property renames with it, destructuring elsewhere keeps its local, and a shorthand member is refused", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					"export interface HasEmail { email: string }\nexport class User implements HasEmail { constructor(public email: string) { console.log(email); } shout() { return this.email; } }\n",
+				"src/b.ts":
+					'import { User } from "./a";\nexport function f(u: User) { const { email } = u; return { email }; }\n',
+				"src/c.ts": "function parseUser() { return 1; }\nexport const api = { parseUser };\n",
+			});
+			const renamed = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "HasEmail.email", to: "emailAddress" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(renamed.exitCode, renamed.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+				"export interface HasEmail { emailAddress: string }\nexport class User implements HasEmail { constructor(public emailAddress: string) { console.log(emailAddress); } shout() { return this.emailAddress; } }\n",
+			);
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toBe(
+				'import { User } from "./a";\nexport function f(u: User) { const { emailAddress: email } = u; return { email }; }\n',
+			);
+			const shorthand = await run(
+				repo,
+				`await refactor.rename({ file: "src/c.ts", symbol: "api.parseUser", to: "decodeUser" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(shorthand.exitCode).toBe(1);
+			expect(shorthand.output).toContain("is a shorthand for a variable");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3433,6 +3467,22 @@ console.log(grep("oldApi", "src/**/*.{ts,tsx}").length, grep("oldApi", "src/**/*
 		expect(result.output.trim()).toBe("2 0");
 		expect(await Bun.file(path.join(repo, "c.ts")).text()).toBe(
 			"if (ready) {\n  start();\n} else { fallback(); } // ready path\nswitch (x) {\n  case 1: modern(); // TODO: remove legacy\n break;\n}\n",
+		);
+	});
+
+	test("rewriting the unbraced body of an if or loop keeps it one statement", async () => {
+		const repo = await makeRepo({
+			"a.ts":
+				'function f(x: number) {\n  if (x > 1) console.log("big", x);\n  save(x);\n  for (const y of [x]) console.log(y);\n  done();\n  if (x) return compute();\n}\n',
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("console.log($$$A);", "", "a.ts");
+sg.rewrite("return compute();", "const result = compute();\\nreturn track(result);", "a.ts");`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			"function f(x: number) {\n  if (x > 1) {}\n  save(x);\n  for (const y of [x]) {}\n  done();\n  if (x) { const result = compute();\nreturn track(result); }\n}\n",
 		);
 	});
 

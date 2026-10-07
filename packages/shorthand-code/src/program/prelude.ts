@@ -961,6 +961,33 @@ function withSemicolon(result: unknown, match: SgMatch): unknown {
 	return `${result.slice(0, at)};${result.slice(at)}`;
 }
 
+/**
+ * A statement that is the unbraced body of an `if`, `else` or loop must stay one statement: removing it would make
+ * the next statement the body, and a replacement of several statements would leave all but the first outside.
+ */
+function asBody(result: unknown, match: SgMatch): unknown {
+	if (typeof result !== "string") return result;
+	const node = match.node;
+	const parent = node.parent();
+	const same = (other: SgNode | null) =>
+		other?.range().start.index === node.range().start.index && other.kind() === node.kind();
+	const body =
+		parent !== null &&
+		(parent.kind() === "else_clause" ||
+			same(parent.field("body")) ||
+			same(parent.field("consequence")) ||
+			(parent.kind() === "labeled_statement" && same(parent.namedChildren().at(-1) ?? null)));
+	if (!body || !String(node.kind()).endsWith("statement")) return result;
+	if (!result.trim()) return "{}";
+	const lang = LANGUAGES[match.file.split(".").pop()!] ?? Lang.Tsx;
+	const statements = parse(lang, result)
+		.root()
+		.children()
+		.filter((child) => child.isNamed() && child.kind() !== "comment");
+	const declaration = statements.some((statement) => !String(statement.kind()).endsWith("statement"));
+	return statements.length > 1 || declaration ? `{ ${result} }` : result;
+}
+
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
 function conflicting(a: Edit, b: Edit): boolean {
 	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
@@ -981,7 +1008,7 @@ function applyRewrites(
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
-		const changes = replacementEdits(keepSemicolon(result, match), match, file);
+		const changes = replacementEdits(asBody(keepSemicolon(result, match), match), match, file);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
 		if (changes.length > 0) planned.push({ match, edits: changes });

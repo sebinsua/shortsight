@@ -91,12 +91,17 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		// one: everywhere the property is named would change too. Renaming the variable leaves the property alone.
 		const binding = declaresShorthandBinding(file, position);
 		if (binding) dropPropertyEdits(edit);
+		// `{ parseUser }` declares a member that is also a variable: the server would rename the variable.
+		if (declaresShorthandMember(file, position))
+			throw new Error(
+				`refactor.rename: ${JSON.stringify(options.symbol)} is a shorthand for a variable; write it as ${options.symbol.split(".").at(-1)}: ${options.symbol.split(".").at(-1)} first, or rename the variable`,
+			);
 		const renamingProperty = !binding && declaresProperty(file, position);
 		// Renaming a member leaves locals alone: `const { email } = user` becomes `{ emailAddress: email }`, rather
 		// than renaming the local and its uses, some of which the server leaves out (`return { email }`). A
 		// parameter property is itself a local, so it's renamed with its uses.
-		const keepLocals = renamingProperty && !declaresParameterProperty(file, position);
-		if (keepLocals) dropLocalEdits(edit);
+		const keepLocals = renamingProperty;
+		if (keepLocals) dropLocalEdits(edit, options.symbol.split(".").at(-1)!);
 		if (!renamingProperty && RESERVED.has(options.to))
 			throw new Error(
 				`refactor.rename: ${options.to} is a reserved word, so it can't name ${JSON.stringify(options.symbol)}`,
@@ -193,39 +198,53 @@ function keepShorthandPropertyNames(
 	};
 }
 
-/** Whether the name at `position` is a constructor parameter that declares a property, `public name: string`. */
-function declaresParameterProperty(file: string, position: Position): boolean {
-	const lang = scriptLanguage(file);
-	if (!lang) return false;
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, position);
-	return parse(lang, source)
-		.root()
-		.findAll({ rule: { any: ["identifier", "required_parameter", "optional_parameter"].map((kind) => ({ kind })) } })
-		.some(
-			(node) =>
-				node.range().start.index === offset && parameterProperty(node.kind() === "identifier" ? node.parent() : node),
-		);
-}
-
-/** Leaves out the edits that land on plain identifiers: when a member is renamed, those are locals' uses. */
-function dropLocalEdits(edit: WorkspaceEdit | null): void {
+/**
+ * Leaves out the edits that land on plain identifiers: when a member is renamed, those are locals' uses. A
+ * constructor parameter that declares the member (`constructor(public email: string)`) is the member itself,
+ * so it and its uses in that constructor are still renamed.
+ */
+function dropLocalEdits(edit: WorkspaceEdit | null, name: string): void {
 	const kept = (uri: string, edits: TextEdit[]) => {
 		const file = fileURLToPath(uri);
 		const lang = scriptLanguage(file);
 		if (!lang) return edits;
 		const source = readFileSync(file, "utf8");
+		const root = parse(lang, source).root();
+		const parameters = root
+			.findAll({ rule: { any: [{ kind: "required_parameter" }, { kind: "optional_parameter" }] } })
+			.filter((parameter) => parameterProperty(parameter) && parameter.field("pattern")?.text() === name);
+		const members = new Set<number>();
+		for (const parameter of parameters) {
+			members.add(parameter.field("pattern")!.range().start.index);
+			const constructor = parameter.parent()?.parent();
+			for (const use of constructor
+				?.field("body")
+				?.findAll({ rule: { kind: "identifier", regex: `^${name.replace(/\$/g, "\\$")}$` } }) ?? [])
+				members.add(use.range().start.index);
+		}
 		const locals = new Set(
-			parse(lang, source)
-				.root()
+			root
 				.findAll({ rule: { kind: "identifier" } })
-				.map((node) => node.range().start.index),
+				.map((node) => node.range().start.index)
+				.filter((offset) => !members.has(offset)),
 		);
 		return edits.filter(({ range }) => !locals.has(offsetOf(source, range.start)));
 	};
 	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
 	for (const change of edit?.documentChanges ?? [])
 		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
+}
+
+/** Whether the name at `position` is an object literal's shorthand member, `{ parseUser }`. */
+function declaresShorthandMember(file: string, position: Position): boolean {
+	const lang = scriptLanguage(file);
+	if (!lang) return false;
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, position);
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { kind: "shorthand_property_identifier" } })
+		.some((node) => node.range().start.index === offset);
 }
 
 const SCOPES = new Set([
@@ -632,7 +651,7 @@ function scriptFiles(root: string): string[] {
  * Git-visible scripts with a relative import, export, require or import() of `target` that won't still lead to it
  * once it's at `destination`: TypeScript rightly leaves `./a` alone when `a.ts` becomes `a.tsx` or `a/index.ts`.
  */
-function relativeImporters(root: string, target: string, destination: string): string[] {
+function relativeImporters(root: string, target: string, destination: string, edited: Map<string, string>): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
 		cwd: root,
 		encoding: "utf8",
@@ -646,7 +665,9 @@ function relativeImporters(root: string, target: string, destination: string): s
 		.map((file) => resolve(root, file))
 		.filter((file) => {
 			if (file === target || !existsSync(file)) return false;
-			const text = withoutComments(file, readFileSync(file, "utf8"));
+			// As TypeScript would leave it: an edited importer can still have a path it didn't update, such as a
+			// `require()` beside an updated import.
+			const text = withoutComments(file, edited.get(file) ?? readFileSync(file, "utf8"));
 			return [...text.matchAll(specifier)].some(
 				(match) => resolveModule(file, match[1]!) === real && !stillLeadsTo(file, match[1]!, target, destination),
 			);
@@ -676,10 +697,10 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 		if (repointed !== moved) changes.set(from, repointed);
 		// The server can return no edits at all, as when a file augments this one with `declare module`. Check its
 		// answer against the files that import this one by a relative path, rather than leave them broken.
-		const missed = relativeImporters(root, from, to).filter((file) => !changes.has(file));
+		const missed = relativeImporters(root, from, to, changes);
 		if (missed.length)
 			throw new Error(
-				`refactor.renameFile: TypeScript didn't update the import of ${JSON.stringify(options.from)} in ${missed.map((file) => JSON.stringify(relative(root, file))).join(", ")}, so nothing was renamed. A \`declare module\` augmentation of the file can cause this; update those imports with sg.rewrite and move the file with Bun.`,
+				`refactor.renameFile: TypeScript didn't update the import of ${JSON.stringify(options.from)} in ${missed.map((file) => JSON.stringify(relative(root, file))).join(", ")}, so nothing was renamed. It doesn't update \`require()\` calls, and a \`declare module\` augmentation of the file stops it; update those paths with sg.rewrite and move the file with Bun.`,
 			);
 		editingFiles([...changes.keys(), from, to], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
