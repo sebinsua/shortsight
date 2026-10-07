@@ -68,6 +68,23 @@ test("rename follows re-exports while keeping object literal keys and explicit a
 	);
 });
 
+test("rename follows a type re-exported on its own line, and its importers", async () => {
+	const root = await fixture({
+		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+		"src/lib/options.ts": "export interface Options { verbose: boolean }\n",
+		"src/lib/index.ts": 'export {\n\ttype Options,\n} from "./options";\n',
+		"src/use.ts": 'import type { Options } from "./lib";\nexport const o: Options = { verbose: true };\n',
+	});
+
+	await rename(root, { file: "src/lib/options.ts", symbol: "Options", to: "Settings" });
+
+	const read = (file: string) => Bun.file(path.join(root, file)).text();
+	expect(await read("src/lib/index.ts")).toBe('export {\n\ttype Settings,\n} from "./options";\n');
+	expect(await read("src/use.ts")).toBe(
+		'import type { Settings } from "./lib";\nexport const o: Settings = { verbose: true };\n',
+	);
+});
+
 test("rename keeps the property a renamed destructured binding reads", async () => {
 	const root = await fixture({
 		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),

@@ -13,7 +13,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { Lang, parse } from "@ast-grep/napi";
+import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { SymbolFlags } from "typescript/unstable/async";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -148,7 +148,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 				const alias = findAlias([...sites.keys()], to, from);
 				if (!alias) break;
 				await renameAt(alias.file, positionOf(alias.source, alias.offset));
-				const collapsed = collapseAliases(readFileSync(alias.file, "utf8"), to);
+				const collapsed = collapseAliases(alias.file, readFileSync(alias.file, "utf8"), to);
 				if (!collapsed) break;
 				await place(new Map([[alias.file, collapsed.source]]), new Map([[alias.file, collapsed.edits]]));
 			}
@@ -167,29 +167,48 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 const escaped = (name: string) => name.replaceAll("$", "\\$");
 const wholeWord = (name: string) => new RegExp(`(?<![\\w$])${escaped(name)}(?![\\w$])`);
 
+/** A file's import and export specifiers, `name as alias`, with both parts. */
+function specifiers(file: string, source: string): { name: SgNode; alias: SgNode }[] {
+	const lang = scriptLanguage(file);
+	if (!lang) return [];
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { any: [{ kind: "import_specifier" }, { kind: "export_specifier" }] } })
+		.flatMap((specifier) => {
+			const name = specifier.field("name");
+			const alias = specifier.field("alias");
+			return name && alias ? [{ name, alias }] : [];
+		});
+}
+
 /** An import or export specifier `to as from` that a rename introduced, and the offset of its `from`. */
 function findAlias(
 	files: string[],
 	to: string,
 	from: string,
 ): { file: string; source: string; offset: number } | undefined {
-	const specifier = new RegExp(`([{,]\\s*(?:type\\s+)?${escaped(to)} as )${escaped(from)}(?=\\s*[,}])`);
 	for (const file of files) {
 		const source = readFileSync(file, "utf8");
-		const match = specifier.exec(source);
-		if (match) return { file, source, offset: match.index + match[1]!.length };
+		const alias = specifiers(file, source).find(
+			(specifier) => specifier.name.text() === to && specifier.alias.text() === from,
+		)?.alias;
+		if (alias) return { file, source, offset: alias.range().start.index };
 	}
 	return undefined;
 }
 
 /** `{ to as to }` as `{ to }`, once its alias has been renamed. */
-function collapseAliases(source: string, to: string): { source: string; edits: PlacedEdit[] } | undefined {
-	const specifier = new RegExp(`([{,]\\s*(?:type\\s+)?)${escaped(to)} as ${escaped(to)}(?=\\s*[,}])`, "g");
+function collapseAliases(
+	file: string,
+	source: string,
+	to: string,
+): { source: string; edits: PlacedEdit[] } | undefined {
 	const edits: PlacedEdit[] = [];
 	let shift = 0;
-	for (const match of source.matchAll(specifier)) {
-		const oldStart = match.index + match[1]!.length;
-		const oldEnd = match.index + match[0].length;
+	for (const { name, alias } of specifiers(file, source)) {
+		if (name.text() !== to || alias.text() !== to) continue;
+		const oldStart = name.range().start.index;
+		const oldEnd = alias.range().end.index;
 		edits.push({ oldStart, oldEnd, start: oldStart + shift, text: to });
 		shift += to.length - (oldEnd - oldStart);
 	}
