@@ -122,7 +122,7 @@ function wholeStatement(node: SgNode): SgNode {
 	// `function obsolete() {}` matches inside `export function obsolete() {}`: the statement is the export.
 	if (parent?.kind() === "export_statement" && parent.field("declaration") && at(parent.field("declaration")!, node))
 		return parent;
-	if (parent?.kind() !== "expression_statement" || !container(parent.parent() ?? parent)) return node;
+	if (parent?.kind() !== "expression_statement" || !holdsStatements(parent.parent() ?? parent)) return node;
 	const named = parent.namedChildren().filter((child) => child.kind() !== "comment");
 	return named.length === 1 && at(named[0]!, node) ? parent : node;
 }
@@ -134,11 +134,16 @@ function container(node: SgNode): boolean {
 	return node.kind() === "program" || node.kind() === "statement_block";
 }
 
+/** What holds statements: a container, or a `case`/`default` clause, which has no braces to place inside. */
+function holdsStatements(node: SgNode): boolean {
+	return container(node) || node.kind() === "switch_case" || node.kind() === "switch_default";
+}
+
 function statement(node: SgNode) {
 	const parent = node.parent();
 	if (
 		!parent ||
-		!container(parent) ||
+		!holdsStatements(parent) ||
 		node.kind() === "comment" ||
 		node.kind() === "hash_bang_line" ||
 		!node.isNamed()
@@ -326,18 +331,23 @@ function validateBoundaries(saved: Snapshot, edits: Edit[], root: SgNode) {
 	const pending = [root];
 	while (pending.length) {
 		const node = pending.pop()!;
-		if (container(node)) containers.set(nodeKey(node), node);
+		if (holdsStatements(node)) containers.set(nodeKey(node), node);
 		pending.push(...node.children());
 	}
 	const parents = new Map(edits.map((edit) => [nodeKey(edit.parent), edit.parent]));
 	for (const [parentKey, parent] of parents) {
 		const parentRange = parent.range();
+		// A case clause has no closing brace: removing its last statement moves its end too, so find it by its start.
+		const clause = parent.kind() === "switch_case" || parent.kind() === "switch_default";
+		const parentStart = mapped(parentRange.start.index, "start");
 		const next =
 			parent.kind() === "program"
 				? root
-				: containers.get(
-						`${parent.kind()}:${mapped(parentRange.start.index, "start")}:${mapped(parentRange.end.index, "end")}`,
-					);
+				: clause
+					? [...containers.values()].find(
+							(candidate) => candidate.kind() === parent.kind() && candidate.range().start.index === parentStart,
+						)
+					: containers.get(`${parent.kind()}:${parentStart}:${mapped(parentRange.end.index, "end")}`);
 		if (!next) return fail();
 		const remaining = new Map(next.namedChildren().map((node) => [nodeKey(node), node]));
 		for (const child of parent.namedChildren()) {

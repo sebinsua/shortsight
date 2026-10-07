@@ -359,7 +359,7 @@ async function changesInDatabase(database: string, observation: NfsObservation, 
 			switch (record.type) {
 				case "f":
 				case "l":
-					changes.push({ file, entry: await readEntry(path.join(mount, file)) });
+					changes.push({ file, entry: await readChangedEntry(mount, file) });
 					break;
 				case "d": {
 					const original = await observation.originalKind(file);
@@ -442,6 +442,21 @@ async function cloneDatabase(fromDir: string, fromName: string, toDir: string, t
 	for (const file of await fs.readdir(fromDir)) {
 		if (!file.startsWith(fromName)) continue;
 		await Bun.write(path.join(toDir, file.replace(fromName, toName)), Bun.file(path.join(fromDir, file)));
+	}
+}
+
+/**
+ * A changed entry, as the mount shows it. AgentFS can record a change at a path where the mount has nothing, as after
+ * a directory from before the run is emptied and removed and a file is then created: refuse, rather than guess.
+ */
+async function readChangedEntry(mount: string, file: string): Promise<FilesystemEntry> {
+	try {
+		return await readEntry(path.join(mount, file));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		throw new RefusedRunError(
+			`${REFUSED}AgentFS recorded a change to ${JSON.stringify(file)} that the workspace doesn't have, which happens on macOS after removing a directory from before the run and then creating files. Remove the directory in a later run.`,
+		);
 	}
 }
 

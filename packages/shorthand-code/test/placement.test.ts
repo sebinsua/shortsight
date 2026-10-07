@@ -187,6 +187,22 @@ test("a declaration stands for the export around it, and a file the grammar can'
 	);
 });
 
+test("statements in switch cases can be removed and placed after", () => {
+	const path = fixture(
+		'function f(x: number) {\n\tswitch (x) {\n\t\tcase 1:\n\t\t\tconsole.log("one");\n\t\t\treturn 1;\n\t\tdefault:\n\t\t\tconsole.log("other");\n\t}\n}\n',
+	);
+	const source = readFileSync(path, "utf8");
+	const logs = parse(Lang.TypeScript, source)
+		.root()
+		.findAll("console.log($$$A);")
+		.map((node) => remember({ file: path, text: node.text(), node }, source));
+	remove(logs);
+	insert("log(2);", { after: match(path, "return 1;") });
+	expect(readFileSync(path, "utf8")).toBe(
+		"function f(x: number) {\n\tswitch (x) {\n\t\tcase 1:\n\t\t\treturn 1;\n\t\t\tlog(2);\n\t\tdefault:\n\t}\n}\n",
+	);
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

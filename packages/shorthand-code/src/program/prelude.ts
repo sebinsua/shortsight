@@ -252,7 +252,9 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	if (typeof pattern === "string") {
 		flags = ["-F", "-e", pattern];
 	} else {
-		flags = ["-P", "-e", pattern.source];
+		// Bun writes non-ASCII characters in a regex literal as \uXXXX, which PCRE spells \x{XXXX}.
+		const source = pattern.source.replace(/\\u\{?([0-9a-fA-F]{4,6})\}?/g, "\\x{$1}");
+		flags = ["-P", "-e", source];
 		if (pattern.flags.includes("i")) flags.push("-i");
 	}
 	// Git runs from the root, with paths relative to it, and its files are named from here again below: see git().
@@ -781,10 +783,12 @@ const METAVARIABLE = /(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g;
 
 /** A template's metavariables that the pattern doesn't capture: a typo would otherwise be written out literally. */
 function checkTemplate(template: string, captured: ReadonlySet<string>): void {
-	// `$$$` and `$_` match without capturing, so a template can't refer to them; `$$$` would be written out as is.
-	if (/\$\$\$(?![A-Z_])/.test(template))
+	// `$$$`, `$_` and names starting with `_` match without capturing, so a template can't refer to them: `$$$` would
+	// be written out as is, and `$$$_REST` as nothing.
+	const uncaptured = /\$\$\$(?![A-Z_])|\$+_[A-Z0-9_]*/.exec(template);
+	if (uncaptured)
 		throw new Error(
-			"sg.rewrite: the replacement uses $$$, which captures nothing. Name it in both the pattern and the replacement, such as $$$ARGS.",
+			`sg.rewrite: the replacement uses ${uncaptured[0]}, which captures nothing. Name it without a leading underscore in both the pattern and the replacement, such as $$$ARGS.`,
 		);
 	const unknown = [...new Set([...template.matchAll(METAVARIABLE)].map((match) => match[0]))].filter(
 		(name) => !captured.has(name.replace(/^\$+/, "")),
@@ -819,12 +823,13 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
 }
 
 /**
- * A callback's text without what it carried over from the match: wherever it repeats a captured value, as
- * `console.info(${m.vars.A})` does, that text is the original code rather than new.
+ * A callback's text without what it carried over from the match: wherever it repeats the match or a captured value,
+ * as `console.info(${m.vars.A})` does, that text is the original code rather than new.
  */
 function outsideCaptures(text: string, match: SgMatch): [number, number][] {
 	const carried: [number, number][] = [];
-	for (const value of Object.values(match.vars)
+	// The whole match counts too: `"async " + m.text` carries all of it over.
+	for (const value of [match.text, ...Object.values(match.vars)]
 		.filter(Boolean)
 		.toSorted((a, b) => b.length - a.length))
 		for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length))

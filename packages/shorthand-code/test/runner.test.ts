@@ -3090,6 +3090,24 @@ console.log((await $\`git status --short\`.text()).trim() === "", process.cwd().
 		},
 	);
 
+	test("a later rewrite reaches a match a callback copied whole, $$$_ names are refused, and grep takes non-ASCII", async () => {
+		const repo = await makeRepo({ "a.ts": "function load() { return loadUser(1); }\nbaz(3, 4, 5);\n// Café\n" });
+		const rewritten = await run(
+			repo,
+			`sg.rewrite({ rule: { kind: "function_declaration", has: { pattern: "loadUser($$$A)", stopBy: "end" } } }, (m) => "async " + m.text, "a.ts");
+sg.rewrite("loadUser($ID)", "await loadUser($ID)", "a.ts");
+console.log(grep(/Café/).length);`,
+		);
+		expect(rewritten.exitCode, rewritten.output).toBe(0);
+		expect(rewritten.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toStartWith(
+			"async function load() { return await loadUser(1); }\n",
+		);
+		const refused = await run(repo, `sg.rewrite("baz($A, $$$_REST)", "qux($A, $$$_REST)", "a.ts");`);
+		expect(refused.exitCode).toBe(1);
+		expect(refused.output).toContain("the replacement uses $$$_REST, which captures nothing");
+	});
+
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
 		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A", "src/a.ts");`);
