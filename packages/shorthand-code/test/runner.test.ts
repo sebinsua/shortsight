@@ -500,6 +500,19 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			);
 		});
 
+		test("an error the code already had still counts as the same one when its message names the renamed type", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/box.ts":
+					"export class Box<T> { constructor(public value: T) {} }\nexport function take(b: Box<string>) { return b.value; }\ntake(new Box<number>(1));\n",
+			});
+			const renamed = await run(repo, `await refactor.rename({ file: "src/box.ts", symbol: "Box", to: "Crate" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(renamed.exitCode, renamed.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/box.ts")).text()).toContain("take(new Crate<number>(1));");
+		});
+
 		test("without a tsconfig, a captured rename is refused and a clean one applies", async () => {
 			const repo = await makeRepo({
 				"a.js":

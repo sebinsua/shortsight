@@ -91,11 +91,13 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			readFileSync(file, "utf8"),
 		);
 		const checked = checkedEdits(server, root);
-		// Where the new name was written, as offsets in each file's current contents.
+		// Where the new name was written, as offsets in each file's current contents, and each file's edits in turn.
 		const sites = new Map<string, number[]>();
+		const history = new Map<string, PlacedEdit[][]>();
 		const place = async (changes: Map<string, string>, placed: Map<string, PlacedEdit[]>) => {
 			await checked.write(changes);
 			for (const [changed, edits] of placed) {
+				history.set(changed, [...(history.get(changed) ?? []), edits]);
 				const kept = (sites.get(changed) ?? []).map((offset) => shiftedOffset(offset, edits));
 				for (const edit of edits) {
 					const at = edit.text.search(wholeWord(to));
@@ -152,8 +154,8 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			}
 			await checked.verify(
 				`refactor.rename of ${JSON.stringify(options.symbol)} to ${to}`,
-				(message) => message.replaceAll(`'${to}'`, `'${from}'`),
 				await capturedPlaces(server, checked.root, sites, to),
+				(changed, offset) => (history.get(changed) ?? []).reduce(shiftedOffset, offset),
 			);
 		} catch (error) {
 			await checked.restore();
@@ -254,22 +256,30 @@ function checkedEdits(
 			originals.clear();
 		},
 		/**
-		 * Refuses if a checked file has an error it didn't have before. `same` maps an error's message to how it
-		 * would have read before, such as with the old name; `problems` are any the caller found itself.
+		 * Refuses if a checked file has an error it didn't have before; `problems` are any the caller found itself.
+		 * Given where each old offset in a file is now, as a rename knows, an error is the same one where it starts
+		 * at the same place with the same code. Otherwise errors are compared by message, across the files together,
+		 * since moved code takes its errors with it, and a relative path in one only by the file it names.
 		 */
-		async verify(what: string, same: (message: string) => string = (message) => message, problems: string[] = []) {
+		async verify(what: string, problems: string[] = [], mapOffset?: (file: string, offset: number) => number) {
 			await notify([...before.keys()].filter((file) => originals.has(file)));
-			// Errors are compared across the files together, since moved code takes its errors with it, and a
-			// relative path in one is only compared by the file it names, as moving a file changes the path.
-			const key = (diagnostic: Diagnostic) =>
-				`${diagnostic.code}:${same(diagnostic.message).replaceAll(/(["'])\.{1,2}\/(?:[^"'\n]*\/)?([^"'\n/]*)\1/g, "$1$2$1")}`;
 			const existing = new Map<string, number>();
-			for (const diagnostic of [...before.values()].flat())
-				existing.set(key(diagnostic), (existing.get(key(diagnostic)) ?? 0) + 1);
+			const count = (key: string) => existing.set(key, (existing.get(key) ?? 0) + 1);
+			for (const [file, earlier] of before) {
+				const source = originals.get(file) ?? readFileSync(file, "utf8");
+				for (const diagnostic of earlier)
+					count(
+						mapOffset
+							? byPlace(file, source, diagnostic, mapOffset(file, offsetOf(source, diagnostic.range.start)))
+							: byMessage(diagnostic),
+					);
+			}
 			for (const file of before.keys()) {
+				const source = existsSync(file) ? readFileSync(file, "utf8") : "";
 				for (const diagnostic of await errors(file)) {
-					const left = existing.get(key(diagnostic)) ?? 0;
-					if (left > 0) existing.set(key(diagnostic), left - 1);
+					const key = mapOffset ? byPlace(file, source, diagnostic) : byMessage(diagnostic);
+					const left = existing.get(key) ?? 0;
+					if (left > 0) existing.set(key, left - 1);
 					else problems.push(`${relative(root, file)}:${diagnostic.range.start.line + 1}: ${diagnostic.message}`);
 				}
 			}
@@ -284,6 +294,18 @@ function checkedEdits(
 	};
 	return checked;
 }
+
+/** An error by its message, with relative paths in it by the file they name. */
+const byMessage = (diagnostic: Diagnostic) =>
+	`${diagnostic.code}:${diagnostic.message.replaceAll(/(["'])\.{1,2}\/(?:[^"'\n]*\/)?([^"'\n/]*)\1/g, "$1$2$1")}`;
+
+/** An error by where it starts in a file and its code. */
+const byPlace = (
+	file: string,
+	source: string,
+	diagnostic: Diagnostic,
+	offset = offsetOf(source, diagnostic.range.start),
+) => `${file}:${offset}:${diagnostic.code}`;
 
 /**
  * refactor.move, checked: moves the declaration with moveDeclaration, then refuses and puts everything back if
