@@ -23,7 +23,6 @@ import { $ as bunShell, Glob } from "bun";
 import { editingFiles, executionRoot, installFileOutcomeTracking, wasEdited } from "./file-outcomes.ts";
 import {
 	file as selectFile,
-	moveDeclaration,
 	getMatchSnapshot,
 	insert,
 	isFileTarget,
@@ -1355,7 +1354,8 @@ const globals = {
 					throw new TypeError("refactor.move expects { file, symbol, to } with a symbol name");
 				if (target.symbol.includes("."))
 					throw new Error(`refactor.move only moves top-level declarations; ${target.symbol} names a member`);
-				await moveDeclaration(from, target.symbol, to, {
+				const { moveSymbol } = await import("../refactor/typescript-refactors.ts");
+				await moveSymbol(from, target.symbol, to, {
 					root: repositoryRoot,
 					scripts: scriptFiles,
 					loadingModules: filesLoadingModules,

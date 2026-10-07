@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { $ } from "bun";
 import { Lang, parse } from "@ast-grep/napi";
 import { file, move, moveDeclaration, remember, type MoveFiles } from "../src/refactor/placement.ts";
+import { moveSymbol } from "../src/refactor/typescript-refactors.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -524,12 +525,12 @@ test("a move that would leave a module variable assigned through an import is re
 	});
 
 	for (const [symbol, message] of [
-		["bump", "it assigns count"],
-		["load", "it assigns cache"],
-		["count", "count is assigned elsewhere"],
+		["bump", "Cannot assign to 'count' because it is an import"],
+		["load", "Cannot assign to 'cache' because it is an import"],
+		["count", "Cannot assign to 'count' because it is an import"],
 	])
 		expect(
-			String(await rejection(moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
+			String(await rejection(moveSymbol(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
 		).toContain(message);
 	await moveDeclaration(join(root, "src/a.ts"), "local", join(root, "src/b.ts"), everyFile(root));
 	await typeCheck(root);
@@ -629,8 +630,8 @@ test("a dependency declared as a namespace or with declare is refused rather tha
 		["g", "VERSION"],
 	])
 		expect(
-			String(await rejection(moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
-		).toContain(`it uses ${name}, which`);
+			String(await rejection(moveSymbol(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
+		).toContain(`Cannot find name '${name}'`);
 });
 
 test("a file with no relative imports gets the .js specifiers NodeNext resolution needs", async () => {
@@ -748,11 +749,9 @@ test("a helper the move would export is refused when a barrel already exports th
 
 	expect(
 		String(
-			await rejection(
-				moveDeclaration(join(root, "src/lib/a.ts"), "price", join(root, "src/lib/price.ts"), everyFile(root)),
-			),
+			await rejection(moveSymbol(join(root, "src/lib/a.ts"), "price", join(root, "src/lib/price.ts"), everyFile(root))),
 		),
-	).toContain("already exports format");
+	).toContain("has already exported a member named 'format'");
 });
 
 test("the target's default export, used by the moved code, is its own; a barrel collision in the target is refused", async () => {
@@ -773,10 +772,10 @@ test("the target's default export, used by the moved code, is its own; a barrel 
 	expect(
 		String(
 			await rejection(
-				moveDeclaration(join(root, "src/ui/source.ts"), "label", join(root, "src/ui/button.ts"), everyFile(root)),
+				moveSymbol(join(root, "src/ui/source.ts"), "label", join(root, "src/ui/button.ts"), everyFile(root)),
 			),
 		),
-	).toContain("already exports label");
+	).toContain("has already exported a member named 'label'");
 });
 
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {

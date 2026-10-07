@@ -7,6 +7,7 @@ import {
 	readFileSync,
 	readlinkSync,
 	realpathSync,
+	rmSync,
 	statSync,
 	symlinkSync,
 	unlinkSync,
@@ -24,7 +25,7 @@ import {
 	type Diagnostic,
 } from "./lsp-client.ts";
 import { relativeCandidates, resolveModule } from "./move-imports.ts";
-import { scriptLanguage, withoutComments } from "./placement.ts";
+import { moveDeclaration, scriptLanguage, withoutComments, type MoveFiles } from "./placement.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
@@ -200,40 +201,70 @@ function collapseAliases(source: string, to: string): { source: string; edits: P
  * touched, and the files that import them, must have no type errors they didn't have before. Otherwise the
  * caller puts the files back and the refactor is refused with what went wrong.
  */
-function checkedEdits(server: Parameters<typeof notifyTypeScriptServer>[0], projectRoot: string) {
+function checkedEdits(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	projectRoot: string,
+	scripts: () => string[] = () => projectScripts(projectRoot),
+) {
 	const root = realpathSync(projectRoot);
-	const originals = new Map<string, string>();
+	// Each touched file's contents before, or undefined for a file the refactor creates.
+	const originals = new Map<string, string | undefined>();
 	const before = new Map<string, Diagnostic[]>();
 	const errors = async (file: string) =>
-		(await documentDiagnostics(server, file)).filter((diagnostic) => (diagnostic.severity ?? 1) === 1);
-	return {
+		existsSync(file)
+			? (await documentDiagnostics(server, file)).filter((diagnostic) => (diagnostic.severity ?? 1) === 1)
+			: [];
+	const notify = (files: string[]) =>
+		filesChanged(
+			server,
+			files.filter((file) => originals.get(file) !== undefined && existsSync(file)),
+			files.filter((file) => originals.get(file) !== undefined && !existsSync(file)),
+			files.filter((file) => originals.get(file) === undefined && existsSync(file)),
+		);
+	const checked = {
 		root,
-		async write(changes: Map<string, string>) {
-			const fresh = [...changes.keys()].filter((file) => !originals.has(file));
-			for (const file of fresh) originals.set(file, readFileSync(file, "utf8"));
+		/** Notes the contents and errors of files about to change, and of the files that import them. */
+		async track(files: string[]) {
+			const fresh = files.filter((file) => !originals.has(file));
+			for (const file of fresh) originals.set(file, existsSync(file) ? readFileSync(file, "utf8") : undefined);
 			// A file that imports a changed one can break without changing, such as a barrel whose `export *`
 			// now exports the same name twice.
-			for (const file of [...fresh, ...importersOf(root, fresh)])
+			const existing = fresh.filter((file) => originals.get(file) !== undefined);
+			for (const file of [...fresh, ...importersOf(existing, scripts())])
 				if (!before.has(file)) before.set(file, await errors(file));
+		},
+		async write(changes: Map<string, string>) {
+			await checked.track([...changes.keys()]);
 			editingFiles([...changes.keys()], () => {
 				for (const [file, source] of changes) writeFileSync(file, source);
 			});
-			await filesChanged(server, [...changes.keys()]);
+			await notify([...changes.keys()]);
 		},
 		async restore() {
 			if (!originals.size) return;
-			editingFiles([...originals.keys()], () => {
-				for (const [file, source] of originals) writeFileSync(file, source);
+			const files = [...originals.keys()];
+			editingFiles(files, () => {
+				for (const [file, source] of originals)
+					if (source === undefined) rmSync(file, { force: true });
+					else writeFileSync(file, source);
 			});
-			await filesChanged(server, [...originals.keys()]);
+			await notify(files);
 			originals.clear();
 		},
-		/** `same` maps an error's message to how it would have read before, such as with the old name. */
-		async verify(what: string, same: (message: string) => string, problems: string[]) {
-			const key = (diagnostic: Diagnostic) => `${diagnostic.code}:${same(diagnostic.message)}`;
-			for (const [file, earlier] of before) {
-				const existing = new Map<string, number>();
-				for (const diagnostic of earlier) existing.set(key(diagnostic), (existing.get(key(diagnostic)) ?? 0) + 1);
+		/**
+		 * Refuses if a checked file has an error it didn't have before. `same` maps an error's message to how it
+		 * would have read before, such as with the old name; `problems` are any the caller found itself.
+		 */
+		async verify(what: string, same: (message: string) => string = (message) => message, problems: string[] = []) {
+			await notify([...before.keys()].filter((file) => originals.has(file)));
+			// Errors are compared across the files together, since moved code takes its errors with it, and a
+			// relative path in one is only compared by the file it names, as moving a file changes the path.
+			const key = (diagnostic: Diagnostic) =>
+				`${diagnostic.code}:${same(diagnostic.message).replaceAll(/(["'])\.{1,2}\/(?:[^"'\n]*\/)?([^"'\n/]*)\1/g, "$1$2$1")}`;
+			const existing = new Map<string, number>();
+			for (const diagnostic of [...before.values()].flat())
+				existing.set(key(diagnostic), (existing.get(key(diagnostic)) ?? 0) + 1);
+			for (const file of before.keys()) {
 				for (const diagnostic of await errors(file)) {
 					const left = existing.get(key(diagnostic)) ?? 0;
 					if (left > 0) existing.set(key(diagnostic), left - 1);
@@ -249,6 +280,27 @@ function checkedEdits(server: Parameters<typeof notifyTypeScriptServer>[0], proj
 				);
 		},
 	};
+	return checked;
+}
+
+/**
+ * refactor.move, checked: moves the declaration with moveDeclaration, then refuses and puts everything back if
+ * the source, the target or a file importing either has a type error it didn't have before, such as an import
+ * the moved code now assigns to, or a barrel that would export a name twice.
+ */
+export async function moveSymbol(from: string, symbol: string, to: string, files: MoveFiles): Promise<void> {
+	await withTypeScriptServer(files.root, async (server) => {
+		const checked = checkedEdits(server, files.root, files.scripts);
+		// The importers of the source are the files the move may repoint.
+		await checked.track([from, to, ...importersOf([from], files.scripts())]);
+		try {
+			await moveDeclaration(from, symbol, to, files);
+			await checked.verify(`refactor.move of ${symbol} to ${relative(files.root, to)}`);
+		} catch (error) {
+			await checked.restore();
+			throw error;
+		}
+	});
 }
 
 const where = (uri: string, position: Position) => `${uri}:${position.line}:${position.character}`;
@@ -384,18 +436,23 @@ function repointMovedPaths(text: string, from: string, to: string): string {
  */
 const relativeSpecifier = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*["'](\.{1,2}\/[^"']*)["']/g;
 
-/** The project's files that import one of these files by a relative path, up to a few hundred. */
-function importersOf(root: string, targets: string[]): string[] {
+/** The project's JS/TS files, as Git sees them. */
+function projectScripts(root: string): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
 		cwd: root,
 		encoding: "utf8",
 	});
 	if (listed.status !== 0) return [];
-	const reals = new Set(targets.map((target) => realpathSync(target)));
 	return listed.stdout
 		.split("\0")
 		.filter((file) => /\.[cm]?[jt]sx?$/.test(file))
-		.map((file) => resolve(root, file))
+		.map((file) => resolve(root, file));
+}
+
+/** The files among `scripts` that import one of these files by a relative path, up to a few hundred. */
+function importersOf(targets: string[], scripts: string[]): string[] {
+	const reals = new Set(targets.map((target) => realpathSync(target)));
+	return scripts
 		.filter((file) => {
 			if (reals.has(file) || !existsSync(file)) return false;
 			const text = withoutComments(file, readFileSync(file, "utf8"));
@@ -458,18 +515,20 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 			throw new Error(
 				`refactor.renameFile: TypeScript didn't update the import of ${JSON.stringify(options.from)} in ${missed.map((file) => JSON.stringify(relative(root, file))).join(", ")}, so nothing was renamed. It doesn't update \`require()\` calls, and a \`declare module\` augmentation of the file stops it; update those paths with sg.rewrite and move the file with Bun.`,
 			);
-		editingFiles([...changes.keys(), from, to], () => {
-			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
-			mkdirSync(dirname(to), { recursive: true });
-			moveFile(from, to);
-		});
-		await notifyTypeScriptServer(server, "workspace/didRenameFiles", { files });
-		await filesChanged(
-			server,
-			[...changes.keys()].filter((file) => file !== from),
-			[from],
-			[to],
-		);
+		const checked = checkedEdits(server, root);
+		await checked.track([...changes.keys(), from, to]);
+		try {
+			editingFiles([...changes.keys(), from, to], () => {
+				for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
+				mkdirSync(dirname(to), { recursive: true });
+				moveFile(from, to);
+			});
+			await notifyTypeScriptServer(server, "workspace/didRenameFiles", { files });
+			await checked.verify(`refactor.renameFile of ${options.from} to ${options.to}`);
+		} catch (error) {
+			await checked.restore();
+			throw error;
+		}
 	});
 }
 
