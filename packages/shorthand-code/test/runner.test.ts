@@ -494,6 +494,39 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			);
 		});
 
+		test("an accessor pair renames as one property, and a barrel collision is refused", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, target: "es2022", module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/temp.ts":
+					"export class Temp {\n  #c = 0;\n  get celsius() { return this.#c; }\n  set celsius(v: number) { this.#c = v; }\n}\n",
+				"src/utils/date.ts": 'export function formatDate(d: number) { return "date:" + d; }\n',
+				"src/utils/number.ts": 'export function format(n: number) { return "num:" + n; }\n',
+				"src/utils/index.ts": 'export * from "./date";\nexport * from "./number";\n',
+				"src/other.ts": 'import { formatDate } from "./utils";\nexport const s = formatDate(1);\n',
+			});
+			const accessor = await run(
+				repo,
+				`await refactor.rename({ file: "src/temp.ts", symbol: "Temp.celsius", to: "degrees" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(accessor.exitCode, accessor.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/temp.ts")).text()).toContain("get degrees() {");
+			expect(await Bun.file(path.join(repo, "src/temp.ts")).text()).toContain("set degrees(v: number) {");
+			const barrel = await run(
+				repo,
+				`await refactor.rename({ file: "src/utils/date.ts", symbol: "formatDate", to: "format" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(barrel.exitCode).toBe(1);
+			expect(barrel.output).toContain("src/utils/index.ts re-exports src/utils/date.ts and already exports format");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",

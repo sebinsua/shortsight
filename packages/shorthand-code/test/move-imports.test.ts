@@ -710,6 +710,22 @@ test("a shorthand use in the target counts as a use, and the moved code goes aft
 	).toContain("uses it as the file loads");
 });
 
+test("a target's type-only import of something the moved code uses as a value becomes a value import", async () => {
+	const root = project({
+		"src/model.ts":
+			"export class User {\n\tconstructor(public name: string) {}\n}\nexport interface Role {\n\tr: string;\n}\n",
+		"src/factory.ts":
+			'import { User } from "./model";\nexport function makeUser(name: string) {\n\treturn new User(name);\n}\n',
+		"src/repo.ts":
+			'import type { User, Role } from "./model";\nexport function save(u: User, r: Role) {\n\treturn [u, r];\n}\n',
+	});
+
+	await moveDeclaration(join(root, "src/factory.ts"), "makeUser", join(root, "src/repo.ts"), everyFile(root));
+
+	expect(read(root, "src/repo.ts")).toStartWith('import { User, type Role } from "./model";\n');
+	await typeCheck(root);
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

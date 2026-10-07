@@ -681,6 +681,8 @@ export function planImports(input: MoveInput): ImportPlan | null {
 
 	// Dependencies: copy the source's imports, and import (exporting if needed) the source's own declarations.
 	const fromSource: { text: string; typeOnly: boolean }[] = [];
+	// The target's type-only imports of what the moved code uses as a value, which must become value imports.
+	const toValue = new Set<Binding>();
 	const free = input.analysis.dependencies;
 	const order = [...sourceBindings.map((binding) => binding.local), ...source.declarations.keys()];
 	const ordered = [...order.filter((name) => free.has(name)), ...[...free].filter((name) => !order.includes(name))];
@@ -705,6 +707,7 @@ export function planImports(input: MoveInput): ImportPlan | null {
 					existing.imported === binding.imported &&
 					(resolveModule(targetFile, existing.module) ?? existing.module) === (resolved ?? binding.module);
 				if (!sameBinding) throw new MoveError(`${targetFile} already has a different ${name}`);
+				if (existing!.typeOnly && !binding.typeOnly) toValue.add(existing!);
 				continue;
 			}
 			// Relative specifiers are re-pointed from the target; aliases and packages mean the same from anywhere.
@@ -722,7 +725,10 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				);
 		} else if (local) {
 			if (existing || target.declarations.has(name)) {
-				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) continue;
+				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) {
+					if (existing.typeOnly && !local.type) toValue.add(existing);
+					continue;
+				}
 				throw new MoveError(`${targetFile} already has a different ${name}`);
 			}
 			if (local.isDefault) {
@@ -758,6 +764,28 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			// A global in the source would refer to the target's own binding after the move.
 			throw new MoveError(`${name} is a global where it is used, but ${targetFile} declares its own ${name}`);
 		}
+	}
+	for (const statement of new Set([...toValue].map((binding) => binding.statement))) {
+		const bindings = targetBindings.filter((binding) => binding.statement === statement);
+		if (nowLocal.has(statement) || bindings.some((binding) => binding.kind !== "named"))
+			throw new MoveError(
+				`it uses ${[...toValue][0]!.local} as a value, but ${targetFile} imports it with \`import type\``,
+			);
+		const { start, end } = statement.range();
+		targetEdits.push({
+			start: start.index,
+			end: end.index,
+			text: importStatement(
+				"import",
+				bindings.map((binding) => ({
+					text: binding.text.replace(/^type\s+/, ""),
+					typeOnly: binding.typeOnly && !toValue.has(binding),
+				})),
+				bindings[0]!.module,
+				quoteOf(statement),
+				attributesOf(statement),
+			),
+		});
 	}
 	if (fromSource.length) {
 		const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));

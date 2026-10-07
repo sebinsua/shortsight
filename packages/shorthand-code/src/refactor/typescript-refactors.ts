@@ -61,7 +61,13 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			"textDocument/documentSymbol",
 			{ textDocument: { uri } },
 		);
-		const position = symbolPosition(symbols ?? [], options.symbol, options.file, "refactor.rename");
+		const position = symbolPosition(
+			symbols ?? [],
+			options.symbol,
+			options.file,
+			"refactor.rename",
+			readFileSync(file, "utf8"),
+		);
 		const edit = await server.sendRequest<WorkspaceEdit | null>("textDocument/rename", {
 			textDocument: { uri },
 			position,
@@ -72,6 +78,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const binding = declaresShorthandBinding(file, position);
 		if (binding) dropPropertyEdits(edit);
 		const renamingProperty = !binding && declaresProperty(file, position);
+		if (!renamingProperty) refuseBarrelCollision(root, file, options.symbol, options.to);
 		if (renamingProperty) refuseMemberCollision(file, position, options.symbol, options.to);
 		refuseCapturedRename(edit, options.symbol, options.to, renamingProperty);
 		const changes = planWorkspaceEdit(
@@ -99,7 +106,13 @@ export async function references(root: string, options: ReferencesOptions): Prom
 			"textDocument/documentSymbol",
 			{ textDocument: { uri } },
 		);
-		const position = symbolPosition(symbols ?? [], options.symbol, options.file, "refactor.references");
+		const position = symbolPosition(
+			symbols ?? [],
+			options.symbol,
+			options.file,
+			"refactor.references",
+			readFileSync(file, "utf8"),
+		);
 		return (
 			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
 				textDocument: { uri },
@@ -445,6 +458,64 @@ function offsetOf(source: string, position: Position): number {
 	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character + bom;
 }
 
+/** Whether a module's text exports `name`: by a declaration, or in an export list (as itself or an alias). */
+function exportsName(text: string, name: string): boolean {
+	const escaped = name.replace(/\$/g, "\\$");
+	const declaration = new RegExp(
+		`\\bexport\\s+(?:declare\\s+)?(?:async\\s+)?(?:const|let|var|function\\*?|class|abstract\\s+class|interface|type|enum|namespace)\\s+${escaped}\\b`,
+	);
+	const listed = new RegExp(`\\bexport\\s*(?:type\\s*)?\\{[^}]*(?:^|[\\s,{]|as\\s+)${escaped}\\s*(?:,|\\}|$)`, "m");
+	return declaration.test(text) || listed.test(text);
+}
+
+/**
+ * Refuses a rename that a barrel would turn into a different symbol: one that re-exports the renamed declaration's
+ * file (`export * from "./date"`) and already exports the new name, itself or through its other `export *` modules,
+ * would make its importers of the new name ambiguous, or silently resolve them to the other one.
+ */
+function refuseBarrelCollision(root: string, file: string, symbol: string, to: string): void {
+	const source = readFileSync(file, "utf8");
+	const name = symbol.split(".").at(-1)!;
+	if (symbol.includes(".") || !exportsName(source, name)) return;
+	const real = realpathSync(file);
+	const reexport = /\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
+	for (const barrel of scriptFiles(root)) {
+		if (barrel === file) continue;
+		const text = readFileSync(barrel, "utf8");
+		const modules = [...text.matchAll(reexport)].map((match) => ({
+			star: match[0].includes("*"),
+			path: resolveModule(barrel, match[1]!),
+		}));
+		if (!modules.some((module) => module.path === real)) continue;
+		// The barrel's own exports, without the re-export of the renamed file, which it would follow.
+		const own = text.replace(reexport, (whole, specifier: string) =>
+			resolveModule(barrel, specifier) === real ? "" : whole,
+		);
+		const other = modules.find(
+			(module) =>
+				module.star && module.path && module.path !== real && exportsName(readFileSync(module.path, "utf8"), to),
+		);
+		if (exportsName(own, to) || other)
+			throw new Error(
+				`refactor.rename: ${relative(root, barrel)} re-exports ${relative(root, file)} and already exports ${to}${other ? ` from ${relative(root, other.path!)}` : ""}, so its importers of ${to} would change meaning. Pick another name.`,
+			);
+	}
+}
+
+/** Git-visible JS and TS files. */
+function scriptFiles(root: string): string[] {
+	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+		cwd: root,
+		encoding: "utf8",
+	});
+	if (listed.status !== 0) return [];
+	return listed.stdout
+		.split("\0")
+		.filter((path) => /\.[cm]?[jt]sx?$/.test(path))
+		.map((path) => resolve(root, path))
+		.filter((path) => existsSync(path));
+}
+
 /** Git-visible scripts with a relative import, export, require or import() of `target`. */
 function relativeImporters(root: string, target: string): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
@@ -538,6 +609,7 @@ function symbolPosition(
 	name: string,
 	file: string,
 	helper: string,
+	source = "",
 ): Position {
 	const entries: { name: string; position: Position }[] = [];
 	const visit = (items: Array<DocumentSymbol | SymbolInformation>, container = "") => {
@@ -562,6 +634,19 @@ function symbolPosition(
 	// otherwise `parseUser`, offered below as a choice, would be just as ambiguous.
 	const topLevel = found.filter((entry) => entry.name === name);
 	if (found.length > 1 && topLevel.length === 1) return topLevel[0]!.position;
+	// A property's `get` and `set` accessors are one symbol to TypeScript, listed twice: either renames both.
+	// The server gives an accessor's position at its `get` or `set` keyword; the name follows it.
+	const lines = source.split("\n");
+	const accessorName = ({ line, character }: Position): Position | undefined => {
+		const keyword = /^(?:static\s+)?[gs]et\s+/.exec(lines[line]?.slice(character) ?? "");
+		return keyword ? { line, character: character + keyword[0].length } : undefined;
+	};
+	if (
+		found.length > 1 &&
+		new Set(found.map((entry) => entry.name)).size === 1 &&
+		found.every((entry) => accessorName(entry.position))
+	)
+		return accessorName(found[0]!.position)!;
 	if (found.length > 1) {
 		const names = [...new Set(found.map((entry) => entry.name))];
 		if (names.length > 1)
