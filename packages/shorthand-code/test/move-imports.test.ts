@@ -681,6 +681,35 @@ test("a dependency exported under another name is imported by that name", async 
 	}
 });
 
+test("a shorthand use in the target counts as a use, and the moved code goes after what it needs there", async () => {
+	const root = project({
+		"src/constants.ts": "export const LIMIT = 10;\nexport const TIMEOUT = 5;\n",
+		"src/config.ts": 'import { LIMIT, TIMEOUT } from "./constants";\nexport const config = { LIMIT, TIMEOUT };\n',
+		"src/target.ts":
+			'import { SCALED } from "./source";\nexport function describe() {\n\treturn SCALED;\n}\nexport const BASE = 10;\n',
+		"src/source.ts": 'import { BASE } from "./target";\nexport const SCALED = BASE * 2;\n',
+		"src/eager.ts": 'import { EAGER } from "./early";\nexport const doubled = EAGER * 2;\nexport const BASE2 = 10;\n',
+		"src/early.ts": 'import { BASE2 } from "./eager";\nexport const EAGER = BASE2 * 2;\n',
+	});
+
+	await moveDeclaration(join(root, "src/constants.ts"), "LIMIT", join(root, "src/config.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/source.ts"), "SCALED", join(root, "src/target.ts"), everyFile(root));
+
+	expect(read(root, "src/config.ts")).toBe(
+		'import { TIMEOUT } from "./constants";\nexport const LIMIT = 10;\nexport const config = { LIMIT, TIMEOUT };\n',
+	);
+	expect(read(root, "src/target.ts")).toBe(
+		"export function describe() {\n\treturn SCALED;\n}\nexport const BASE = 10;\nexport const SCALED = BASE * 2;\n",
+	);
+	expect(
+		String(
+			await rejection(
+				moveDeclaration(join(root, "src/early.ts"), "EAGER", join(root, "src/eager.ts"), everyFile(root)),
+			),
+		),
+	).toContain("uses it as the file loads");
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

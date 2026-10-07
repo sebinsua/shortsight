@@ -469,6 +469,31 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(collision.output).toContain("would become a second member named fullName");
 		});
 
+		test("renames on the first line of a file with a byte order mark land where TypeScript means", async () => {
+			const bom = String.fromCharCode(0xfeff);
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/a.ts": `${bom}export function parseUser(s: string) { return s; }\n`,
+				"src/b.ts": `${bom}import { parseUser } from "./a";\nexport const x = parseUser("a");\n`,
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "parseUser", to: "decodeUser" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			// Read as bytes: Bun's text() drops a byte order mark.
+			const read = async (file: string) => Buffer.from(await Bun.file(path.join(repo, file)).bytes()).toString("utf8");
+			expect(await read("src/a.ts")).toBe(`${bom}export function decodeUser(s: string) { return s; }\n`);
+			expect(await read("src/b.ts")).toBe(
+				`${bom}import { decodeUser } from "./a";\nexport const x = decodeUser("a");\n`,
+			);
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",

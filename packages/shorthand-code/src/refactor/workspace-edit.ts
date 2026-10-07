@@ -100,7 +100,8 @@ function offsetAt(source: string, position: Position, file: string): number {
 		position.character < 0
 	)
 		throw new Error(`TypeScript returned an invalid edit position for ${JSON.stringify(file)}`);
-	let offset = 0;
+	// TypeScript counts characters after a byte order mark, which the source still starts with.
+	let offset = source.startsWith("\uFEFF") ? 1 : 0;
 	for (let line = 0; line < position.line; line++) {
 		const newline = source.indexOf("\n", offset);
 		if (newline < 0) throw new Error(`TypeScript returned an edit past the end of ${JSON.stringify(file)}`);

@@ -1,6 +1,6 @@
 /** Syntax placement for file-backed JS/TS matches. All offsets refer to one source snapshot. */
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { analyzeMove, type MoveAnalysis } from "./move-analysis.ts";
@@ -48,7 +48,8 @@ const languages: Record<string, Lang> = {
 };
 
 /** The ast-grep language for a JS/TS filename, by extension. */
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+// ignoreBOM keeps a byte order mark in the text, as readFileSync does, rather than dropping it.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Thrown for a file that isn't valid UTF-8: decoding and writing it back would replace those bytes. */
 export class NotUtf8Error extends Error {}
@@ -458,36 +459,74 @@ export async function moveDeclaration(from: string, symbol: string, to: string, 
 	});
 	const match = remember({ file: from, text: node.text(), node }, source);
 	return editingFiles([from, to], () =>
-		moveNodes(match, destinationIn(to, declaredNames(node)), (text) => repointRelativePaths(text, from, to), {
-			...files,
-			analysis,
-		}),
+		moveNodes(
+			match,
+			destinationIn(to, declaredNames(node), analysis.dependencies),
+			(text) => repointRelativePaths(text, from, to),
+			{
+				...files,
+				analysis,
+			},
+		),
 	);
 }
 
+const FUNCTION_BODIES = new Set([
+	"function_declaration",
+	"function_expression",
+	"arrow_function",
+	"method_definition",
+	"generator_function_declaration",
+	"generator_function",
+]);
+
 /**
- * Where a moved declaration goes in `to`: before the first top-level statement there that uses it, since code that
- * runs while the module loads (`export const doubled = LIMIT * 2`, `class Child extends Base`) needs it declared
- * first; otherwise at the end.
+ * Where a moved declaration goes in `to`. Code that runs while the module loads (`export const doubled = LIMIT * 2`,
+ * `class Child extends Base`, `{ LIMIT }`) needs it declared first, and it needs the target's declarations it uses
+ * declared before it. So it goes before the first statement that uses it, unless that is before the last declaration
+ * it depends on and only uses it inside a function, when it goes after that; otherwise at the end.
  */
-function destinationIn(to: string, names: string[]): Destination {
+function destinationIn(to: string, names: string[], dependencies: Set<string>): Destination {
 	const lang = scriptLanguage(to);
 	if (!lang || !existsSync(to)) return { endOf: file(to) };
 	const source = readUtf8(to);
 	const wanted = new Set(names);
-	const user = parse(lang, source)
+	const statements = parse(lang, source)
 		.root()
 		.children()
-		.find(
+		.filter(
 			(candidate) =>
 				candidate.isNamed() &&
 				!["import_statement", "comment", "hash_bang_line"].includes(String(candidate.kind())) &&
-				!(candidate.kind() === "export_statement" && candidate.field("source")) &&
-				candidate
-					.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "type_identifier" }] } })
-					.some((node) => wanted.has(node.text())),
+				!(candidate.kind() === "export_statement" && candidate.field("source")),
 		);
-	return user ? { before: remember({ file: to, text: user.text(), node: user }, source) } : { endOf: file(to) };
+	const uses = (candidate: SgNode) =>
+		candidate
+			.findAll({
+				rule: { any: ["identifier", "type_identifier", "shorthand_property_identifier"].map((kind) => ({ kind })) },
+			})
+			.filter((node) => wanted.has(node.text()));
+	const firstUse = statements.findIndex((candidate) => uses(candidate).length > 0);
+	const lastDependency = statements.findLastIndex((candidate) =>
+		declaredNames(candidate).some((name) => dependencies.has(name)),
+	);
+	const place = (index: number, key: "before" | "after"): Destination => {
+		const chosen = statements[index]!;
+		const target = remember({ file: to, text: chosen.text(), node: chosen }, source);
+		return key === "before" ? { before: target } : { after: target };
+	};
+	if (firstUse < 0) return lastDependency < 0 ? { endOf: file(to) } : place(lastDependency, "after");
+	if (firstUse > lastDependency) return place(firstUse, "before");
+	const loading = uses(statements[firstUse]!).some((node) => {
+		for (let parent = node.parent(); parent; parent = parent.parent())
+			if (FUNCTION_BODIES.has(String(parent.kind()))) return false;
+		return true;
+	});
+	if (loading)
+		throw new Error(
+			`refactor.move: ${names.join(", ")} would have to come before ${statements[firstUse]!.text().split("\n")[0]} in ${relative(process.cwd(), to)}, which uses it as the file loads, and after a declaration there it depends on`,
+		);
+	return place(lastDependency, "after");
 }
 
 function moveNodes(

@@ -440,7 +440,9 @@ function declaresProperty(file: string, position: Position): boolean {
 
 function offsetOf(source: string, position: Position): number {
 	const lines = source.split("\n");
-	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character;
+	// TypeScript counts characters after a byte order mark; the source and ast-grep's offsets include it.
+	const bom = source.startsWith("\uFEFF") && position.line === 0 ? 1 : 0;
+	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character + bom;
 }
 
 /** Git-visible scripts with a relative import, export, require or import() of `target`. */
