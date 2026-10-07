@@ -14,6 +14,7 @@ import {
 	type Position,
 	type AdjustEdit,
 	type Range,
+	type TextEdit,
 	type WorkspaceEdit,
 } from "./workspace-edit.ts";
 
@@ -66,7 +67,13 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position,
 			newName: options.to,
 		});
-		refuseCapturedRename(edit, options.symbol, options.to, declaresProperty(file, position));
+		// `export const { auth } = NextAuth()` declares a variable that reads a property, and the server renames them as
+		// one: everywhere the property is named would change too. Renaming the variable leaves the property alone.
+		const binding = declaresShorthandBinding(file, position);
+		if (binding) dropPropertyEdits(edit);
+		const renamingProperty = !binding && declaresProperty(file, position);
+		if (renamingProperty) refuseMemberCollision(file, position, options.symbol, options.to);
+		refuseCapturedRename(edit, options.symbol, options.to, renamingProperty);
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
@@ -327,6 +334,70 @@ function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: st
 			}
 		}
 	}
+}
+
+const MEMBER_LISTS = new Set(["interface_body", "object_type", "class_body", "object", "enum_body"]);
+
+/** Refuses renaming a member to the name of another member of the same interface, class, type or object. */
+function refuseMemberCollision(file: string, position: Position, symbol: string, to: string): void {
+	const lang = scriptLanguage(file);
+	if (!lang) return;
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, position);
+	const root = parse(lang, source).root();
+	const declared = root
+		.findAll({
+			rule: {
+				any: ["property_identifier", "private_property_identifier", "required_parameter", "optional_parameter"].map(
+					(kind) => ({ kind }),
+				),
+			},
+		})
+		.find((node) => node.range().start.index === offset);
+	let list = declared?.parent() ?? null;
+	while (list && !MEMBER_LISTS.has(String(list.kind()))) list = list.parent();
+	if (!list) return;
+	const names = list
+		.children()
+		.flatMap((member) => [member.field("name"), member.field("key"), member.field("property")])
+		.filter((name): name is SgNode => name !== null)
+		.map((name) => name.text());
+	if (names.includes(to))
+		throw new Error(
+			`refactor.rename: ${JSON.stringify(symbol)} would become a second member named ${to}; pick another name, or rename that ${to} first.`,
+		);
+}
+
+/** Whether the name at `position` is a shorthand in a destructuring declaration, `const { auth } = …`. */
+function declaresShorthandBinding(file: string, position: Position): boolean {
+	const lang = scriptLanguage(file);
+	if (!lang) return false;
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, position);
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { kind: "shorthand_property_identifier_pattern" } })
+		.some((node) => node.range().start.index === offset);
+}
+
+/** Leaves out the edits that land on property names: a member access, a key, or a type's member. */
+function dropPropertyEdits(edit: WorkspaceEdit | null): void {
+	const kept = (uri: string, edits: TextEdit[]) => {
+		const file = fileURLToPath(uri);
+		const lang = scriptLanguage(file);
+		if (!lang) return edits;
+		const source = readFileSync(file, "utf8");
+		const properties = new Set(
+			parse(lang, source)
+				.root()
+				.findAll({ rule: { any: [{ kind: "property_identifier" }, { kind: "private_property_identifier" }] } })
+				.map((node) => node.range().start.index),
+		);
+		return edits.filter(({ range }) => !properties.has(offsetOf(source, range.start)));
+	};
+	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
+	for (const change of edit?.documentChanges ?? [])
+		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
 }
 
 /** A constructor parameter that also declares a property: `public name: string`, `readonly id: number`. */

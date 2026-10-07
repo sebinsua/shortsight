@@ -169,6 +169,15 @@ const namespaceName = (node: Node) =>
 		? node.name.text
 		: undefined;
 
+/** A function or class the file exports as its default, which the graph names `default` whatever its own name. */
+function defaultExport(node: Node): boolean {
+	return (
+		(isFunctionDeclaration(node) || isClassDeclaration(node)) &&
+		hasModifier(node, SyntaxKind.DefaultKeyword) &&
+		isSourceFile(node.parent)
+	);
+}
+
 // A declaration's own name and kind, with whether the graph has a node for it.
 function declare(
 	node: Node,
@@ -237,7 +246,7 @@ export function indexDeclarations(source: SourceFile): DeclarationIndex {
 				name: [...(property ? (context.className ?? context.names) : context.names), own.name].join("."),
 				kind: own.kind,
 				...(own.node
-					? { graphName: [...context.graphNames, own.name].join(".") }
+					? { graphName: [...context.graphNames, defaultExport(node) ? "default" : own.name].join(".") }
 					: { unindexed: local ? ("local" as const) : ("member" as const) }),
 				local,
 				exported:
@@ -249,7 +258,8 @@ export function indexDeclarations(source: SourceFile): DeclarationIndex {
 		}
 		const segment = own?.name ?? namespaceName(node);
 		const names = segment === undefined ? context.names : [...context.names, segment];
-		const graphNames = segment === undefined ? context.graphNames : [...context.graphNames, segment];
+		const graphNames =
+			segment === undefined ? context.graphNames : [...context.graphNames, defaultExport(node) ? "default" : segment];
 		const functionLike = isFunctionLike(node);
 		const literal = node.kind === SyntaxKind.TypeLiteral || isObjectLiteralExpression(node) || isClassExpression(node);
 		const members: Members | undefined =

@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
+import { REFUSED, RefusedRunError } from "../transaction/transaction-journal.ts";
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
 import { measure } from "../runner/diagnostics.ts";
@@ -46,10 +47,12 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 		});
 		let closed = false;
 		let dependencyConflicts: string[] | undefined;
+		let refusal: string | undefined;
 
 		return {
 			original: (file) => observation.original(file),
 			dependencyConflicts: async () => {
+				if (refusal) throw new RefusedRunError(refusal);
 				if (!dependencyConflicts)
 					throw new Error("Transaction observation did not finish successfully; nothing can be applied.");
 				return dependencyConflicts;
@@ -86,7 +89,13 @@ export async function openMacOverlay(repo: string, tempDir: string): Promise<Ove
 				closed = true;
 				try {
 					await measure("unmounting AgentFS", () => unmount(mount));
-					dependencyConflicts = await observation.finish();
+					try {
+						dependencyConflicts = await observation.finish();
+					} catch (error) {
+						// A refusal isn't a failure to clean up: it's why nothing will be applied (see dependencyConflicts).
+						if (!(error instanceof Error && error.message.startsWith(REFUSED))) throw error;
+						refusal = error.message;
+					}
 				} finally {
 					await observation.abort();
 					server.kill();

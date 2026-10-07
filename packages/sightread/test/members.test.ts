@@ -259,3 +259,12 @@ test("declarations the graph merges under one name are told apart by their full 
 	expect(trace.nodes.map(({ name }) => name)).toEqual(["B.b", "B.hidden"]);
 	expect(trace.edges.map(({ kind }) => kind)).toEqual(["calls", "calls"]);
 });
+
+test("a default export and its members are named as the graph names them", async () => {
+	const declarations = await parseDeclarations(
+		"page.ts",
+		"export default class Page { render() { return 1; } }\nexport function other() { return 2; }\n",
+	);
+	const graphNames = Object.fromEntries(declarations.map(({ name, graphName }) => [name, graphName]));
+	expect(graphNames).toEqual({ Page: "default", "Page.render": "default.render", other: undefined });
+});

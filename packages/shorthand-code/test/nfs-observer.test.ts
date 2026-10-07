@@ -144,7 +144,8 @@ test("directory rename records originals for every destination descendant", asyn
 		expect(await fresh.original("destination/nested/child")).toBeNull();
 		expect((await fresh.original("source/nested/child"))?.type).toBe("file");
 		await fresh.seal();
-		expect(await fresh.conflicts()).toEqual([]);
+		// AgentFS would lose the directory's files, so a rename of one from before the run is refused.
+		await expect(fresh.conflicts()).rejects.toThrow('Not applied: renaming the directory "source"');
 	}
 });
 

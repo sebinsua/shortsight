@@ -15,6 +15,12 @@ interface Baseline {
 	digest?: string;
 }
 
+/** How a refusal's message starts, so it survives crossing to and from the observation worker as text. */
+export const REFUSED = "Not applied: ";
+
+/** A run whose changes can't be applied correctly; reported as its message alone. */
+export class RefusedRunError extends Error {}
+
 export class IncompleteObservationError extends Error {
 	constructor(message: string) {
 		super(`Incomplete transaction observation: ${message}`);
@@ -84,6 +90,16 @@ export class TransactionJournal {
 	invalidate(reason: string): void {
 		this.failure ??= new IncompleteObservationError(reason);
 	}
+
+	/**
+	 * Something the program did can't be applied correctly. Observation carries on, so the program and its cleanup
+	 * aren't disturbed, but validation refuses the transaction, so nothing is applied.
+	 */
+	refuse(reason: string): void {
+		this.refusal ??= reason;
+	}
+
+	private refusal: string | undefined;
 
 	observe(file: string, observation: Observation = "contents"): Promise<void> {
 		const operation = this.queue.then(async () => {
@@ -186,6 +202,7 @@ export class TransactionJournal {
 	async conflicts(): Promise<string[]> {
 		await this.queue;
 		this.assertUsable();
+		if (this.refusal) throw new RefusedRunError(REFUSED + this.refusal);
 		if (!this.sealed) throw new IncompleteObservationError("validation before sealing");
 		const conflicts = new Set<string>();
 		for (const [file, expected] of this.ancestors) {

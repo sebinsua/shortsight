@@ -20,6 +20,7 @@ import * as path from "node:path";
 import { Lang, parse } from "@ast-grep/napi";
 import { $ } from "bun";
 import { structuredPatch } from "diff";
+import { RefusedRunError } from "../transaction/transaction-journal.ts";
 import { openLinuxOverlay } from "../linux/overlay-linux.ts";
 import { openMacOverlay } from "../macos/overlay-macos.ts";
 import { discardedEdits, outsideRepositoryHint, typeScriptApiHint } from "./program-lint.ts";
@@ -1377,7 +1378,7 @@ if (import.meta.main) {
 		completed.value.diagnostics = completed.diagnostics;
 		console.log(JSON.stringify(completed.value));
 	} catch (error) {
-		console.error(error instanceof OutsideRepositoryError ? error.message : error);
+		console.error(error instanceof OutsideRepositoryError || error instanceof RefusedRunError ? error.message : error);
 		if (diagnostics && !hasDiagnosticChannel) console.error(diagnosticLines(diagnostics).join("\n"));
 		process.exitCode = 1;
 	}

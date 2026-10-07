@@ -12,7 +12,7 @@ export interface Range {
 	end: Position;
 }
 
-interface TextEdit {
+export interface TextEdit {
 	range: Range;
 	newText: string;
 }

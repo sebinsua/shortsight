@@ -176,6 +176,17 @@ test("startOf a file goes after its shebang and directives", () => {
 	expect(readFileSync(path, "utf8")).toBe('#!/usr/bin/env node\n"use client";\nconst a = 1;\nmain();\n');
 });
 
+test("a declaration stands for the export around it, and a file the grammar can't fully parse still takes placements", () => {
+	const path = fixture(
+		'export type * from "./types";\n/** Old. */\nexport function obsolete() {\n\treturn 1;\n}\nexport const keep = 1;\n',
+	);
+	remove(match(path, "function obsolete($$$P) { $$$B }"));
+	insert("export const more = 2;", { after: match(path, "const keep = $V") });
+	expect(readFileSync(path, "utf8")).toBe(
+		'export type * from "./types";\nexport const keep = 1;\nexport const more = 2;\n',
+	);
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

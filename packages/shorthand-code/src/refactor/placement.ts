@@ -113,10 +113,14 @@ function snapshot(match: Match): Snapshot {
 
 /**
  * An expression that is all of its statement stands for that statement: without semicolons, `save(a)` matches the
- * call, and a pattern `save(a);` matches nothing, so placement would otherwise have no way to select it.
+ * call, and a pattern `save(a);` matches nothing, so placement would otherwise have no way to select it. Likewise a
+ * declaration stands for the `export` statement around it.
  */
 function wholeStatement(node: SgNode): SgNode {
 	const parent = node.parent();
+	// `function obsolete() {}` matches inside `export function obsolete() {}`: the statement is the export.
+	if (parent?.kind() === "export_statement" && parent.field("declaration") && at(parent.field("declaration")!, node))
+		return parent;
 	if (parent?.kind() !== "expression_statement" || !container(parent.parent() ?? parent)) return node;
 	const named = parent.namedChildren().filter((child) => child.kind() !== "comment");
 	return named.length === 1 && at(named[0]!, node) ? parent : node;
@@ -392,7 +396,9 @@ function apply(plans: { saved: Snapshot; edits: Edit[] }[]) {
 		}
 		const lang = languages[saved.file.split(".").pop()!];
 		const root = parse(lang, output).root();
-		if (hasSyntaxError(root)) {
+		// Only errors the placement introduces: the grammar can't parse some valid TypeScript (`export type * from`),
+		// and a file that already has such a gap mustn't make every placement in it fail.
+		if (hasSyntaxError(root) && !hasSyntaxError(parse(lang, saved.source).root())) {
 			throw new Error(`Placement would produce invalid syntax in ${saved.file}`);
 		}
 		validateBoundaries(saved, edits, root);

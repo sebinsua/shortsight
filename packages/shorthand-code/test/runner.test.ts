@@ -435,6 +435,40 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			);
 		});
 
+		test("renaming a destructured variable leaves the property it reads alone, and a member can't take another's name", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/lib.ts":
+					'export interface Result { auth: () => string; fullName: string }\nexport function NextAuth(): Result { return { auth: () => "s", fullName: "f" }; }\n',
+				"src/a.ts":
+					'import { NextAuth } from "./lib";\nexport const { auth } = NextAuth();\nexport const s = auth();\n',
+				"src/b.ts": 'import { NextAuth } from "./lib";\nexport const t = NextAuth().auth();\n',
+			});
+			const renamed = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "auth", to: "getSession" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(renamed.exitCode, renamed.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+				'import { NextAuth } from "./lib";\nexport const { auth: getSession } = NextAuth();\nexport const s = getSession();\n',
+			);
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("NextAuth().auth()");
+			const collision = await run(
+				repo,
+				`await refactor.rename({ file: "src/lib.ts", symbol: "Result.auth", to: "fullName" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(collision.exitCode).toBe(1);
+			expect(collision.output).toContain("would become a second member named fullName");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3018,6 +3052,18 @@ console.log((await $\`git status --short\`.text()).trim() === "", process.cwd().
 		expect(result.output).toContain('1\n["pkg/src/a.ts"] [{"file":"src/a.ts","line":1,"text":"foo(1);"}]');
 		expect(result.output).toContain("true true");
 	});
+
+	test.skipIf(process.platform !== "darwin")(
+		"on macOS, renaming a directory from before the run is refused, not applied without its files",
+		async () => {
+			const repo = await makeRepo({ "src/utils/a.ts": "a\n", "src/utils/b.ts": "b\n" });
+			const runner = startRunner(repo, 'import { renameSync } from "node:fs"; renameSync("src/utils", "src/helpers");');
+			const { stderr } = await runnerOutcome(runner);
+			expect(stderr).toContain('Not applied: renaming the directory "src/utils" isn\'t supported on macOS');
+			expect(await Bun.file(path.join(repo, "src/utils/a.ts")).text()).toBe("a\n");
+			expect(await Bun.file(path.join(repo, "src/helpers/a.ts")).exists()).toBe(false);
+		},
+	);
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });

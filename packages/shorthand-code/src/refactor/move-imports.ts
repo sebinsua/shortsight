@@ -281,11 +281,14 @@ interface TopLevel {
 	declarations: Map<string, TopLevelEntry[]>;
 	/** Names exported by a local list such as `export { a, b as c }`. */
 	listed: Set<string>;
+	/** What a listed name is exported as: `b` as `c` in `export { b as c }`, or `default`. */
+	exportedAs: Map<string, string[]>;
 }
 
 function topLevel(root: SgNode): TopLevel {
 	const declarations = new Map<string, TopLevelEntry[]>();
 	const listed = new Set<string>();
+	const exportedAs = new Map<string, string[]>();
 	const add = (name: string, entry: TopLevelEntry) =>
 		declarations.set(name, [...(declarations.get(name) ?? []), entry]);
 	for (const statement of root.children()) {
@@ -316,10 +319,17 @@ function topLevel(root: SgNode): TopLevel {
 		}
 		if (statement.kind() === "export_statement" && !statement.field("source")) {
 			const clause = statement.children().find((child) => child.kind() === "export_clause");
-			for (const specifier of clause ? specifiersOf(clause) : []) listed.add(specifier.field("name")!.text());
+			for (const specifier of clause ? specifiersOf(clause) : []) {
+				const local = specifier.field("name")!.text();
+				listed.add(local);
+				exportedAs.set(local, [
+					...(exportedAs.get(local) ?? []),
+					(specifier.field("alias") ?? specifier.field("name"))!.text(),
+				]);
+			}
 		}
 	}
-	return { declarations, listed };
+	return { declarations, listed, exportedAs };
 }
 
 const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -548,9 +558,12 @@ function withoutSpecifiers(statement: SgNode, drop: (imported: string, local: st
 }
 
 /** Where new imports go: after the last import, or at the start after a shebang and directives. */
-function importInsertion(root: SgNode, source: string, lines: string[]): TextEdit {
+function importInsertion(root: SgNode, source: string, lines: string[], removed = new Set<number>()): TextEdit {
 	const newline = source.includes("\r\n") ? "\r\n" : "\n";
-	const imports = root.children().filter((child) => child.kind() === "import_statement");
+	// After the last import that stays: one this move removes takes its line with it.
+	const imports = root
+		.children()
+		.filter((child) => child.kind() === "import_statement" && !removed.has(child.range().start.index));
 	if (imports.length) {
 		const end = imports.at(-1)!.range().end.index;
 		return { start: end, end, text: newline + lines.join(newline) };
@@ -718,6 +731,18 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				targetLines.push(`import ${local.type ? "type " : ""}${name} from "${module}";`);
 				continue;
 			}
+			// Exported only under another name by a list: import it by that name.
+			const aliases = local.exported ? [] : (source.exportedAs.get(name) ?? []);
+			if (aliases.length && !aliases.includes(name)) {
+				const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));
+				const typeOnly = local.type ? "type " : "";
+				targetLines.push(
+					aliases.includes("default")
+						? `import ${typeOnly}${name} from "${module}";`
+						: `import ${typeOnly}{ ${aliases[0]} as ${name} } from "${module}";`,
+				);
+				continue;
+			}
 			// Every declaration of the name: overload signatures must all be exported or none.
 			if (!local.exported && !source.listed.has(name))
 				for (const entry of source.declarations.get(name) ?? []) {
@@ -740,7 +765,8 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	}
 	for (const { module, attributes, quote, specifiers } of targetImports.values())
 		targetLines.push(importStatement("import", specifiers, module, quote, attributes));
-	if (targetLines.length) targetEdits.push(importInsertion(targetRoot, targetText, targetLines));
+	const removedImports = new Set(targetEdits.filter((edit) => edit.text === "").map((edit) => edit.start));
+	if (targetLines.length) targetEdits.push(importInsertion(targetRoot, targetText, targetLines, removedImports));
 
 	// Imports only the declaration used leave with it; a statement left with no bindings goes with its line.
 	const sourceNewline = sourceText.includes("\r\n") ? "\r\n" : "\n";

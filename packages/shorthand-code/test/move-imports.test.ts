@@ -652,6 +652,35 @@ test("a file with no relative imports gets the .js specifiers NodeNext resolutio
 	await typeCheck(root);
 });
 
+test("moving into the file that imports it, when that needs a new import, puts it after the imports that stay", async () => {
+	const root = project({
+		"src/a.ts":
+			"export function helper(n: number) {\n\treturn n * 2;\n}\nexport function run(n: number) {\n\treturn helper(n) + 1;\n}\n",
+		"src/b.ts": 'import { run } from "./a";\nexport const x = run(1);\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "run", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe(
+		'import { helper } from "./a";\nexport function run(n: number) {\n\treturn helper(n) + 1;\n}\nexport const x = run(1);\n',
+	);
+	await typeCheck(root);
+});
+
+test("a dependency exported under another name is imported by that name", async () => {
+	for (const [alias, line] of [
+		["double", 'import { double as helper } from "./a";'],
+		["default", 'import helper from "./a";'],
+	]) {
+		const root = project({
+			"src/a.ts": `function helper(n: number) {\n\treturn n * 2;\n}\nexport { helper as ${alias} };\nexport function run(n: number) {\n\treturn helper(n) + 1;\n}\n`,
+		});
+		await moveDeclaration(join(root, "src/a.ts"), "run", join(root, "src/b.ts"), everyFile(root));
+		expect(read(root, "src/b.ts")).toStartWith(line);
+		await typeCheck(root);
+	}
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

@@ -190,6 +190,11 @@ export class NfsObserver {
 			const to = this.child(request);
 			if (from.length !== 1 || to.length !== 1) throw new IncompleteObservationError("ambiguous directory rename");
 			await this.journal.observeRename(from[0], to[0]);
+			// AgentFS renames a directory from before the run without its contents: applying that would delete them.
+			if ((await this.journal.originalKind(from[0])) === "directory")
+				this.journal.refuse(
+					`renaming the directory ${JSON.stringify(from[0])} isn't supported on macOS, since its files would be lost; move them one at a time instead`,
+				);
 			return (response) => {
 				if (response.u32() !== 0) return;
 				const moved = (old: string) => old === from[0] || old.startsWith(`${from[0]}/`);
