@@ -841,7 +841,13 @@ function fitted(edit: Edit, match: SgMatch, file: string): Edit {
 	const comment = trailingLineComment(insertedText, file);
 	const code = (comment >= 0 ? insertedText.slice(0, comment) : insertedText).trimEnd();
 	const block = code.endsWith("}") && String(node.kind()).endsWith("statement");
-	if (source.slice(edit.startPos, endPos).endsWith(";") && !code.endsWith(";") && !block) endPos -= 1;
+	// The statement's own `;`, its last token other than a comment.
+	const semicolon = node
+		.children()
+		.filter((child) => child.kind() !== "comment")
+		.at(-1);
+	if (semicolon?.kind() === ";" && semicolon.range().end.index <= endPos && !code.endsWith(";") && !block)
+		endPos = semicolon.range().start.index;
 	if (comment >= 0 && /^[^\n]*\S/.test(source.slice(endPos))) insertedText += "\n";
 	return { startPos: edit.startPos, endPos, insertedText };
 }
