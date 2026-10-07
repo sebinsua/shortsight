@@ -108,8 +108,22 @@ export function getMatchSnapshot(
 function snapshot(match: Match): Snapshot {
 	const saved = getMatchSnapshot(match);
 	if (!languages[saved.file.split(".").pop()!]) throw new Error("Placement currently supports JS/TS only");
-	return saved;
+	return { ...saved, node: wholeStatement(saved.node) };
 }
+
+/**
+ * An expression that is all of its statement stands for that statement: without semicolons, `save(a)` matches the
+ * call, and a pattern `save(a);` matches nothing, so placement would otherwise have no way to select it.
+ */
+function wholeStatement(node: SgNode): SgNode {
+	const parent = node.parent();
+	if (parent?.kind() !== "expression_statement" || !container(parent.parent() ?? parent)) return node;
+	const named = parent.namedChildren().filter((child) => child.kind() !== "comment");
+	return named.length === 1 && at(named[0]!, node) ? parent : node;
+}
+
+const at = (a: SgNode, b: SgNode) =>
+	a.range().start.index === b.range().start.index && a.range().end.index === b.range().end.index;
 
 function container(node: SgNode): boolean {
 	return node.kind() === "program" || node.kind() === "statement_block";
@@ -239,17 +253,17 @@ function placement(text: string, destination: Destination) {
 			throw new Error("startOf/endOf requires a file root or statement block; select the body explicitly");
 		const children = node.children().filter((child) => child.isNamed());
 		if (node.kind() === "program") {
-			// A shebang must remain the first line of a file.
-			const first = children[0];
-			const shebangEnd = first?.kind() === "hash_bang_line" ? source.indexOf("\n", first.range().end.index) : -1;
-			offset =
-				key === "startOf"
-					? first?.kind() === "hash_bang_line"
-						? shebangEnd < 0
-							? source.length
-							: shebangEnd + 1
-						: 0
-					: source.length;
+			// A shebang must remain the first line of a file, and directives such as "use client" or "use strict"
+			// must stay first after it, or they stop being directives.
+			const prologue = [];
+			for (const child of children) {
+				const directive = child.kind() === "expression_statement" && child.namedChildren()[0]?.kind() === "string";
+				if (child.kind() !== "hash_bang_line" && !directive) break;
+				prologue.push(child);
+			}
+			const last = prologue.at(-1);
+			const lineEnd = last ? source.indexOf("\n", last.range().end.index) : -1;
+			offset = key === "startOf" ? (last ? (lineEnd < 0 ? source.length : lineEnd + 1) : 0) : source.length;
 			indent = "";
 		} else {
 			offset = key === "startOf" ? start.index + 1 : end.index - 1;

@@ -255,7 +255,12 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 		flags = ["-P", "-e", pattern.source];
 		if (pattern.flags.includes("i")) flags.push("-i");
 	}
-	const output = git(["grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...paths], [1]);
+	// Git runs from the root, with paths relative to it, and its files are named from here again below: see git().
+	const fromRoot = paths.map((path) => relative(repositoryRoot, resolve(path)) || ".");
+	const output = git(
+		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
+		[1],
+	);
 
 	const matches = [];
 	let offset = 0;
@@ -269,14 +274,16 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 			throw new Error(`git grep returned malformed output: ${JSON.stringify(output.slice(offset, offset + 200))}`);
 		}
 		const text = output.slice(lineEnd + 1, textEnd);
-		matches.push({ file, line: Number(lineNumber), text });
+		matches.push({ file: relative(process.cwd(), resolve(repositoryRoot, file)), line: Number(lineNumber), text });
 		offset = textEnd + 1;
 	}
 	return matches;
 }
 
 function git(args: string[], allowedExitCodes: number[] = []): string {
-	const result = Bun.spawnSync(["git", ...args], { env: process.env });
+	// `-C <dir>` calls start in that directory: Git reads its starting directory itself, and on macOS that fails in a
+	// subdirectory of the AgentFS mount once a file has been read there (see start-directory.ts).
+	const result = Bun.spawnSync(["git", ...args], { env: process.env, ...(args[0] === "-C" ? { cwd: args[1] } : {}) });
 	if (result.exitCode !== 0 && !allowedExitCodes.includes(result.exitCode)) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
 		const command = args[0] === "-C" ? args[2] : args[0]; // named after the subcommand, not its directory

@@ -157,6 +157,25 @@ test("a nested statement can move out before what contains it", () => {
 	);
 });
 
+test("without semicolons, an expression that is its whole statement can be removed and placed after", () => {
+	const path = fixture("obsolete()\nfunction f() {\n\twork()\n\tobsolete()\n}\nsave(a)\n", "a.js");
+	const source = readFileSync(path, "utf8");
+	const calls = parse(Lang.JavaScript, source)
+		.root()
+		.findAll("obsolete()")
+		.map((node) => remember({ file: path, text: node.text(), node }, source));
+	remove(calls);
+	const save = parse(Lang.JavaScript, readFileSync(path, "utf8")).root().find("save(a)")!;
+	insert("log(a)", { after: remember({ file: path, text: save.text(), node: save }, readFileSync(path, "utf8")) });
+	expect(readFileSync(path, "utf8")).toBe("function f() {\n\twork()\n}\nsave(a)\nlog(a)\n");
+});
+
+test("startOf a file goes after its shebang and directives", () => {
+	const path = fixture('#!/usr/bin/env node\n"use client";\nmain();\n');
+	insert("const a = 1;", { startOf: file(path) });
+	expect(readFileSync(path, "utf8")).toBe('#!/usr/bin/env node\n"use client";\nconst a = 1;\nmain();\n');
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);
@@ -200,7 +219,8 @@ test("rejects stale, detached and unsupported matches without writes", () => {
 	const before = readFileSync(path, "utf8");
 	expect(() => remove(stale)).toThrow("Stale match");
 	expect(() => remove({ ...match(path, "b();") })).toThrow("file-backed");
-	expect(() => remove(match(path, "a()"))).toThrow("whole statement");
+	// A call that is all of its statement stands for it; part of one doesn't.
+	expect(() => remove(match(path, "a"))).toThrow("whole statement");
 	expect(() => insert("x();", { startOf: match(path, "a();") })).toThrow("file root or statement block");
 	expect(() => insert("x();", { before: stale, after: stale } as unknown as Destination)).toThrow("exactly one");
 	expect(readFileSync(path, "utf8")).toBe(before);

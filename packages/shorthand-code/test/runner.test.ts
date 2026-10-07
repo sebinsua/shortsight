@@ -2988,6 +2988,22 @@ sg.rewrite("oldName", "newName", ["a.ts", "x.ts"]);`,
 		);
 	});
 
+	test("a run started in a subdirectory keeps its working directory after reading files", async () => {
+		const repo = await makeRepo({ "pkg/src/a.ts": "foo(1);\n", "pkg/package.json": "{}\n" });
+		const result = await run(
+			repo,
+			`console.log(sg.find("foo($A)", "src").length);
+console.log(JSON.stringify(glob("src/*.ts")), JSON.stringify(grep("foo", "src")));
+await $\`cat src/a.ts\`;
+console.log((await $\`git status --short\`.text()).trim() === "", process.cwd().endsWith("/pkg"));`,
+			{ cwd: path.join(repo, "pkg") },
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		// glob gives paths as Git lists them, from the root; grep names files from the working directory.
+		expect(result.output).toContain('1\n["pkg/src/a.ts"] [{"file":"src/a.ts","line":1,"text":"foo(1);"}]');
+		expect(result.output).toContain("true true");
+	});
+
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
 		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A", "src/a.ts");`);

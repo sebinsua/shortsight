@@ -144,6 +144,7 @@ interface Change {
 
 const PROGRAM_FILE = ".pi-shorthand-program.ts";
 const PRELUDE = path.join(import.meta.dir, "../program/prelude.ts");
+const START_DIRECTORY = path.join(import.meta.dir, "../program/start-directory.ts");
 // Our dependencies are in the nearest node_modules that has them: our own, or, when npm hoisted them
 // (e.g. Pi's project installs), one further up. Like `npm run`, look in every one from here up.
 const NODE_MODULES = ancestors(import.meta.dir).map((dir) => path.join(dir, "node_modules"));
@@ -607,7 +608,18 @@ async function runProgram(
 	const executionProgramPath = path.join(executionCwd, PROGRAM_FILE);
 	const executionPrelude = executionPath(PRELUDE, repo, overlay);
 	// Bun shows the wrong source beside an error on a last line with no newline after it.
-	await Bun.write(programFile, options.program.endsWith("\n") ? options.program : `${options.program}\n`);
+	const source = options.program.endsWith("\n") ? options.program : `${options.program}\n`;
+	// On macOS, a file the runner creates in a subdirectory of the AgentFS mount before the program starts leaves
+	// that directory's working-directory lookups failing (ENOENT) for the program and everything it runs. From a
+	// subdirectory, an entry at the root writes the program there from inside the process, then runs it.
+	const subdirectory = executionCwd !== overlay.executionDir;
+	const executionEntry = subdirectory ? path.join(overlay.executionDir, PROGRAM_FILE) : executionProgramPath;
+	if (subdirectory)
+		await Bun.write(
+			path.join(overlay.writableDir, PROGRAM_FILE),
+			`import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(executionProgramPath)}, ${JSON.stringify(source)});\nawait import(${JSON.stringify(executionProgramPath)});\n`,
+		);
+	else await Bun.write(programFile, source);
 
 	const excludesFile = overlay.executionExcludesFile ?? path.join(tempDir, "exclude");
 	await Bun.write(excludesFile, [PROGRAM_FILE, ...overlay.gitExcludes, await globalGitExcludes()].join("\n"));
@@ -624,13 +636,21 @@ async function runProgram(
 		disabled: options.graph === false,
 	});
 	try {
+		// Started at the workspace root, then moved into its directory by the first preload: see start-directory.ts.
 		const [command, ...args] = overlay.wrap(
-			[process.execPath, "--preload", executionPrelude, executionProgramPath],
-			executionCwd,
+			[
+				process.execPath,
+				"--preload",
+				executionPath(START_DIRECTORY, repo, overlay),
+				"--preload",
+				executionPrelude,
+				executionEntry,
+			],
+			overlay.executionDir,
 		);
 		if (options.testHooks?.programStartMarker) await Bun.write(options.testHooks.programStartMarker, "started");
 		const child = spawn(command, args, {
-			cwd: executionCwd,
+			cwd: overlay.executionDir,
 			detached: true,
 			stdio: ["ignore", output.fd, output.fd, trackFiles ? outcomeFile.fd : "ignore", "pipe"],
 			env: {
@@ -640,6 +660,7 @@ async function runProgram(
 				PI_SHORTHAND_OUTCOMES_FD: trackFiles ? "3" : "",
 				PI_SHORTHAND_PROGRESS_FD: "4",
 				PI_SHORTHAND_EXECUTION_ROOT: overlay.executionDir,
+				PI_SHORTHAND_START_DIRECTORY: executionCwd,
 				PI_SHORTHAND_INSPECTION_FAILURE: options.testHooks?.writerInspectionFailure ? "1" : "",
 				PI_SHORTHAND_GRAPH_SOCKET: graphProxy.path,
 			},
