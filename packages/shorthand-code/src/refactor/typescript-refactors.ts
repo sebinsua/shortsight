@@ -101,7 +101,9 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		// than renaming the local and its uses, some of which the server leaves out (`return { email }`). A
 		// parameter property is itself a local, so it's renamed with its uses.
 		const keepLocals = renamingProperty;
-		if (keepLocals) dropLocalEdits(edit, options.symbol.split(".").at(-1)!);
+		// Where the server edits, per file: a parameter property is the member only when it's among them.
+		const edited = editedOffsets(edit);
+		if (keepLocals) dropLocalEdits(edit, options.symbol.split(".").at(-1)!, edited);
 		if (!renamingProperty && RESERVED.has(options.to))
 			throw new Error(
 				`refactor.rename: ${options.to} is a reserved word, so it can't name ${JSON.stringify(options.symbol)}`,
@@ -112,7 +114,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
-			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position, keepLocals),
+			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position, keepLocals, edited),
 		);
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
@@ -163,13 +165,14 @@ function keepShorthandPropertyNames(
 	declarationFile: string,
 	declaration: Position,
 	keepLocals = false,
+	edited = new Map<string, Set<number>>(),
 ): AdjustEdit {
 	const shorthands = new Map<string, Map<number, string>>();
 	let renamingProperty: boolean | undefined;
 	const memberUsesIn = new Map<string, Set<number>>();
 	const memberUsesFor = (file: string, source: string) => {
 		const lang = scriptLanguage(file);
-		const uses = lang ? memberUses(parse(lang, source).root(), symbol) : new Set<number>();
+		const uses = lang ? memberUses(parse(lang, source).root(), symbol, edited.get(file)) : new Set<number>();
 		memberUsesIn.set(file, uses);
 		return uses;
 	};
@@ -207,19 +210,35 @@ function keepShorthandPropertyNames(
 	};
 }
 
+/** The offsets each file's edits start at. */
+function editedOffsets(edit: WorkspaceEdit | null): Map<string, Set<number>> {
+	const offsets = new Map<string, Set<number>>();
+	const add = (uri: string, edits: TextEdit[]) => {
+		const file = fileURLToPath(uri);
+		if (!existsSync(file)) return;
+		const source = readFileSync(file, "utf8");
+		const set = offsets.get(file) ?? new Set<number>();
+		for (const { range } of edits) set.add(offsetOf(source, range.start));
+		offsets.set(file, set);
+	};
+	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) add(uri, edits);
+	for (const change of edit?.documentChanges ?? []) if (!("kind" in change)) add(change.textDocument.uri, change.edits);
+	return offsets;
+}
+
 /**
  * Leaves out the edits that land on plain identifiers: when a member is renamed, those are locals' uses. A
  * constructor parameter that declares the member (`constructor(public email: string)`) is the member itself,
  * so it and its uses in that constructor are still renamed.
  */
-function dropLocalEdits(edit: WorkspaceEdit | null, name: string): void {
+function dropLocalEdits(edit: WorkspaceEdit | null, name: string, edited: Map<string, Set<number>>): void {
 	const kept = (uri: string, edits: TextEdit[]) => {
 		const file = fileURLToPath(uri);
 		const lang = scriptLanguage(file);
 		if (!lang) return edits;
 		const source = readFileSync(file, "utf8");
 		const root = parse(lang, source).root();
-		const members = memberUses(root, name);
+		const members = memberUses(root, name, edited.get(file));
 		const locals = new Set(
 			root
 				.findAll({ rule: { kind: "identifier" } })
@@ -238,14 +257,16 @@ function dropLocalEdits(edit: WorkspaceEdit | null, name: string): void {
  * declares it and that parameter's uses in the constructor (shorthands included), and bare references to an enum
  * member inside its enum (`ReadWrite = Read | Write`).
  */
-function memberUses(root: SgNode, name: string): Set<number> {
+function memberUses(root: SgNode, name: string, edited = new Set<number>()): Set<number> {
 	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
 	const named = { any: ["identifier", "shorthand_property_identifier"].map((kind) => ({ kind, regex: exactly })) };
 	const uses = new Set<number>();
 	for (const parameter of root.findAll({
 		rule: { any: [{ kind: "required_parameter" }, { kind: "optional_parameter" }] },
 	})) {
-		if (!parameterProperty(parameter) || parameter.field("pattern")?.text() !== name) continue;
+		// Only a parameter the server renames is the member: another class's `constructor(private logger)` isn't.
+		const pattern = parameter.field("pattern");
+		if (!parameterProperty(parameter) || pattern?.text() !== name || !edited.has(pattern.range().start.index)) continue;
 		uses.add(parameter.field("pattern")!.range().start.index);
 		for (const use of parameter.parent()?.parent()?.field("body")?.findAll({ rule: named }) ?? [])
 			uses.add(use.range().start.index);

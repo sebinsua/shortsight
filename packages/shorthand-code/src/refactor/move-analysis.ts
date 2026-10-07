@@ -180,11 +180,16 @@ function throughModule(reference: Node): boolean {
 		case SyntaxKind.PropertyAccessExpression:
 			return parent.name === reference;
 		case SyntaxKind.ElementAccessExpression:
-			return parent.argumentExpression === reference;
+			// `ns["name"]` reads it off the module; `store[NAME]` only uses the binding as a key.
+			return (
+				parent.argumentExpression === reference &&
+				(reference.kind === SyntaxKind.StringLiteral || reference.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
+			);
 		case SyntaxKind.QualifiedName:
 			return parent.right === reference;
 		case SyntaxKind.BindingElement:
-			return true;
+			// `{ name } = ns` reads it; `{ timeout = DEFAULT_TIMEOUT }` only uses it as a default.
+			return parent.initializer !== reference;
 		default:
 			return false;
 	}

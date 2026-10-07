@@ -720,6 +720,29 @@ console.log((await graph.query({ type: "lookup", query: "Session.refresh" })).no
 			expect(text).toContain("constructor(private readonly database: number) { register({ db: database }); }");
 		});
 
+		test("another class's same-named parameter property isn't the renamed member, and constants used as keys or defaults move", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/base.ts":
+					"export type Logger = { info(s: string): void };\nexport interface ServiceOptions { logger: Logger }\nexport class BaseService { constructor(protected options: ServiceOptions) {} }\n",
+				"src/users.ts":
+					'import { BaseService, type Logger } from "./base";\nexport class UserService extends BaseService { constructor(private readonly logger: Logger) { super({ logger }); } }\n',
+				"src/keys.ts": 'export const CACHE_KEY = "user";\nexport const DEFAULT_TIMEOUT = 5;\n',
+				"src/cache.ts":
+					'import { CACHE_KEY, DEFAULT_TIMEOUT } from "./keys";\nexport const store: Record<string, number> = {};\nexport const v = store[CACHE_KEY];\nexport function request(url: string, { timeout = DEFAULT_TIMEOUT } = {}) { return [url, timeout]; }\n',
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/base.ts", symbol: "ServiceOptions.logger", to: "log" });
+await refactor.move({ file: "src/keys.ts", symbol: "CACHE_KEY", to: "src/constants.ts" });
+await refactor.move({ file: "src/keys.ts", symbol: "DEFAULT_TIMEOUT", to: "src/constants.ts" });`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/users.ts")).text()).toContain("super({ log: logger });");
+			expect(await Bun.file(path.join(repo, "src/constants.ts")).text()).toContain("export const CACHE_KEY");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3523,6 +3546,25 @@ sg.rewrite("oldInit($A)", "setup();\\ninit($A)", "b.js");`,
 			'const a = http.get(`${protocol}//${host}/api`);\nlogger.info("done }// ok");\n',
 		);
 		expect(await Bun.file(path.join(repo, "b.js")).text()).toBe("if (x) {}\nsave(x)\nif (y) { setup();\ninit(1) };\n");
+	});
+
+	test("removing a list item takes its comma, and a later rewrite reaches text an edit carried over", async () => {
+		const repo = await makeRepo({
+			"a.ts":
+				"createClient({ url, debug: true, retries: 3 });\ninit(a, legacyFlag, b);\nlast(x, legacyLast);\nsave(user, legacyOptions(user));\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite({ rule: { kind: "pair", has: { field: "key", regex: "^debug$" } } }, "", "a.ts");
+sg.rewrite({ rule: { kind: "identifier", regex: "^(legacyFlag|legacyLast)$", inside: { kind: "arguments" } } }, "", "a.ts");
+sg.rewrite("save($$$A)", (m) => { const last = m.node.field("arguments").namedChildren().at(-1); return last.replace(\`\${last.text()}, { force: true }\`); }, "a.ts");
+console.log(sg.rewrite("legacyOptions($X)", "options($X)", "a.ts"));`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			"createClient({ url, retries: 3 });\ninit(a, b);\nlast(x);\nsave(user, options(user), { force: true });\n",
+		);
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

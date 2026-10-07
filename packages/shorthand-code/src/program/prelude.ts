@@ -862,10 +862,10 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
  * A callback's text without what it carried over from the match: wherever it repeats the match or a captured value,
  * as `console.info(${m.vars.A})` does, that text is the original code rather than new.
  */
-function outsideCaptures(text: string, match: SgMatch): [number, number][] {
+function outsideCaptures(text: string, match: SgMatch, also: string[] = []): [number, number][] {
 	const carried: [number, number][] = [];
 	// The whole match counts too: `"async " + m.text` carries all of it over.
-	for (const value of [match.text, ...Object.values(match.vars)]
+	for (const value of [match.text, ...Object.values(match.vars), ...also]
 		.filter(Boolean)
 		.toSorted((a, b) => b.length - a.length))
 		for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length))
@@ -979,6 +979,41 @@ function withSemicolon(result: unknown, match: SgMatch): unknown {
 	return `${result.slice(0, at)};${result.slice(at)}`;
 }
 
+const LISTS = new Set([
+	"arguments",
+	"object",
+	"array",
+	"object_pattern",
+	"array_pattern",
+	"named_imports",
+	"export_clause",
+	"formal_parameters",
+	"type_arguments",
+	"type_parameters",
+]);
+
+/**
+ * Removing an item from a comma-separated list (`{ url, debug: true, retries }` to drop `debug`) takes its comma
+ * with it, the one after or, for the last item, the one before: the grammar accepts the empty slot left otherwise.
+ */
+function withItemComma(changes: Edit[], result: unknown, match: SgMatch): Edit[] {
+	const node = match.node;
+	if (typeof result !== "string" || result.trim() || changes.length !== 1 || !LISTS.has(String(node.parent()?.kind())))
+		return changes;
+	const source = node.getRoot().root().text();
+	const siblings = node.parent()!.children();
+	const index = siblings.findIndex((sibling) => sibling.range().start.index === node.range().start.index);
+	const next = siblings[index + 1];
+	const previous = siblings[index - 1];
+	const change = changes[0]!;
+	if (next?.kind() === ",") {
+		const after = /^[ \t]*(\r?\n[ \t]*)?/.exec(source.slice(next.range().end.index))![0];
+		return [{ ...change, endPos: next.range().end.index + after.length }];
+	}
+	if (previous?.kind() === ",") return [{ ...change, startPos: previous.range().start.index }];
+	return changes;
+}
+
 /**
  * A statement that is the unbraced body of an `if`, `else` or loop must stay one statement: removing it would make
  * the next statement the body, and a replacement of several statements would leave all but the first outside.
@@ -1031,9 +1066,22 @@ function applyRewrites(
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
-		const changes = replacementEdits(asBody(keepSemicolon(result, match), match), match, file);
+		const changes = withItemComma(
+			replacementEdits(asBody(keepSemicolon(result, match), match), match, file),
+			result,
+			match,
+		);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
+		else {
+			// An edit (`last.replace(`${last.text()}, { force: true }`)`) carries over the text it replaces too.
+			const source = match.node.getRoot().root().text();
+			for (const change of changes)
+				literalText.set(
+					change,
+					outsideCaptures(change.insertedText, match, [source.slice(change.startPos, change.endPos)]),
+				);
+		}
 		if (changes.length > 0) planned.push({ match, edits: changes });
 	}
 	// Outer matches first. A match inside one whose edits it clashes with is left alone, as ast-grep's CLI does:
