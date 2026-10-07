@@ -767,7 +767,7 @@ export type RewriteResult = string | Edit | readonly Edit[] | null | undefined |
 function replacementEdits(result: unknown, match: SgMatch, file: string): Edit[] {
 	const node = match.node;
 	if (result === null || result === undefined || result === false) return [];
-	if (typeof result === "string") return [node.replace(result)];
+	if (typeof result === "string") return [fitted(node.replace(result), match, file)];
 	const location = `${JSON.stringify(file)}:${node.range().start.line + 1}`;
 	const invalid = (detail: string): never => {
 		throw new Error(
@@ -795,6 +795,72 @@ function replacementEdits(result: unknown, match: SgMatch, file: string): Edit[]
 			);
 		}
 		return { startPos: edit.startPos, endPos: edit.endPos, insertedText: edit.insertedText };
+	});
+}
+
+/** Where a line comment that ends `text` starts, or -1. */
+function trailingLineComment(text: string, file: string): number {
+	const lang = LANGUAGES[file.split(".").pop()!];
+	if (!lang || !text.includes("//")) return -1;
+	let node = parse(lang, text).root();
+	for (let last = node.children().at(-1); last; last = node.children().at(-1)) node = last;
+	return node.kind() === "comment" && node.text().startsWith("//") && node.range().end.index === text.trimEnd().length
+		? node.range().start.index
+		: -1;
+}
+
+/**
+ * Text in place of a whole match, fitted to the code around it as ast-grep's fix does with expandEnd, so the match
+ * is replaced as the pattern spelled it: a comment after it that the text doesn't carry stays, a statement keeps
+ * the `;` the pattern left out (`const $X = load()` matches `const x = load();`), a shorthand property keeps its
+ * key (`{ parseUser }` is `{ parseUser: decodeUser }`) or, for a member's reference, its value, and text ending in a line comment doesn't comment out the
+ * rest of the line.
+ */
+function fitted(edit: Edit, match: SgMatch, file: string): Edit {
+	const { node } = match;
+	let { endPos, insertedText } = edit;
+	if (!insertedText) return edit;
+	const source = node.getRoot().root().text();
+	let leaf = node;
+	for (let last = leaf.children().at(-1); last; last = leaf.children().at(-1)) leaf = last;
+	if (leaf.kind() === "comment" && leaf !== node && !insertedText.includes(leaf.text()))
+		endPos = source.slice(0, leaf.range().start.index).trimEnd().length;
+	if (String(node.kind()).startsWith("shorthand_property_identifier") && insertedText !== node.text())
+		insertedText = memberReferences.has(match) ? `${insertedText}: ${node.text()}` : `${node.text()}: ${insertedText}`;
+	const comment = trailingLineComment(insertedText, file);
+	const code = (comment >= 0 ? insertedText.slice(0, comment) : insertedText).trimEnd();
+	const block = code.endsWith("}") && String(node.kind()).endsWith("statement");
+	if (source.slice(edit.startPos, endPos).endsWith(";") && !code.endsWith(";") && !block) endPos -= 1;
+	if (comment >= 0 && /^[^\n]*\S/.test(source.slice(endPos))) insertedText += "\n";
+	return { startPos: edit.startPos, endPos, insertedText };
+}
+
+/**
+ * Removing a whole list item takes its comma with it, as ast-grep's fix does with expandEnd: the comma after it,
+ * or before it when it's the last. Neighbouring removals are one removal first.
+ */
+function withSeparators(edits: Edit[], source: string): Edit[] {
+	const adjacent: Edit[] = [];
+	for (const edit of edits.toSorted((a, b) => a.startPos - b.startPos || b.endPos - a.endPos)) {
+		const previous = adjacent.at(-1);
+		if (
+			previous &&
+			!previous.insertedText &&
+			!edit.insertedText &&
+			/^\s*,?\s*$/.test(source.slice(previous.endPos, Math.max(previous.endPos, edit.startPos)))
+		)
+			adjacent[adjacent.length - 1] = { ...previous, endPos: Math.max(previous.endPos, edit.endPos) };
+		else adjacent.push(edit);
+	}
+	return adjacent.map((edit) => {
+		if (edit.insertedText) return edit;
+		const before = /[([{<,]\s*$/.exec(source.slice(Math.max(0, edit.startPos - 200), edit.startPos));
+		const after = /^\s*[,)\]}>]/.exec(source.slice(edit.endPos, edit.endPos + 200));
+		if (!before || !after || edit.startPos === edit.endPos) return edit;
+		const following = /^\s*,\s*/.exec(source.slice(edit.endPos));
+		if (following) return { ...edit, endPos: edit.endPos + following[0].length };
+		const preceding = /\s*,\s*$/.exec(source.slice(Math.max(0, edit.startPos - 200), edit.startPos));
+		return preceding ? { ...edit, startPos: edit.startPos - preceding[0].length } : edit;
 	});
 }
 
@@ -839,10 +905,23 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
 	const literal: [number, number][] = [];
 	let last = 0;
 	for (const variable of template.matchAll(METAVARIABLE)) {
-		const before = template.slice(last, variable.index);
+		let before = template.slice(last, variable.index);
+		const value = match.vars[variable[2]!] ?? variable[0];
+		let after = variable.index + variable[0].length;
+		// An empty list takes a comma with it: `f($$$ARGS, ctx)` without arguments is `f(ctx)`.
+		if (variable[1] === "$$$" && !value) {
+			const following = /^\s*,\s*/.exec(template.slice(after));
+			if (following) after += following[0].length;
+			else before = before.replace(/,\s*$/, "");
+		}
 		if (before) literal.push([text.length, text.length + before.length]);
-		text += before + (match.vars[variable[2]!] ?? variable[0]);
-		last = variable.index + variable[0].length;
+		text += before + value;
+		// A capture can end in a line comment, which would comment out the rest of the template's line.
+		if (trailingLineComment(value, match.file) >= 0 && /^[^\n]*\S/.test(template.slice(after))) {
+			text += "\n";
+			after += /^[ \t]*/.exec(template.slice(after))![0].length;
+		}
+		last = after;
 	}
 	const rest = template.slice(last);
 	if (rest) literal.push([text.length, text.length + rest.length]);
@@ -962,7 +1041,7 @@ function applyRewrites(
 	const source = matches[0].node.getRoot().root().text();
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
 	// edit twice is one edit; only different edits to the same text conflict.
-	const ordered = edits
+	const ordered = withSeparators(edits, source)
 		// Text breaks ties so identical edits sit together, however the matches were ordered.
 		.toSorted(
 			(a, b) =>
@@ -1188,8 +1267,17 @@ function toMatch(
 			// Slice the original source so separators and formatting are kept ("a, b" rather than "a,b").
 			const nodes = node.getMultipleMatches(name);
 			const first = nodes[0];
-			const last = nodes[nodes.length - 1];
-			vars[name] = first && last ? source.slice(first.range().start.index, last.range().end.index) : "";
+			// A list capture is its items and comments: a trailing comma, as in `f(\n  a,\n)`, stays out, as does
+			// the closing brace ast-grep can take for `{ $$$BODY }` when a comment follows it.
+			const lastItem = nodes.findLastIndex((item) => item.isNamed() && item.kind() !== "comment");
+			let text =
+				first && lastItem >= 0 ? source.slice(first.range().start.index, nodes[lastItem]!.range().end.index) : "";
+			let cursor = lastItem >= 0 ? nodes[lastItem]!.range().end.index : 0;
+			for (const item of nodes.slice(lastItem + 1)) {
+				if (item.kind() === "comment") text += source.slice(cursor, item.range().end.index);
+				cursor = item.range().end.index;
+			}
+			vars[name] = text;
 		} else {
 			const captured = node.getMatch(name);
 			if (captured) vars[name] = captured.text();
@@ -1220,7 +1308,16 @@ function referenceCall(node: SgNode): SgNode | undefined {
 	return called?.start.index === span.start.index && called.end.index === span.end.index ? call : undefined;
 }
 
-function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
+/** Matches from refactor.references to a member: rewriting a shorthand `{ timeout }` there renames its key. */
+const memberReferences = new WeakSet<SgMatch>();
+
+function referenceMatches(locations: ReferenceLocation[], member: boolean): SgMatch[] {
+	const matches = referenceMatchesIn(locations);
+	if (member) for (const match of matches) memberReferences.add(match);
+	return matches;
+}
+
+function referenceMatchesIn(locations: ReferenceLocation[]): SgMatch[] {
 	const parsed = new Map<string, NonNullable<ReturnType<typeof parseFile>>>();
 	return locations.map(({ uri, range }) => {
 		const file = fileURLToPath(uri);
@@ -1343,7 +1440,10 @@ const globals = {
 			logged("refactor.references", [options], async () => {
 				const prepared = { ...options, ...refactorTarget("refactor.references", options) };
 				const { references } = await import("../refactor/typescript-refactors.ts");
-				return referenceMatches(await references(repositoryRoot, prepared as ReferencesOptions));
+				return referenceMatches(
+					await references(repositoryRoot, prepared as ReferencesOptions),
+					String(prepared.symbol).includes("."),
+				);
 			}),
 		move: (options: { file: string | GraphNode; symbol?: string; to: string }) =>
 			logged("refactor.move", [options], async () => {

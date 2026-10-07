@@ -3537,7 +3537,7 @@ sg.rewrite("color: $V;", "color: var(--fg)", "s.css");`,
 		expect(await Bun.file(path.join(repo, "s.css")).text()).toBe(".a{ color: var(--fg); margin: 0; }\n");
 	});
 
-	test("a captured block's trailing comment stays after the template, a statement's comment ends its line, and grep expands braces", async () => {
+	test("a captured block's trailing comment ends its line in the template, a statement's comment ends its line, and grep expands braces", async () => {
 		const repo = await makeRepo({
 			"c.ts": "if (ready) {\n  start();\n} // ready path\nswitch (x) {\n  case 1: legacy(); break;\n}\n",
 			"src/d.tsx": "oldApi();\n",
@@ -3552,7 +3552,7 @@ console.log(grep("oldApi", "src/**/*.{ts,tsx}").length, grep("oldApi", "src/**/*
 		expect(result.exitCode, result.output).toBe(0);
 		expect(result.output.trim()).toBe("2 0");
 		expect(await Bun.file(path.join(repo, "c.ts")).text()).toBe(
-			"if (ready) {\n  start();\n} else { fallback(); } // ready path\nswitch (x) {\n  case 1: modern(); // TODO: remove legacy\n break;\n}\n",
+			"if (ready) {\n  start();\n} // ready path\nelse { fallback(); }\nswitch (x) {\n  case 1: modern(); // TODO: remove legacy\n break;\n}\n",
 		);
 	});
 
