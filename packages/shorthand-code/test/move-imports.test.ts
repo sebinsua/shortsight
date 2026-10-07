@@ -633,6 +633,25 @@ test("a dependency declared as a namespace or with declare is refused rather tha
 		).toContain(`it uses ${name}, which`);
 });
 
+test("a file with no relative imports gets the .js specifiers NodeNext resolution needs", async () => {
+	const root = project({
+		"tsconfig.json": JSON.stringify({
+			compilerOptions: { strict: true, module: "nodenext", moduleResolution: "nodenext", noEmit: true, types: [] },
+			include: ["src"],
+		}),
+		"package.json": '{ "type": "module" }',
+		"src/util/a.ts":
+			'export function load(p: string) {\n\treturn p.length;\n}\nexport function keep() {\n\treturn load("x");\n}\n',
+		"src/main.ts": 'import { load } from "./util/a.js";\nexport const n = load("y");\n',
+	});
+
+	await moveDeclaration(join(root, "src/util/a.ts"), "load", join(root, "src/io/load.ts"), everyFile(root));
+
+	expect(read(root, "src/util/a.ts")).toStartWith('import { load } from "../io/load.js";\n');
+	expect(read(root, "src/main.ts")).toStartWith('import { load } from "./io/load.js";\n');
+	await typeCheck(root);
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

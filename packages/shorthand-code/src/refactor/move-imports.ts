@@ -365,14 +365,30 @@ function styleOf(specifier: string): Style {
 }
 
 /** The specifier style a file already uses for relative imports. */
-function fileStyle(root: SgNode): Style {
+/** The style of a file's first relative import or re-export, or undefined when it has none to go by. */
+function fileStyle(root: SgNode): Style | undefined {
 	for (const statement of root.children()) {
 		const module = ["import_statement", "export_statement"].includes(String(statement.kind()))
 			? moduleName(statement)
 			: undefined;
 		if (module?.startsWith(".")) return styleOf(module);
 	}
-	return "none";
+	return undefined;
+}
+
+/**
+ * The style a project needs when neither file shows one: Node16 and NodeNext resolution require `.js` in
+ * relative ESM imports, so a file with only package imports mustn't get extensionless ones.
+ */
+function projectStyle(file: string): Style {
+	for (let directory = dirname(file); ; directory = dirname(directory)) {
+		const config = resolve(directory, "tsconfig.json");
+		if (existsSync(config))
+			return /"(?:module|moduleResolution)"\s*:\s*"node(?:16|18|20|next)"/i.test(readFileSync(config, "utf8"))
+				? "js"
+				: "none";
+		if (dirname(directory) === directory) return "none";
+	}
 }
 
 const JS_FOR_SOURCE: Record<string, string> = { ".ts": ".js", ".tsx": ".js", ".mts": ".mjs", ".cts": ".cjs" };
@@ -579,8 +595,7 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	};
 	const targetLines: string[] = [];
 	const style = (root: SgNode, fallback: SgNode) => {
-		const own = fileStyle(root);
-		return own === "none" ? fileStyle(fallback) : own;
+		return fileStyle(root) ?? fileStyle(fallback) ?? projectStyle(sourceFile);
 	};
 
 	// The target's imports of the moved names become local; any other binding of those names conflicts.

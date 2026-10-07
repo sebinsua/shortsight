@@ -385,6 +385,41 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(allowed.exitCode).toBe(0);
 		});
 
+		test("the rename scope check covers types and destructured properties, and skips what can't be captured", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/user.ts":
+					"export interface User { name: string }\nexport interface Options { verbose?: boolean }\nexport interface Config { port?: number }\nexport function parse(s: string) { return s; }\n",
+				"src/use.ts":
+					'import type { User, Options } from "./user";\nimport * as A from "./user";\nimport { parse as p } from "./user";\nconst fullName = "outer";\nexport function greet(u: User) { const { name } = u; return name + fullName; }\nexport const o: Options = {};\nexport function decode(s: string) { return A.parse(s) + p(s); }\n',
+			});
+			for (const [symbol, to] of [
+				["User.name", "fullName"],
+				["Options", "Config"],
+			]) {
+				const result = await run(
+					repo,
+					`await refactor.rename({ file: "src/user.ts", symbol: "${symbol}", to: "${to}" });`,
+					{
+						timeoutMs: 15_000,
+					},
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.output).toContain(`${to} is already declared`);
+			}
+			const allowed = await run(
+				repo,
+				`await refactor.rename({ file: "src/user.ts", symbol: "parse", to: "decode" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(allowed.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toContain("A.decode(s) + p(s)");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",

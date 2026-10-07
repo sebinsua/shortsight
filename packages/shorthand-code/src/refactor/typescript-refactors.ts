@@ -66,7 +66,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position,
 			newName: options.to,
 		});
-		if (!declaresProperty(file, position)) refuseCapturedRename(edit, options.symbol, options.to);
+		refuseCapturedRename(edit, options.symbol, options.to, declaresProperty(file, position));
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
@@ -151,7 +151,11 @@ const SCOPES = new Set([
 	"arrow_function",
 	"method_definition",
 	"generator_function_declaration",
+	"class_declaration",
+	"abstract_class_declaration",
 	"class_body",
+	"interface_declaration",
+	"type_alias_declaration",
 	"for_statement",
 	"for_in_statement",
 	"catch_clause",
@@ -167,91 +171,136 @@ const SCOPES = new Set([
 	"construct_signature",
 ]);
 
+/** Declarations whose own name belongs to the scope around them, not to the scope they make. */
+const NAMED_FROM_OUTSIDE = new Set([
+	"function_declaration",
+	"generator_function_declaration",
+	"function_signature",
+	"class_declaration",
+	"abstract_class_declaration",
+	"interface_declaration",
+	"type_alias_declaration",
+	"internal_module",
+	"module",
+]);
+
+type Space = "value" | "type";
+const BOTH: Space[] = ["value", "type"];
+
 const at = (node: SgNode | null | undefined, other: SgNode) =>
 	node?.range().start.index === other.range().start.index && node.kind() === other.kind();
 
-/** Whether an identifier declares its name in its scope: a variable, function, class, parameter, loop variable or import. */
-function declaresHere(node: SgNode): boolean {
+/**
+ * What an identifier declares in its scope, a value, a type or both, or nothing when it doesn't declare: a variable,
+ * function, class, enum, interface, type alias, type parameter, namespace, parameter, loop variable or import.
+ */
+function declaredSpaces(node: SgNode): Space[] {
 	const parent = node.parent();
-	if (!parent) return false;
+	if (!parent) return [];
+	const named = (field: SgNode | null) => at(field, node);
 	switch (String(parent.kind())) {
 		case "variable_declarator":
 		case "function_declaration":
 		case "generator_function_declaration":
+		case "function_signature":
+			return named(parent.field("name")) ? ["value"] : [];
 		case "class_declaration":
 		case "abstract_class_declaration":
 		case "enum_declaration":
-			return at(parent.field("name"), node);
+		case "internal_module":
+		case "module":
+			return named(parent.field("name")) ? BOTH : [];
+		case "interface_declaration":
+		case "type_alias_declaration":
+		case "type_parameter":
+			return named(parent.field("name")) ? ["type"] : [];
 		case "required_parameter":
 		case "optional_parameter":
-			return at(parent.field("pattern"), node);
+			return named(parent.field("pattern")) ? ["value"] : [];
 		case "arrow_function":
-			return at(parent.field("parameter"), node);
 		case "catch_clause":
-			return at(parent.field("parameter"), node);
+			return named(parent.field("parameter")) ? ["value"] : [];
 		case "for_in_statement":
-			return at(parent.field("left"), node);
 		case "assignment_pattern":
 		case "object_assignment_pattern":
-			return at(parent.field("left"), node);
+			return named(parent.field("left")) ? ["value"] : [];
 		case "pair_pattern":
-			return at(parent.field("value"), node);
+			return named(parent.field("value")) ? ["value"] : [];
 		case "array_pattern":
 		case "rest_pattern":
+			return node.kind() === "identifier" ? ["value"] : [];
+		case "object_pattern":
+			return node.kind() === "shorthand_property_identifier_pattern" ? ["value"] : [];
 		case "namespace_import":
 		case "import_clause":
-			return node.kind() === "identifier";
-		case "object_pattern":
-			return node.kind() === "shorthand_property_identifier_pattern";
+			return node.kind() === "identifier" ? BOTH : [];
 		case "import_specifier":
-			return at(parent.field("alias") ?? parent.field("name"), node);
+			return named(parent.field("alias") ?? parent.field("name")) ? BOTH : [];
 		default:
-			return false;
+			return [];
 	}
 }
 
-/** Whether a scope declares `name` itself, not in a scope nested inside it. */
-function scopeDeclares(scope: SgNode, name: string): boolean {
+/** Whether a scope itself, not a scope nested inside it, declares `name` in one of `spaces`. */
+function scopeDeclares(scope: SgNode, name: string, spaces: Space[]): boolean {
 	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
 	return scope
 		.findAll({
 			rule: {
-				any: [
-					{ kind: "identifier", regex: exactly },
-					{ kind: "shorthand_property_identifier_pattern", regex: exactly },
-				],
+				any: ["identifier", "type_identifier", "shorthand_property_identifier_pattern"].map((kind) => ({
+					kind,
+					regex: exactly,
+				})),
 			},
 		})
 		.some((node) => {
-			if (!declaresHere(node)) return false;
-			// The scope a declaration belongs to: a function's own name belongs to the scope around it.
+			if (!declaredSpaces(node).some((space) => spaces.includes(space))) return false;
 			let owner = node.parent();
-			if (
-				owner &&
-				["function_declaration", "generator_function_declaration", "class_declaration"].includes(String(owner.kind()))
-			)
-				owner = owner.parent();
+			if (owner && NAMED_FROM_OUTSIDE.has(String(owner.kind()))) owner = owner.parent();
 			while (owner && !SCOPES.has(String(owner.kind()))) owner = owner.parent();
-			return owner?.range().start.index === scope.range().start.index && owner.kind() === scope.kind();
+			return at(owner, scope);
 		});
 }
 
 /**
- * Refuses a rename whose new name something already declares in a scope around one of the renamed places, which
- * would either collide with it or, silently, make those places refer to the other declaration.
+ * Which names a renamed place would bind or refer to, or none for places nothing can capture: a member's name
+ * (`A.parse`), the original name in `import { parse as p }`, a re-export's specifier, and, when a property is
+ * renamed, an object literal's shorthand (it keeps its value: `{ fullName: name }`).
  */
-function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: string): void {
+function capturable(node: SgNode, renamingProperty: boolean): Space[] {
+	const parent = node.parent();
+	const kind = String(node.kind());
+	if (kind === "property_identifier" || kind === "private_property_identifier") return [];
+	if (kind === "shorthand_property_identifier") return renamingProperty ? [] : ["value"];
+	if (parent && ["import_specifier", "export_specifier"].includes(String(parent.kind()))) {
+		if (parent.field("alias") && at(parent.field("name"), node)) return [];
+		const statement = parent.parent()?.parent();
+		if (parent.kind() === "export_specifier" && statement?.kind() === "export_statement" && statement.field("source"))
+			return [];
+		return BOTH;
+	}
+	return kind === "type_identifier" ? ["type"] : ["value"];
+}
+
+/**
+ * Refuses a rename whose new name something already declares in a scope around one of the renamed places, which
+ * would either collide with it or, silently, make those places refer to the other declaration. Types and values
+ * are apart: a type named like a value doesn't capture it.
+ */
+function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: string, renamingProperty: boolean): void {
 	const locations = [
 		...Object.entries(edit?.changes ?? {}).map(([uri, edits]) => ({ uri, edits })),
 		...(edit?.documentChanges ?? []).flatMap((change) =>
 			"kind" in change ? [] : [{ uri: change.textDocument.uri, edits: change.edits }],
 		),
 	];
-	const names = [
+	const kinds = [
 		"identifier",
+		"type_identifier",
 		"shorthand_property_identifier",
 		"shorthand_property_identifier_pattern",
 		"property_identifier",
+		"private_property_identifier",
 	];
 	for (const { uri, edits } of locations) {
 		const file = fileURLToPath(uri);
@@ -261,13 +310,16 @@ function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: st
 		const byOffset = new Map(
 			parse(lang, source)
 				.root()
-				.findAll({ rule: { any: names.map((kind) => ({ kind })) } })
+				.findAll({ rule: { any: kinds.map((kind) => ({ kind })) } })
 				.map((node) => [node.range().start.index, node]),
 		);
 		for (const { range } of edits) {
 			const offset = offsetOf(source, range.start);
-			for (let scope = byOffset.get(offset)?.parent() ?? null; scope; scope = scope.parent()) {
-				if (!SCOPES.has(String(scope.kind())) || !scopeDeclares(scope, to)) continue;
+			const node = byOffset.get(offset);
+			const spaces = node ? capturable(node, renamingProperty) : [];
+			if (!spaces.length) continue;
+			for (let scope = node!.parent(); scope; scope = scope.parent()) {
+				if (!SCOPES.has(String(scope.kind())) || !scopeDeclares(scope, to, spaces)) continue;
 				const line = source.slice(0, offset).split("\n").length;
 				throw new Error(
 					`refactor.rename: ${to} is already declared where ${JSON.stringify(symbol)} is used, at ${relative(process.cwd(), file)}:${line}, so renaming it there would change what it refers to. Pick another name, or rename that ${to} first.`,
