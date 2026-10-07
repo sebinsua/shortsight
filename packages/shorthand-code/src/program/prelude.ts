@@ -980,6 +980,7 @@ function withSemicolon(result: unknown, match: SgMatch): unknown {
 }
 
 const LISTS = new Set([
+	"enum_body",
 	"arguments",
 	"object",
 	"array",
@@ -993,25 +994,41 @@ const LISTS = new Set([
 ]);
 
 /**
- * Removing an item from a comma-separated list (`{ url, debug: true, retries }` to drop `debug`) takes its comma
- * with it, the one after or, for the last item, the one before: the grammar accepts the empty slot left otherwise.
+ * Removing items from a comma-separated list (`{ url, debug: true, retries }` without `debug`) takes their commas
+ * with them, which the grammar would otherwise accept as empty slots. Planned per list, so neighbouring items can
+ * go together: a run of removed items takes everything up to the next kept item or, at the end, from the last kept
+ * item; removing every item empties the list.
  */
-function withItemComma(changes: Edit[], result: unknown, match: SgMatch): Edit[] {
-	const node = match.node;
-	if (typeof result !== "string" || result.trim() || changes.length !== 1 || !LISTS.has(String(node.parent()?.kind())))
-		return changes;
-	const source = node.getRoot().root().text();
-	const siblings = node.parent()!.children();
-	const index = siblings.findIndex((sibling) => sibling.range().start.index === node.range().start.index);
-	const next = siblings[index + 1];
-	const previous = siblings[index - 1];
-	const change = changes[0]!;
-	if (next?.kind() === ",") {
-		const after = /^[ \t]*(\r?\n[ \t]*)?/.exec(source.slice(next.range().end.index))![0];
-		return [{ ...change, endPos: next.range().end.index + after.length }];
+function withListCommas(edits: Edit[], root: SgNode): Edit[] {
+	const removals = edits.filter((edit) => edit.insertedText === "" && edit.endPos > edit.startPos);
+	if (!removals.length) return edits;
+	const lists = root.findAll({ rule: { any: [...LISTS].map((kind) => ({ kind })) } });
+	const replaced = new Set<Edit>();
+	const added: Edit[] = [];
+	for (const list of lists) {
+		const items = list.namedChildren().filter((child) => child.kind() !== "comment");
+		const removed = items.map((item) =>
+			removals.find((edit) => edit.startPos === item.range().start.index && edit.endPos === item.range().end.index),
+		);
+		if (!removed.some(Boolean)) continue;
+		for (let index = 0; index < items.length;) {
+			if (!removed[index]) {
+				index++;
+				continue;
+			}
+			let end = index;
+			while (end + 1 < items.length && removed[end + 1]) end++;
+			for (let at = index; at <= end; at++) replaced.add(removed[at]!);
+			const next = items[end + 1];
+			const previous = items[index - 1];
+			const template = removed[index]!;
+			const startPos = next || !previous ? items[index]!.range().start.index : previous.range().end.index;
+			const endPos = next ? next.range().start.index : items[end]!.range().end.index;
+			added.push({ ...template, startPos, endPos, insertedText: "" });
+			index = end + 1;
+		}
 	}
-	if (previous?.kind() === ",") return [{ ...change, startPos: previous.range().start.index }];
-	return changes;
+	return [...edits.filter((edit) => !replaced.has(edit)), ...added];
 }
 
 /**
@@ -1066,11 +1083,7 @@ function applyRewrites(
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
-		const changes = withItemComma(
-			replacementEdits(asBody(keepSemicolon(result, match), match), match, file),
-			result,
-			match,
-		);
+		const changes = replacementEdits(asBody(keepSemicolon(result, match), match), match, file);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
 		else {
@@ -1104,9 +1117,10 @@ function applyRewrites(
 		if (inside) nested.push(entry.match);
 		else kept.push(entry);
 	}
-	const edits = kept.flatMap((entry) => entry.edits);
+	const listEdits = kept.flatMap((entry) => entry.edits);
 	const count = kept.length;
-	if (edits.length === 0) return 0;
+	if (listEdits.length === 0) return 0;
+	const edits = withListCommas(listEdits, matches[0]!.node.getRoot().root());
 	const source = matches[0].node.getRoot().root().text();
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
 	// edit twice is one edit; only different edits to the same text conflict.

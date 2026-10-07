@@ -111,6 +111,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		if (!renamingProperty) refuseBarrelCollision(root, file, options.symbol, options.to);
 		if (renamingProperty) refuseMemberCollision(file, position, options.symbol, options.to);
 		refuseCapturedRename(edit, options.symbol, options.to, renamingProperty);
+		if (renamingProperty) await refuseSharedMember(server, edit, options.symbol);
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
@@ -208,6 +209,94 @@ function keepShorthandPropertyNames(
 		if (keepLocals) return `${text}: ${symbol}`;
 		return !renamingProperty && file === declarationFile ? `${symbol}: ${text}` : text;
 	};
+}
+
+/**
+ * Refuses renaming a member that an edited access shares with another type: `s.label` on a `Circle | Square`
+ * reads both types' `label`, so renaming only Circle's would leave Square's unreachable there.
+ */
+async function refuseSharedMember(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	edit: WorkspaceEdit | null,
+	symbol: string,
+): Promise<void> {
+	const locations = [
+		...Object.entries(edit?.changes ?? {}).map(([uri, edits]) => ({ uri, edits })),
+		...(edit?.documentChanges ?? []).flatMap((change) =>
+			"kind" in change ? [] : [{ uri: change.textDocument.uri, edits: change.edits }],
+		),
+	];
+	const renamed = new Set(
+		locations.flatMap(({ uri, edits }) =>
+			edits.map(({ range }) => `${uri}:${range.start.line}:${range.start.character}`),
+		),
+	);
+	let asked = 0;
+	for (const { uri, edits } of locations) {
+		const file = fileURLToPath(uri);
+		const lang = scriptLanguage(file);
+		if (!lang) continue;
+		const source = readFileSync(file, "utf8");
+		const accesses = new Map(
+			parse(lang, source)
+				.root()
+				.findAll({ rule: { kind: "property_identifier", inside: { kind: "member_expression", field: "property" } } })
+				.map((node) => [node.range().start.index, node]),
+		);
+		for (const { range } of edits) {
+			if (!accesses.has(offsetOf(source, range.start)) || ++asked > 200) continue;
+			const definitions =
+				(await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
+					"textDocument/definition",
+					{ textDocument: { uri }, position: range.start },
+				)) ?? [];
+			// The server gives one definition for a method called on a union (`(p: Cat | Dog).speak()`), but each
+			// type of the receiver, so their members of this name count too.
+			const access = accesses.get(offsetOf(source, range.start))!;
+			const receiver = access.parent()?.field("object")?.range().start;
+			const types = receiver
+				? ((await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
+						"textDocument/typeDefinition",
+						{ textDocument: { uri }, position: { line: receiver.line, character: receiver.column } },
+					)) ?? [])
+				: [];
+			const members = [types].flat().flatMap((type) => membersNamed(type, access.text()));
+			for (const definition of [...[definitions].flat(), ...members]) {
+				if (renamed.has(`${definition.uri}:${definition.range.start.line}:${definition.range.start.character}`))
+					continue;
+				throw new Error(
+					`refactor.rename: ${relative(process.cwd(), file)}:${range.start.line + 1} reads ${JSON.stringify(symbol)} through a type that also has another member of that name (at ${relative(process.cwd(), fileURLToPath(definition.uri))}:${definition.range.start.line + 1}), such as a union; rename both, or narrow that access first.`,
+				);
+			}
+		}
+	}
+}
+
+/** The members named `name` of the class or interface declared at a type definition's location. */
+function membersNamed(type: { uri: string; range: Range }, name: string): { uri: string; range: Range }[] {
+	const file = fileURLToPath(type.uri);
+	const lang = scriptLanguage(file);
+	if (!lang || !existsSync(file)) return [];
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, type.range.start);
+	const declaration = parse(lang, source)
+		.root()
+		.findAll({
+			rule: {
+				any: ["class_declaration", "abstract_class_declaration", "interface_declaration"].map((kind) => ({ kind })),
+			},
+		})
+		.find((node) => node.range().start.index <= offset && offset < node.range().end.index);
+	return (declaration?.field("body")?.children() ?? [])
+		.map((member) => member.field("name"))
+		.filter((member): member is SgNode => member?.text() === name)
+		.map((member) => ({
+			uri: type.uri,
+			range: {
+				start: { line: member.range().start.line, character: member.range().start.column },
+				end: { line: member.range().end.line, character: member.range().end.column },
+			},
+		}));
 }
 
 /** The offsets each file's edits start at. */
@@ -724,6 +813,10 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 	if (from === to) throw new Error("refactor.renameFile source and destination are the same file");
 	if (lstatSync(to, { throwIfNoEntry: false }))
 		throw new Error(`refactor.renameFile destination already exists: ${JSON.stringify(options.to)}`);
+	if (!/\.(?:[cm]?[jt]sx?|json)$/.test(to))
+		throw new Error(
+			`refactor.renameFile destination needs a module extension, such as .ts: ${JSON.stringify(options.to)}`,
+		);
 	// The TypeScript server only renames modules; given a stylesheet or a document, it stops.
 	if (!/\.(?:[cm]?[jt]sx?|json)$/.test(from))
 		throw new Error(
@@ -882,6 +975,21 @@ function symbolPosition(
 	// otherwise `parseUser`, offered below as a choice, would be just as ambiguous.
 	const topLevel = found.filter((entry) => entry.name === name);
 	if (found.length > 1 && topLevel.length === 1) return topLevel[0]!.position;
+	// A type and a value of one name (`type Status` with `const Status`) are one symbol to TypeScript.
+	// The server gives a position at the name or, for some declarations, at the `export` before them.
+	const kindAt = ({ line, character }: Position) => {
+		const text = source.split("\n")[line] ?? "";
+		return /\b(?:type|interface)\s+$/.test(text.slice(0, character)) ||
+			/^(?:export\s+)?(?:declare\s+)?(?:type|interface)\b/.test(text.slice(character))
+			? "type"
+			: "value";
+	};
+	if (
+		found.length === 2 &&
+		new Set(found.map((entry) => entry.name)).size === 1 &&
+		kindAt(found[0]!.position) !== kindAt(found[1]!.position)
+	)
+		return found[0]!.position;
 	// A property's `get` and `set` accessors are one symbol to TypeScript, listed twice: either renames both.
 	// The server gives an accessor's position at its `get` or `set` keyword; the name follows it.
 	const lines = source.split("\n");

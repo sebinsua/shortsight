@@ -743,6 +743,39 @@ await refactor.move({ file: "src/keys.ts", symbol: "DEFAULT_TIMEOUT", to: "src/c
 			expect(await Bun.file(path.join(repo, "src/constants.ts")).text()).toContain("export const CACHE_KEY");
 		});
 
+		test("a member shared through a union is refused, a type and value of one name rename together, and renameFile needs an extension", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					'export interface Circle { kind: "circle"; label: string; r: number }\nexport interface Square { kind: "square"; label: string }\nexport type Shape = Circle | Square;\nexport const Status = { A: "a" } as const;\nexport type Status = (typeof Status)[keyof typeof Status];\nexport class Cat { speak() { return 1; } }\nexport class Dog { speak() { return 2; } }\n',
+				"src/b.ts":
+					'import type { Shape, Circle } from "./a";\nimport { Cat, Dog, Status } from "./a";\nexport const f = (s: Shape) => s.label;\nexport const g = (c: Circle) => c.r;\nexport const h = (p: Cat | Dog) => p.speak();\nexport const st: Status = Status.A;\n',
+			});
+			for (const symbol of ["Circle.label", "Cat.speak"]) {
+				const refused = await run(
+					repo,
+					`await refactor.rename({ file: "src/a.ts", symbol: "${symbol}", to: "renamed" });`,
+					{
+						timeoutMs: 15_000,
+					},
+				);
+				expect(refused.exitCode).toBe(1);
+				expect(refused.output).toContain("through a type that also has another member of that name");
+			}
+			const merged = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "Circle.r", to: "radius" });
+await refactor.rename({ file: "src/a.ts", symbol: "Status", to: "State" });`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(merged.exitCode, merged.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/b.ts")).text()).toContain("export const st: State = State.A;");
+			const noExtension = await run(repo, `await refactor.renameFile({ from: "src/b.ts", to: "src/c" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(noExtension.output).toContain("destination needs a module extension");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3564,6 +3597,24 @@ console.log(sg.rewrite("legacyOptions($X)", "options($X)", "a.ts"));`,
 		expect(result.output.trim()).toBe("1");
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
 			"createClient({ url, retries: 3 });\ninit(a, b);\nlast(x);\nsave(user, options(user), { force: true });\n",
+		);
+	});
+
+	test("removing neighbouring list items, or by a returned edit, takes their commas", async () => {
+		const repo = await makeRepo({
+			"a.ts":
+				'foo(a, b, c);\nimport { keep, oldA, oldB } from "./lib";\nconst xs = [\n  one,\n  two,\n  three,\n];\nenum E { A, B, C }\n',
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("foo($A, $B, $C)", (m) => m.node.getMatch("B").replace(""), "a.ts");
+sg.rewrite({ rule: { kind: "import_specifier", regex: "^old" } }, "", "a.ts");
+sg.rewrite({ rule: { kind: "identifier", regex: "^two$", inside: { kind: "array" } } }, "", "a.ts");
+sg.rewrite({ rule: { kind: "property_identifier", regex: "^B$", inside: { kind: "enum_body" } } }, "", "a.ts");`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			'foo(a, c);\nimport { keep } from "./lib";\nconst xs = [\n  one,\n  three,\n];\nenum E { A, C }\n',
 		);
 	});
 
