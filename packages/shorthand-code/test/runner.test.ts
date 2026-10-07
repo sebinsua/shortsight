@@ -700,6 +700,26 @@ console.log((await refactor.references({ file: "src/b.ts", symbol: "log", includ
 			expect(shorthand.output).toContain("is a shorthand for a variable");
 		});
 
+		test("an enum member renames inside its enum, a constructor shorthand keeps its key, and a lookup's exact match comes first", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					"export enum Perm { Read = 1, Write = 2, ReadWrite = Read | Write }\ndeclare function register(o: { db: number }): void;\nexport class Repo { constructor(private readonly db: number) { register({ db }); } }\nexport class Session { refresh() {} static create() {} }\n",
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "Perm.Read", to: "View" });
+await refactor.rename({ file: "src/a.ts", symbol: "Repo.db", to: "database" });
+console.log((await graph.query({ type: "lookup", query: "Session.refresh" })).nodes[0].name);`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(result.output.trim()).toBe("Session.refresh");
+			const text = await Bun.file(path.join(repo, "src/a.ts")).text();
+			expect(text).toContain("export enum Perm { View = 1, Write = 2, ReadWrite = View | Write }");
+			expect(text).toContain("constructor(private readonly database: number) { register({ db: database }); }");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3484,6 +3504,25 @@ sg.rewrite("return compute();", "const result = compute();\\nreturn track(result
 		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
 			"function f(x: number) {\n  if (x > 1) {}\n  save(x);\n  for (const y of [x]) {}\n  done();\n  if (x) { const result = compute();\nreturn track(result); }\n}\n",
 		);
+	});
+
+	test("a `}//` in a string isn't a comment, and a call that is an unbraced body stays one statement", async () => {
+		const repo = await makeRepo({
+			"a.ts": 'const a = fetch(`${protocol}//${host}/api`);\nlog("done }// ok");\n',
+			"b.js": 'if (x) debug("x")\nsave(x)\nif (y) oldInit(1);\n',
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("fetch($URL)", "http.get($URL)", "a.ts");
+sg.rewrite("log($A)", "logger.info($A)", "a.ts");
+sg.rewrite("debug($$$A)", "", "b.js");
+sg.rewrite("oldInit($A)", "setup();\\ninit($A)", "b.js");`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			'const a = http.get(`${protocol}//${host}/api`);\nlogger.info("done }// ok");\n',
+		);
+		expect(await Bun.file(path.join(repo, "b.js")).text()).toBe("if (x) {}\nsave(x)\nif (y) { setup();\ninit(1) };\n");
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

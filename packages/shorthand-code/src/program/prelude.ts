@@ -885,10 +885,28 @@ function outsideCaptures(text: string, match: SgMatch): [number, number][] {
  * match like `function $F() { $$$BODY }` that no template reproduces. Keep it after the replacement.
  */
 function withTrailingComment(template: { text: string; literal: [number, number][] }, match: SgMatch) {
-	const tail = /\}((?:[ \t]*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/))+)\s*$/.exec(match.text)?.[1];
-	return tail && !template.text.trimEnd().endsWith(tail.trim())
-		? { ...template, text: template.text + tail }
-		: template;
+	const brace = closingBraceEnd(match.node);
+	if (brace === undefined) return template;
+	const tail = match.node.getRoot().root().text().slice(brace, match.node.range().end.index);
+	return !template.text.trimEnd().endsWith(tail.trim()) ? { ...template, text: template.text + tail } : template;
+}
+
+/**
+ * Where a node's last block closes, when only comments follow its `}` inside the node: tree-sitter puts a comment
+ * after a block (`} // end`) inside the block. Found from the tree, so a `}//` in a string or template isn't one.
+ */
+function closingBraceEnd(node: SgNode): number | undefined {
+	for (let current: SgNode | undefined = node; current; current = current.children().at(-1)) {
+		const children = current.children();
+		const brace = children.findLastIndex((child) => child.kind() === "}");
+		if (
+			brace >= 0 &&
+			brace < children.length - 1 &&
+			children.slice(brace + 1).every((child) => child.kind() === "comment")
+		)
+			return children[brace]!.range().end.index;
+	}
+	return undefined;
 }
 
 /**
@@ -967,7 +985,12 @@ function withSemicolon(result: unknown, match: SgMatch): unknown {
  */
 function asBody(result: unknown, match: SgMatch): unknown {
 	if (typeof result !== "string") return result;
-	const node = match.node;
+	// A pattern without `;` matches the call itself: its statement is the body, when it's all of it.
+	const expression = match.node.parent();
+	const whole =
+		expression?.kind() === "expression_statement" &&
+		expression.namedChildren().filter((child) => child.kind() !== "comment").length === 1;
+	const node = whole ? expression : match.node;
 	const parent = node.parent();
 	const same = (other: SgNode | null) =>
 		other?.range().start.index === node.range().start.index && other.kind() === node.kind();
@@ -1266,7 +1289,10 @@ function toMatch(
 		} else {
 			const captured = node.getMatch(name);
 			// A block's text takes in a comment after its `}`, which would comment out the rest of a template's line.
-			if (captured) vars[name] = captured.text().replace(/\}(?:[ \t]*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/))+\s*$/, "}");
+			if (captured) {
+				const brace = closingBraceEnd(captured);
+				vars[name] = brace === undefined ? captured.text() : source.slice(captured.range().start.index, brace);
+			}
 		}
 	}
 	return remember(

@@ -458,8 +458,10 @@ export async function normalizeResult(
 	for (const [key, value] of Object.entries(sections))
 		sections[key] = key === "steps" ? convertSteps(value) : convertNested(value);
 	await Promise.all(pending);
+	// A lookup's exact matches first, so its first node is the symbol asked for, not the class around it.
 	const sorted = [...nodes.values()].toSorted(
 		(a, b) =>
+			(type === "lookup" ? Number(b.exact === true) - Number(a.exact === true) : 0) ||
 			a.file.localeCompare(b.file) ||
 			(a.ranges?.[0]?.start ?? a.site?.start ?? Infinity) - (b.ranges?.[0]?.start ?? b.site?.start ?? Infinity) ||
 			a.name.localeCompare(b.name),

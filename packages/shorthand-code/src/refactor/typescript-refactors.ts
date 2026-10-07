@@ -166,6 +166,13 @@ function keepShorthandPropertyNames(
 ): AdjustEdit {
 	const shorthands = new Map<string, Map<number, string>>();
 	let renamingProperty: boolean | undefined;
+	const memberUsesIn = new Map<string, Set<number>>();
+	const memberUsesFor = (file: string, source: string) => {
+		const lang = scriptLanguage(file);
+		const uses = lang ? memberUses(parse(lang, source).root(), symbol) : new Set<number>();
+		memberUsesIn.set(file, uses);
+		return uses;
+	};
 	return (file, source, start, end, text) => {
 		if (source.slice(start, end) !== symbol) return text;
 		let kinds = shorthands.get(file);
@@ -186,13 +193,15 @@ function keepShorthandPropertyNames(
 		const kind = kinds.get(start);
 		if (kind !== "shorthand_property_identifier" && kind !== "shorthand_property_identifier_pattern") return text;
 		renamingProperty ??= declaresProperty(declarationFile, declaration);
+		// Inside the constructor that declares it, a parameter property is a variable too: `{ db }` keeps its key,
+		// as the variable is renamed with it.
+		if (keepLocals && (memberUsesIn.get(file) ?? memberUsesFor(file, source)).has(start)) return `${symbol}: ${text}`;
 		// In `{ name }` the key names a property and the value a variable. Renaming the property keeps the
 		// variable, `{ fullName: name }`, and renaming the variable keeps the key, `{ name: displayName }`.
 		if (kind === "shorthand_property_identifier") return renamingProperty ? `${text}: ${symbol}` : `${symbol}: ${text}`;
-		// A pattern, as in `const { name } = user` or `({ name } = parsed)`. When the property is renamed, the
-		// server renames the variable and its uses too, so `{ fullName }` stays consistent. A variable of this
-		// file keeps the key; a pattern elsewhere is reading the export being renamed, as in
-		// `const { parseUser } = api`, and follows the rename.
+		// A pattern, as in `const { name } = user` or `({ name } = parsed)`. Renaming a member keeps the local,
+		// `{ fullName: name }`. A variable of this file keeps the key; a pattern elsewhere is reading the export
+		// being renamed, as in `const { parseUser } = api`, and follows the rename.
 		if (keepLocals) return `${text}: ${symbol}`;
 		return !renamingProperty && file === declarationFile ? `${symbol}: ${text}` : text;
 	};
@@ -210,18 +219,7 @@ function dropLocalEdits(edit: WorkspaceEdit | null, name: string): void {
 		if (!lang) return edits;
 		const source = readFileSync(file, "utf8");
 		const root = parse(lang, source).root();
-		const parameters = root
-			.findAll({ rule: { any: [{ kind: "required_parameter" }, { kind: "optional_parameter" }] } })
-			.filter((parameter) => parameterProperty(parameter) && parameter.field("pattern")?.text() === name);
-		const members = new Set<number>();
-		for (const parameter of parameters) {
-			members.add(parameter.field("pattern")!.range().start.index);
-			const constructor = parameter.parent()?.parent();
-			for (const use of constructor
-				?.field("body")
-				?.findAll({ rule: { kind: "identifier", regex: `^${name.replace(/\$/g, "\\$")}$` } }) ?? [])
-				members.add(use.range().start.index);
-		}
+		const members = memberUses(root, name);
 		const locals = new Set(
 			root
 				.findAll({ rule: { kind: "identifier" } })
@@ -233,6 +231,30 @@ function dropLocalEdits(edit: WorkspaceEdit | null, name: string): void {
 	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
 	for (const change of edit?.documentChanges ?? [])
 		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
+}
+
+/**
+ * Where a member named `name` is written as a plain name though it isn't a local: a constructor parameter that
+ * declares it and that parameter's uses in the constructor (shorthands included), and bare references to an enum
+ * member inside its enum (`ReadWrite = Read | Write`).
+ */
+function memberUses(root: SgNode, name: string): Set<number> {
+	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
+	const named = { any: ["identifier", "shorthand_property_identifier"].map((kind) => ({ kind, regex: exactly })) };
+	const uses = new Set<number>();
+	for (const parameter of root.findAll({
+		rule: { any: [{ kind: "required_parameter" }, { kind: "optional_parameter" }] },
+	})) {
+		if (!parameterProperty(parameter) || parameter.field("pattern")?.text() !== name) continue;
+		uses.add(parameter.field("pattern")!.range().start.index);
+		for (const use of parameter.parent()?.parent()?.field("body")?.findAll({ rule: named }) ?? [])
+			uses.add(use.range().start.index);
+	}
+	for (const body of root.findAll({ rule: { kind: "enum_body" } })) {
+		const declares = body.children().some((member) => (member.field("name") ?? member).text() === name);
+		if (declares) for (const use of body.findAll({ rule: named })) uses.add(use.range().start.index);
+	}
+	return uses;
 }
 
 /** Whether the name at `position` is an object literal's shorthand member, `{ parseUser }`. */
