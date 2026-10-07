@@ -5,7 +5,7 @@ import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
-import { resolveModule } from "./move-imports.ts";
+import { exportsName, resolveModule } from "./move-imports.ts";
 import { scriptLanguage } from "./placement.ts";
 import {
 	existingProjectFile,
@@ -458,16 +458,6 @@ function offsetOf(source: string, position: Position): number {
 	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character + bom;
 }
 
-/** Whether a module's text exports `name`: by a declaration, or in an export list (as itself or an alias). */
-function exportsName(text: string, name: string): boolean {
-	const escaped = name.replace(/\$/g, "\\$");
-	const declaration = new RegExp(
-		`\\bexport\\s+(?:declare\\s+)?(?:async\\s+)?(?:const|let|var|function\\*?|class|abstract\\s+class|interface|type|enum|namespace)\\s+${escaped}\\b`,
-	);
-	const listed = new RegExp(`\\bexport\\s*(?:type\\s*)?\\{[^}]*(?:^|[\\s,{]|as\\s+)${escaped}\\s*(?:,|\\}|$)`, "m");
-	return declaration.test(text) || listed.test(text);
-}
-
 /**
  * Refuses a rename that a barrel would turn into a different symbol: one that re-exports the renamed declaration's
  * file (`export * from "./date"`) and already exports the new name, itself or through its other `export *` modules,
@@ -604,6 +594,40 @@ function validateRenameFile(options: RenameFileOptions): void {
 	if (!options.from || !options.to) throw new Error("refactor.renameFile from and to must not be empty");
 }
 
+const samePosition = (a: Position, b: Position) => a.line === b.line && a.character === b.character;
+
+/**
+ * The members of type aliases' object types, `User.name` for `type User = { name: string }`, including those of
+ * intersections and unions: the server's document symbols leave them out.
+ */
+function typeAliasMembers(file: string, source: string): { name: string; position: Position }[] {
+	const lang = scriptLanguage(file);
+	if (!lang || !source) return [];
+	const members: { name: string; position: Position }[] = [];
+	for (const alias of parse(lang, source)
+		.root()
+		.findAll({ rule: { kind: "type_alias_declaration" } })) {
+		const owner = alias.field("name")?.text();
+		const value = alias.field("value");
+		if (!owner || !value) continue;
+		const objects =
+			value.kind() === "object_type"
+				? [value]
+				: value.findAll({
+						rule: { kind: "object_type", inside: { kind: "type_alias_declaration", stopBy: { kind: "object_type" } } },
+					});
+		for (const object of objects)
+			for (const member of object.children()) {
+				if (!["property_signature", "method_signature"].includes(String(member.kind()))) continue;
+				const name = member.field("name");
+				if (!name) continue;
+				const { line, column } = name.range().start;
+				members.push({ name: `${owner}.${name.text()}`, position: { line, character: column } });
+			}
+	}
+	return members;
+}
+
 function symbolPosition(
 	symbols: Array<DocumentSymbol | SymbolInformation>,
 	name: string,
@@ -625,6 +649,11 @@ function symbolPosition(
 		}
 	};
 	visit(symbols);
+	entries.push(
+		...typeAliasMembers(file, source).filter(
+			(member) => !entries.some((entry) => samePosition(entry.position, member.position)),
+		),
+	);
 	const found = entries.filter((entry) =>
 		name.includes(".") ? entry.name === name : entry.name.split(".").at(-1) === name,
 	);

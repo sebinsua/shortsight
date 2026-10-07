@@ -527,6 +527,29 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(barrel.output).toContain("src/utils/index.ts re-exports src/utils/date.ts and already exports format");
 		});
 
+		test("members of a type alias's object types can be renamed, and a bare member name stays ambiguous", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					'export type User = { name: string; age: number };\nexport type Props = { label: string } & { onClick(): void };\nexport interface IUser { name: string }\nexport const u: User = { name: "a", age: 1 };\nexport function show(p: Props) { return p.label; }\n',
+			});
+			const renamed = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" });
+await refactor.rename({ file: "src/a.ts", symbol: "Props.label", to: "title" });`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(renamed.exitCode, renamed.output).toBe(0);
+			const text = await Bun.file(path.join(repo, "src/a.ts")).text();
+			expect(text).toContain('{ fullName: "a", age: 1 }');
+			expect(text).toContain("return p.title;");
+			expect(text).toContain("interface IUser { name: string }");
+			const ambiguous = await run(repo, `await refactor.rename({ file: "src/a.ts", symbol: "age", to: "years" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(ambiguous.output).not.toContain("found no declaration");
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",

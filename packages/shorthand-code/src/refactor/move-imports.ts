@@ -142,6 +142,31 @@ export function repointRelativePaths(text: string, from: string, to: string): st
 	);
 }
 
+/**
+ * Refuses exporting `names` from `file` when a barrel that re-exports it wholesale (`export * from "./a"`) already
+ * exports one of them from elsewhere: its importers of that name would become ambiguous, or change meaning.
+ */
+function refuseBarrelCollisions(file: string, names: string[], barrels: string[]): void {
+	if (!names.length) return;
+	const real = existsSync(file) ? realpathSync(file) : resolve(file);
+	const star = /\bexport\s+\*\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
+	for (const barrel of barrels) {
+		if (!existsSync(barrel) || barrel === file) continue;
+		const text = readFileSync(barrel, "utf8");
+		const modules = [...text.matchAll(star)].map((match) => resolveModule(barrel, match[1]!));
+		if (!modules.includes(real)) continue;
+		for (const name of names) {
+			const other = modules.find(
+				(module) => module && module !== real && exportsName(readFileSync(module, "utf8"), name),
+			);
+			if (exportsName(text, name) || other)
+				throw new MoveError(
+					`it would have to export ${name} from ${file}, but ${barrel} re-exports that file and already exports ${name}${other ? ` from ${other}` : ""}; rename ${name} first`,
+				);
+		}
+	}
+}
+
 /** A `let` or `var` declaration, exported or not: what it declares can be assigned again. */
 function reassignable(statement: SgNode): boolean {
 	const inner = statement.kind() === "export_statement" ? statement.field("declaration") : statement;
@@ -345,6 +370,16 @@ const SOURCE_FOR_JS: Record<string, string[]> = {
  * spelling of a `.ts` file; others go through Bun's resolver, which follows tsconfig `paths` and packages
  * in node_modules, including workspace packages linked into the repository.
  */
+/** Whether a module's text exports `name`: by a declaration, or in an export list (as itself or an alias). */
+export function exportsName(text: string, name: string): boolean {
+	const escaped = name.replace(/\$/g, "\\$");
+	const declared = new RegExp(
+		`\\bexport\\s+(?:declare\\s+)?(?:async\\s+)?(?:const|let|var|function\\*?|class|abstract\\s+class|interface|type|enum|namespace)\\s+${escaped}\\b`,
+	);
+	const listed = new RegExp(`\\bexport\\s*(?:type\\s*)?\\{[^}]*(?:^|[\\s,{]|as\\s+)${escaped}\\s*(?:,|\\}|$)`, "m");
+	return declared.test(text) || listed.test(text);
+}
+
 /** The prefixes of the nearest tsconfig's `paths` aliases: "@app/" for "@app/*". */
 function pathAliases(from: string): string[] {
 	for (let directory = dirname(from); ; directory = dirname(directory)) {
@@ -683,6 +718,8 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	const fromSource: { text: string; typeOnly: boolean }[] = [];
 	// The target's type-only imports of what the moved code uses as a value, which must become value imports.
 	const toValue = new Set<Binding>();
+	// Source declarations the move has to export, which a barrel could already export from elsewhere.
+	const newlyExported: string[] = [];
 	const free = input.analysis.dependencies;
 	const order = [...sourceBindings.map((binding) => binding.local), ...source.declarations.keys()];
 	const ordered = [...order.filter((name) => free.has(name)), ...[...free].filter((name) => !order.includes(name))];
@@ -724,9 +761,11 @@ export function planImports(input: MoveInput): ImportPlan | null {
 					`import ${binding.typeOnly ? "type " : ""}${binding.text} from ${quote}${module}${quote}${attributes};`,
 				);
 		} else if (local) {
+			// A type and a value can share a name (`type Status` and `const Status`): it's a value if either is.
+			const typeOnly = (source.declarations.get(name) ?? []).every((entry) => entry.type);
 			if (existing || target.declarations.has(name)) {
 				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) {
-					if (existing.typeOnly && !local.type) toValue.add(existing);
+					if (existing.typeOnly && !typeOnly) toValue.add(existing);
 					continue;
 				}
 				throw new MoveError(`${targetFile} already has a different ${name}`);
@@ -734,28 +773,29 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			if (local.isDefault) {
 				// The source's default export: import it as that.
 				const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));
-				targetLines.push(`import ${local.type ? "type " : ""}${name} from "${module}";`);
+				targetLines.push(`import ${typeOnly ? "type " : ""}${name} from "${module}";`);
 				continue;
 			}
 			// Exported only under another name by a list: import it by that name.
 			const aliases = local.exported ? [] : (source.exportedAs.get(name) ?? []);
 			if (aliases.length && !aliases.includes(name)) {
 				const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));
-				const typeOnly = local.type ? "type " : "";
+				const keyword = typeOnly ? "type " : "";
 				targetLines.push(
 					aliases.includes("default")
-						? `import ${typeOnly}${name} from "${module}";`
-						: `import ${typeOnly}{ ${aliases[0]} as ${name} } from "${module}";`,
+						? `import ${keyword}${name} from "${module}";`
+						: `import ${keyword}{ ${aliases[0]} as ${name} } from "${module}";`,
 				);
 				continue;
 			}
 			// Every declaration of the name: overload signatures must all be exported or none.
+			if (!local.exported && !source.listed.has(name)) newlyExported.push(name);
 			if (!local.exported && !source.listed.has(name))
 				for (const entry of source.declarations.get(name) ?? []) {
 					const { start, end } = entry.statement.range();
 					sourceEdits.push({ start: start.index, end: end.index, text: `export ${entry.statement.text()}` });
 				}
-			fromSource.push({ text: name, typeOnly: local.type });
+			fromSource.push({ text: name, typeOnly });
 		} else if (declaredUnimportably(sourceRoot, node, name)) {
 			throw new MoveError(
 				`it uses ${name}, which ${sourceFile} declares as a namespace, with \`declare\` or with \`import … = require\`, and the target can't import that; move or export ${name} as an ordinary declaration first`,
@@ -915,6 +955,7 @@ export function planImports(input: MoveInput): ImportPlan | null {
 		console.error(
 			`warning: refactor.move left ${relative(dirname(sourceFile), sourceFile)} and ${relative(dirname(sourceFile), targetFile)} importing each other. That fails at run time if either uses the other's exports while loading, at the top level; move those declarations too if so.`,
 		);
+	refuseBarrelCollisions(sourceFile, newlyExported, input.filesReexportingAll());
 	return {
 		source: withInsertionsMerged(sourceEdits),
 		target: targetEdits,

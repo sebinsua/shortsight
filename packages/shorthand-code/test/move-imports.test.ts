@@ -726,6 +726,35 @@ test("a target's type-only import of something the moved code uses as a value be
 	await typeCheck(root);
 });
 
+test("a dependency that is both a type and a value is imported as a value", async () => {
+	const root = project({
+		"src/a.ts":
+			'export type Status = "a" | "b";\nexport const Status = { Active: "a" } as const;\nexport function isActive(s: Status) {\n\treturn s === Status.Active;\n}\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "isActive", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toStartWith('import { Status } from "./a";\n');
+	await typeCheck(root);
+});
+
+test("a helper the move would export is refused when a barrel already exports that name from elsewhere", async () => {
+	const root = project({
+		"src/lib/a.ts":
+			'function format(n: number) {\n\treturn n.toFixed(2);\n}\nexport function price(n: number) {\n\treturn "$" + format(n);\n}\n',
+		"src/lib/b.ts": "export function format(s: string) {\n\treturn s.trim();\n}\n",
+		"src/lib/index.ts": 'export * from "./a";\nexport * from "./b";\n',
+	});
+
+	expect(
+		String(
+			await rejection(
+				moveDeclaration(join(root, "src/lib/a.ts"), "price", join(root, "src/lib/price.ts"), everyFile(root)),
+			),
+		),
+	).toContain("already exports format");
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',
