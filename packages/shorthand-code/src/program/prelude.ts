@@ -372,6 +372,22 @@ function trackedFiles(): Set<string> {
 }
 
 /** Select a Git-visible file, directory, or glob and return repository-relative paths. */
+/**
+ * A glob whose leading directories that exist are taken literally: in a Next.js route `app/[id]/*.tsx`, `[id]` is
+ * the directory, not a character class matching `app/i` and `app/d`.
+ */
+function literalDirectories(pattern: string): string {
+	const segments = pattern.split("/");
+	let index = 0;
+	for (; index < segments.length - 1; index++)
+		if (!statSync(resolve(repositoryRoot, ...segments.slice(0, index + 1)), { throwIfNoEntry: false })?.isDirectory())
+			break;
+	return [
+		...segments.slice(0, index).map((segment) => segment.replace(/[[\]{}()*?!\\]/g, "\\$&")),
+		...segments.slice(index),
+	].join("/");
+}
+
 function selectFiles(input: string): string[] {
 	const normalized = gitPath(input);
 	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
@@ -380,7 +396,7 @@ function selectFiles(input: string): string[] {
 		// A program often names files one at a time; a tracked one needs no git process to be selected.
 		if (stats?.isFile() && trackedFiles().has(normalized)) return [normalized];
 		if (pathspec) return gitFiles(normalized);
-		const matcher = new Glob(normalized);
+		const matcher = new Glob(literalDirectories(normalized));
 		return gitFiles().filter((file) => matcher.match(file));
 	}
 	const files = (sharedListing.files ??= listGitFiles());
@@ -389,7 +405,7 @@ function selectFiles(input: string): string[] {
 		return existing(
 			normalized === "." ? files : files.filter((file) => file === normalized || file.startsWith(`${normalized}/`)),
 		);
-	const matcher = new Glob(normalized);
+	const matcher = new Glob(literalDirectories(normalized));
 	return existing(files.filter((file) => matcher.match(file)));
 }
 
@@ -817,10 +833,18 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
 	const literal: [number, number][] = [];
 	let last = 0;
 	for (const variable of template.matchAll(METAVARIABLE)) {
-		const before = template.slice(last, variable.index);
+		let before = template.slice(last, variable.index);
+		const value = match.vars[variable[2]!] ?? variable[0];
+		let end = variable.index + variable[0].length;
+		// An empty `$$$` takes its comma with it: `[$$$DEPS, client]` on `[]` is `[client]`, not `[, client]`.
+		if (variable[1] === "$$$" && value === "") {
+			const after = /^\s*,\s*/.exec(template.slice(end));
+			if (after) end += after[0].length;
+			else before = before.replace(/,\s*$/, "");
+		}
 		if (before) literal.push([text.length, text.length + before.length]);
-		text += before + (match.vars[variable[2]!] ?? variable[0]);
-		last = variable.index + variable[0].length;
+		text += before + value;
+		last = end;
 	}
 	const rest = template.slice(last);
 	if (rest) literal.push([text.length, text.length + rest.length]);
@@ -849,6 +873,17 @@ function outsideCaptures(text: string, match: SgMatch): [number, number][] {
 	return literal;
 }
 
+/**
+ * A comment after a block's `}` (`} // eslint-disable-line complexity`) is parsed inside the block, so it's part of a
+ * match like `function $F() { $$$BODY }` that no template reproduces. Keep it after the replacement.
+ */
+function withTrailingComment(template: { text: string; literal: [number, number][] }, match: SgMatch) {
+	const tail = /\}((?:[ \t]*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/))+)\s*$/.exec(match.text)?.[1];
+	return tail && !template.text.trimEnd().endsWith(tail.trim())
+		? { ...template, text: template.text + tail }
+		: template;
+}
+
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
 function conflicting(a: Edit, b: Edit): boolean {
 	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
@@ -864,7 +899,8 @@ function applyRewrites(
 	const planned: { match: SgMatch; edits: Edit[] }[] = [];
 	for (const match of matches) {
 		if (typeof replacement === "string") checkTemplate(replacement, new Set(Object.keys(match.vars)));
-		const template = typeof replacement === "string" ? interpolate(replacement, match) : undefined;
+		const template =
+			typeof replacement === "string" ? withTrailingComment(interpolate(replacement, match), match) : undefined;
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
@@ -1142,11 +1178,14 @@ function toMatch(
  * trailing comment is kept; a line comment then ends the line, so the rest of the template isn't commented out.
  */
 function sequenceText(nodes: SgNode[], source: string): string {
-	const lastItem = nodes.findLastIndex((item) => item.kind() !== "," && item.kind() !== "comment");
+	// A comment after a block's `}` (`} // end`) is parsed inside the block, so the `}` can be among the nodes.
+	const closing = nodes.findIndex((item) => item.kind() === "}");
+	const items = closing < 0 ? nodes : nodes.slice(0, closing);
+	const lastItem = items.findLastIndex((item) => item.kind() !== "," && item.kind() !== "comment");
 	if (lastItem < 0) return "";
-	const comments = nodes.slice(lastItem + 1).filter((item) => item.kind() === "comment");
+	const comments = items.slice(lastItem + 1).filter((item) => item.kind() === "comment");
 	const text =
-		source.slice(nodes[0]!.range().start.index, nodes[lastItem]!.range().end.index) +
+		source.slice(items[0]!.range().start.index, items[lastItem]!.range().end.index) +
 		comments.map((comment) => ` ${comment.text()}`).join("");
 	return comments.at(-1)?.text().startsWith("//") ? `${text}\n` : text;
 }

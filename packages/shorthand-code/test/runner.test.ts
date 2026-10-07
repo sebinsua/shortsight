@@ -3192,6 +3192,33 @@ sg.rewrite("defineConfig({ $$$P })", "defineConfig({ $$$P, plugins: [] })", "t.t
 		expect(result.output.trim()).toBe("3 1");
 	});
 
+	test("an empty $$$ takes its comma with it, and a comment after a block's brace survives", async () => {
+		const repo = await makeRepo({
+			"a.ts":
+				"useEffect(() => run(), []);\nlog();\nlog(x);\nfunction f(): number {\n  return 1;\n} // eslint-disable-line complexity\nfunction g() {\n  work();\n} // end g\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("useEffect($F, [$$$DEPS])", "useEffect($F, [$$$DEPS, client])", "a.ts");
+sg.rewrite("log($$$ARGS)", "logger.info($$$ARGS, ctx)", "a.ts");
+sg.rewrite("function f(): $R { $$$BODY }", "export function f(): $R { $$$BODY }", "a.ts");
+sg.insert("done();", { endOf: sg.one({ rule: { kind: "statement_block", inside: { kind: "function_declaration", has: { field: "name", regex: "^g$" } } } }, "a.ts") });`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			"useEffect(() => run(), [client]);\nlogger.info(ctx);\nlogger.info(x, ctx);\nexport function f(): number { return 1; } // eslint-disable-line complexity\nfunction g() {\n  work();\n  done();\n} // end g\n",
+		);
+	});
+
+	test("a glob's leading directories that exist are literal, so a bracketed route isn't a character class", async () => {
+		const repo = await makeRepo({ "app/[id]/page.tsx": "x()\n", "app/i/page.tsx": "x()\n", "app/d/x.tsx": "x()\n" });
+		const result = await run(
+			repo,
+			`console.log(JSON.stringify(glob("**/*.tsx", "app/[id]")), sg.find("x()", "app/[id]/*.tsx").map((m) => m.file).join(","));`,
+		);
+		expect(result.output.trim()).toBe('["app/[id]/page.tsx"] app/[id]/page.tsx');
+	});
+
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
 		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A", "src/a.ts");`);

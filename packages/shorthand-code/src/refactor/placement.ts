@@ -278,7 +278,9 @@ function placement(text: string, destination: Destination) {
 			offset = key === "startOf" ? (last ? (lineEnd < 0 ? source.length : lineEnd + 1) : fileStart) : source.length;
 			indent = "";
 		} else {
-			offset = key === "startOf" ? start.index + 1 : end.index - 1;
+			// Inside the braces: a comment after the `}` (`} // end`) is parsed as part of the block.
+			const closing = node.children().findLast((child) => child.kind() === "}");
+			offset = key === "startOf" ? start.index + 1 : (closing?.range().start.index ?? end.index - 1);
 			const first = children[0];
 			indent =
 				first && first.range().start.line > start.line ? indentAt(source, first.range().start.index) : `${indent}\t`;
