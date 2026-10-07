@@ -305,6 +305,83 @@ await refactor.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 			);
 		});
 
+		test("renaming a variable keeps the key in a destructuring assignment, and a parameter property is a property", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					'export function readName(json: string) { let name = "anonymous"; ({ name } = JSON.parse(json)); return name; }\nexport class User { constructor(public name: string) {} }\nexport function make(name: string): User { return { name }; }\n',
+			});
+
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "readName.name", to: "displayName" });
+await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" });`,
+				{ timeoutMs: 15_000 },
+			);
+
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+				'export function readName(json: string) { let displayName = "anonymous"; ({ name: displayName } = JSON.parse(json)); return displayName; }\nexport class User { constructor(public fullName: string) {} }\nexport function make(name: string): User { return { fullName: name }; }\n',
+			);
+		});
+
+		test("a rename to a name already declared where the symbol is used is refused", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts":
+					"export const limit = 10;\nexport function clamp(n: number) { const max = 5; return Math.min(n, limit, max * 100); }\nexport function other() { const total = 1; return total + limit; }\n",
+			});
+
+			const refused = await run(repo, `await refactor.rename({ file: "src/a.ts", symbol: "limit", to: "max" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(refused.exitCode).toBe(1);
+			expect(refused.output).toContain('max is already declared where "limit" is used, at src/a.ts:2');
+			const allowed = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "other.total", to: "max" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(allowed.exitCode).toBe(0);
+		});
+
+		test("references finds a private member", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": "{}",
+				"src/a.ts": "export class Counter { #count = 0; inc() { return this.#count++; } }\n",
+			});
+			const result = await run(
+				repo,
+				`console.log((await refactor.references({ file: "src/a.ts", symbol: "Counter.#count", includeDeclaration: true })).length);`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output.trim()).toBe("2");
+		});
+
+		test("renameFile refuses when TypeScript leaves an importer unchanged", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/lib/util.ts": "export interface Extra { y: number }\nexport const u = 1;\n",
+				"src/a.ts": 'import { u } from "./lib/util";\nexport const v = u;\n',
+				"src/aug.ts": 'import "./lib/util";\ndeclare module "./lib/util" { interface Extra { x: number } }\n',
+			});
+			const result = await run(
+				repo,
+				`await refactor.renameFile({ from: "src/lib/util.ts", to: "src/lib/util2.ts" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`TypeScript didn't update the import of "src/lib/util.ts" in "src/a.ts"`);
+			expect(await Bun.file(path.join(repo, "src/lib/util.ts")).exists()).toBe(true);
+		});
+
 		test("rejects a missing or ambiguous declaration without writing", async () => {
 			const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
 			for (const symbol of ["missing", "value"]) {
@@ -2725,6 +2802,56 @@ sg.rewrite("$P.then($F)", "$P.andThen($F)", "src/a.ts");`,
 			);
 		}
 		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe("foo(1);\n");
+	});
+
+	test("files that aren't UTF-8 are skipped by searches and refused by edits, not corrupted", async () => {
+		const repo = await makeRepo({ "ok.js": "foo(2);\n" });
+		await Bun.write(
+			path.join(repo, "legacy.js"),
+			new Uint8Array([...Buffer.from("// caf"), 0xe9, ...Buffer.from("\nfoo(1);\n")]),
+		);
+		await Bun.write(
+			path.join(repo, "app.properties"),
+			new Uint8Array([...Buffer.from("name=Jos"), 0xe9, ...Buffer.from("\nport=1\n")]),
+		);
+		await $`git add -A && git -c user.name=test -c user.email=test@test commit -qm latin1`.cwd(repo);
+		const before = await Bun.file(path.join(repo, "legacy.js")).bytes();
+
+		const rewritten = await run(repo, `sg.rewrite("foo($A)", "bar($A)");`);
+		expect(rewritten.exitCode).toBe(0);
+		expect(rewritten.output).toContain("skipped legacy.js: it isn't valid UTF-8");
+		expect(await Bun.file(path.join(repo, "legacy.js")).bytes()).toEqual(before);
+		expect(await Bun.file(path.join(repo, "ok.js")).text()).toBe("bar(2);\n");
+
+		const edited = await run(repo, `edit({ path: "app.properties", oldText: "port=1", newText: "port=2" });`);
+		expect(edited.exitCode).toBe(1);
+		expect(edited.output).toContain("isn't valid UTF-8, and editing it here would corrupt it");
+	});
+
+	test("a file reached through a symlink is rewritten once", async () => {
+		const repo = await makeRepo({ "src/real.ts": "inc(x);\n" });
+		await symlink("src/real.ts", path.join(repo, "alias.ts"));
+		await $`git add -A && git -c user.name=test -c user.email=test@test commit -qm link`.cwd(repo);
+		const result = await run(repo, `console.log(sg.rewrite("inc($A)", "inc($A + 1)"));`);
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "src/real.ts")).text()).toBe("inc(x + 1);\n");
+	});
+
+	test("a later rewrite still reaches original code an earlier template carried over, but not text it wrote", async () => {
+		const repo = await makeRepo({
+			"a.js": "function load(u) {\n  return fetchSync(u);\n}\nrequest(u, undefined, t);\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("function $F($$$P) { $$$B }", "async function $F($$$P) { $$$B }", "a.js");
+sg.rewrite("fetchSync($U)", "await fetch($U)", "a.js");
+sg.rewrite("request($A, undefined, $T)", "request($A, { timeoutMs: $T })", "a.js");
+sg.rewrite("request($A, $B)", "request($A, $B, {})", "a.js");`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.js")).text()).toBe(
+			"async function load(u) { return await fetch(u); }\nrequest(u, { timeoutMs: t });\n",
+		);
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

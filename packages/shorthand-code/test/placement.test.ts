@@ -118,6 +118,26 @@ test("remove and move take a statement's doc comment with it, and leave other co
 	);
 });
 
+test("placement keeps comments with the code they belong to", () => {
+	const path = fixture(
+		"/** Adds numbers. */\nexport function add(a: number, b: number) { return a + b; }\nconst a = 1; // the answer\n// seconds, NOT ms\nconst timeout = 30;\nconst retries = 3;\nfunction f() {}\n",
+	);
+	insert('import { z } from "./z";', { before: match(path, "export function add($$$) { $$$ }") });
+	insert("const b = 2;", { after: match(path, "const a = 1") });
+	move(match(path, "const timeout = 30"), { after: match(path, "function f() {}") });
+	expect(readFileSync(path, "utf8")).toBe(
+		'import { z } from "./z";\n/** Adds numbers. */\nexport function add(a: number, b: number) { return a + b; }\nconst a = 1; // the answer\nconst b = 2;\nconst retries = 3;\nfunction f() {}\n// seconds, NOT ms\nconst timeout = 30;\n',
+	);
+});
+
+test("remove takes a directive about the next line with its statement", () => {
+	const path = fixture(
+		'// keep\n// @ts-expect-error string port\nexport const port: number = "8080";\nexport const host = "x";\n',
+	);
+	remove(match(path, 'export const port: number = "8080";'));
+	expect(readFileSync(path, "utf8")).toBe('// keep\nexport const host = "x";\n');
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

@@ -417,7 +417,7 @@ export async function normalizeResult(
 			const to = [...nodes.values()].filter((node) => !node.site && node.name === match[5]);
 			if (from.length !== 1 || to.length !== 1)
 				return paths
-					? value.replace(` at ${match[3]}:${match[4]}]`, ` at ${paths.toRepositoryPath(match[3])}:${match[4]}]`)
+					? value.replace(` at ${match[3]}:${match[4]}]`, () => ` at ${paths.toRepositoryPath(match[3])}:${match[4]}]`)
 					: value;
 			const edge: GraphEdge = {
 				from: from[0].handle,

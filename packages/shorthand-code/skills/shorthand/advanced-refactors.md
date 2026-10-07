@@ -77,9 +77,9 @@ Argument lists and class bodies aren't supported.
 To copy, use `sg.insert(source.text, destination)`. `sg.move(source, destination, transform?)`
 accepts an optional `(text) => string` returning non-empty replacement text.
 
-**Rematch placement targets after each edit**; use array removal for matches from one search. A `/** … */` doc comment
-directly above a statement moves or is removed with it; other adjacent comments stay in place, and interior
-whitespace is preserved. Imports and bindings aren't repaired; to move a top-level
+**Rematch placement targets after each edit**; use array removal for matches from one search. A move takes the comments
+directly above a statement and any comment after it on the same line; a removal takes a `/** … */` doc comment and
+directives such as `// @ts-expect-error`, leaving other comments in place. Interior whitespace is preserved. Imports and bindings aren't repaired; to move a top-level
 declaration with its imports, use `refactor.move`. If placement
 rejects joined statement boundaries, add explicit semicolons.
 

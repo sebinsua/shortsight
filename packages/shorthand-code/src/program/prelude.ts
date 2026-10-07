@@ -29,6 +29,8 @@ import {
 	isFileTarget,
 	move,
 	remember,
+	NotUtf8Error,
+	readUtf8,
 	remove,
 	syntaxErrorAt,
 	type FileTarget,
@@ -577,9 +579,17 @@ function sourceFiles(helper: string, files: FileScope): string[] {
 			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
 	);
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${describeScope(files)}`);
+	// A symlink and its target are one file: reading and writing both would rewrite it twice. Keep the real path.
+	const byRealPath = new Map<string, string>();
+	for (const file of parseable) {
+		const absolute = resolve(repositoryRoot, file);
+		const real = realpathSync(absolute);
+		if (!byRealPath.has(real) || !lstatSync(absolute).isSymbolicLink()) byRealPath.set(real, file);
+	}
+	const unique = parseable.filter((file) => byRealPath.get(realpathSync(resolve(repositoryRoot, file))) === file);
 	// Named from the program's working directory, like every other path it reads and writes, so a program that
 	// changes directory still reads, writes and reports the file it selected. At the root this is the path itself.
-	return parseable.map((file) => {
+	return unique.map((file) => {
 		const absolute = resolve(repositoryRoot, file);
 		try {
 			return relative(process.cwd(), absolute);
@@ -741,6 +751,27 @@ function checkTemplate(template: string, captured: ReadonlySet<string>): void {
 
 const matchRange = (match: SgMatch) => match.node.range();
 
+/**
+ * Where a template replacement's own text is, as opposed to text its metavariables carried over from the match.
+ * Only that text is new: a later pattern may still rewrite the original code a capture carried along.
+ */
+const literalText = new WeakMap<Edit, [number, number][]>();
+
+function interpolate(template: string, match: SgMatch): { text: string; literal: [number, number][] } {
+	let text = "";
+	const literal: [number, number][] = [];
+	let last = 0;
+	for (const variable of template.matchAll(METAVARIABLE)) {
+		const before = template.slice(last, variable.index);
+		if (before) literal.push([text.length, text.length + before.length]);
+		text += before + (match.vars[variable[2]!] ?? variable[0]);
+		last = variable.index + variable[0].length;
+	}
+	const rest = template.slice(last);
+	if (rest) literal.push([text.length, text.length + rest.length]);
+	return { text: text + rest, literal };
+}
+
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
 function conflicting(a: Edit, b: Edit): boolean {
 	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
@@ -756,11 +787,12 @@ function applyRewrites(
 	const planned: { match: SgMatch; edits: Edit[] }[] = [];
 	for (const match of matches) {
 		if (typeof replacement === "string") checkTemplate(replacement, new Set(Object.keys(match.vars)));
-		const result =
-			typeof replacement === "function"
-				? programCode(() => replacement(match))
-				: replacement.replace(METAVARIABLE, (text, _, name) => match.vars[name] ?? text);
+		const template = typeof replacement === "string" ? interpolate(replacement, match) : undefined;
+		const result = template
+			? template.text
+			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
 		const changes = replacementEdits(result, match, file);
+		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		if (changes.length > 0) planned.push({ match, edits: changes });
 	}
 	// Outer matches first. A match inside one whose edits it clashes with is left alone, as ast-grep's CLI does:
@@ -835,40 +867,65 @@ function applyRewrites(
 // Where earlier sg.rewrite calls put their replacements, per file, while the file still holds exactly what
 // the last rewrite wrote. Rewrites apply one after another, so a later pattern can match an earlier result:
 // rewriting request(u, undefined, t) to request(u, { timeoutMs: t }) creates a new two-argument call.
-// Pattern rewrites skip such places; selections the program makes itself are always rewritten.
+// Pattern rewrites skip such places; selections the program makes itself are always rewritten. Each range
+// keeps where its replacement's own text is: code a metavariable carried over is still the original code.
 let explainedSkips = false;
-const rewriteOutputs = new Map<string, { text: string; ranges: [number, number][] }>();
+interface OutputRange {
+	from: number;
+	to: number;
+	literal: [number, number][];
+}
+const rewriteOutputs = new Map<string, { text: string; ranges: OutputRange[] }>();
+
+const moved = (range: OutputRange, by: number): OutputRange => ({
+	from: range.from + by,
+	to: range.to + by,
+	literal: range.literal.map(([from, to]) => [from + by, to + by]),
+});
 
 function recordRewriteOutput(file: string, before: string, after: string, all: readonly Edit[]): void {
 	// A replacement identical to what it replaced produced nothing, so later rewrites may still match there.
 	const edits = all.filter((edit) => edit.insertedText !== before.slice(edit.startPos, edit.endPos));
 	const key = resolve(file);
 	const previous = rewriteOutputs.get(key);
-	const ranges: [number, number][] = [];
+	const ranges: OutputRange[] = [];
 	let shift = 0;
 	let next = 0;
 	const earlier = previous?.text === before ? previous.ranges : [];
 	for (const edit of edits) {
 		// Keep earlier ranges this edit leaves alone, moved by the edits before them.
-		for (; next < earlier.length && earlier[next]![1] <= edit.startPos; next++)
-			ranges.push([earlier[next]![0] + shift, earlier[next]![1] + shift]);
-		while (next < earlier.length && earlier[next]![0] < edit.endPos) next++;
+		for (; next < earlier.length && earlier[next]!.to <= edit.startPos; next++)
+			ranges.push(moved(earlier[next]!, shift));
+		while (next < earlier.length && earlier[next]!.from < edit.endPos) next++;
 		const start = edit.startPos + shift;
-		ranges.push([start, start + edit.insertedText.length]);
+		const literal = literalText.get(edit) ?? [[0, edit.insertedText.length]];
+		ranges.push({
+			from: start,
+			to: start + edit.insertedText.length,
+			literal: literal.map(([from, to]) => [start + from, start + to]),
+		});
 		shift += edit.insertedText.length - (edit.endPos - edit.startPos);
 	}
-	for (; next < earlier.length; next++) ranges.push([earlier[next]![0] + shift, earlier[next]![1] + shift]);
+	for (; next < earlier.length; next++) ranges.push(moved(earlier[next]!, shift));
 	rewriteOutputs.set(key, { text: after, ranges });
 }
 
-/** Pattern matches that lie inside text an earlier sg.rewrite produced in this file, which is still unchanged. */
+/**
+ * Pattern matches that lie inside text an earlier sg.rewrite produced in this file, which is still unchanged,
+ * and take in some of that rewrite's own text rather than only code a metavariable carried over.
+ */
 function insideEarlierOutput(file: string, source: string, matches: readonly SgMatch[]): Set<SgMatch> {
 	const recorded = rewriteOutputs.get(resolve(file));
 	if (!recorded || recorded.text !== source) return new Set();
 	return new Set(
 		matches.filter((match) => {
 			const { start, end } = match.node.range();
-			return recorded.ranges.some(([from, to]) => start.index >= from && end.index <= to);
+			return recorded.ranges.some(
+				(range) =>
+					start.index >= range.from &&
+					end.index <= range.to &&
+					range.literal.some(([from, to]) => start.index < to && end.index > from),
+			);
 		}),
 	);
 }
@@ -953,11 +1010,23 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	return count;
 }
 
-/** A JS/TS/HTML/CSS file's source and syntax tree, or null for other files. */
+const skippedNotUtf8 = new Set<string>();
+
+/** A JS/TS/HTML/CSS file's source and syntax tree, or null for other files and files that aren't UTF-8. */
 function parseFile(file: string) {
 	const lang = LANGUAGES[file.split(".").pop()!];
 	if (!lang) return null;
-	const source = readFileSync(file, "utf8");
+	let source: string;
+	try {
+		source = readUtf8(file);
+	} catch (error) {
+		if (!(error instanceof NotUtf8Error)) throw error;
+		if (!skippedNotUtf8.has(resolve(file))) {
+			skippedNotUtf8.add(resolve(file));
+			console.error(`warning: skipped ${gitPath(file)}: it isn't valid UTF-8, and editing it here would corrupt it`);
+		}
+		return null;
+	}
 	return { source, root: parse(lang, source).root() };
 }
 
@@ -1026,6 +1095,7 @@ function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 						"identifier",
 						"type_identifier",
 						"property_identifier",
+						"private_property_identifier",
 						"shorthand_property_identifier",
 						"shorthand_property_identifier_pattern",
 						"string_fragment",
@@ -1058,7 +1128,7 @@ function editText(options: { path: string; oldText: string; newText: string }): 
 	if (typeof oldText !== "string" || typeof newText !== "string")
 		throw new Error("edit expects { path, oldText, newText } strings");
 	if (!oldText) throw new Error("edit: oldText must not be empty; use Bun.write to create a file");
-	const source = readFileSync(path, "utf8");
+	const source = readUtf8(path);
 	const searchable = normalizeEditLineEndings(source);
 	const needle = normalizeEditLineEndings(oldText);
 	const start = searchable.indexOf(needle);

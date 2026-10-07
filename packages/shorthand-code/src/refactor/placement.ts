@@ -48,6 +48,23 @@ const languages: Record<string, Lang> = {
 };
 
 /** The ast-grep language for a JS/TS filename, by extension. */
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** Thrown for a file that isn't valid UTF-8: decoding and writing it back would replace those bytes. */
+export class NotUtf8Error extends Error {}
+
+/** A file's text, refusing files that aren't UTF-8, such as Latin-1 sources, so they aren't corrupted. */
+export function readUtf8(path: string): string {
+	try {
+		return utf8.decode(readFileSync(path));
+	} catch (error) {
+		if (!(error instanceof TypeError)) throw error;
+		throw new NotUtf8Error(
+			`${JSON.stringify(path)} isn't valid UTF-8, and editing it here would corrupt it; change it another way`,
+		);
+	}
+}
+
 export function scriptLanguage(filename: string): Lang | undefined {
 	return languages[filename.split(".").pop()!];
 }
@@ -63,7 +80,7 @@ export function file(filename: string): FileTarget {
 	const lang = scriptLanguage(filename);
 	if (!lang) throw new Error("sg.file requires a JS/TS filename");
 	const existed = existsSync(filename);
-	const source = existed ? readFileSync(filename, "utf8") : "";
+	const source = existed ? readUtf8(filename) : "";
 	return remember(
 		{ file: filename, text: source, node: parse(lang, source).root(), [fileTarget]: true as const },
 		source,
@@ -80,8 +97,7 @@ export function getMatchSnapshot(
 	if (!saved) throw new Error("Expected a file-backed match from sg.find, sg.one, or sg.file");
 	if (match.node !== saved.node || match.file !== saved.displayFile)
 		throw new Error("File-backed match identity was changed; select it again");
-	if (!sources.has(saved.file))
-		sources.set(saved.file, existsSync(saved.file) ? readFileSync(saved.file, "utf8") : null);
+	if (!sources.has(saved.file)) sources.set(saved.file, existsSync(saved.file) ? readUtf8(saved.file) : null);
 	const source = sources.get(saved.file);
 	if ((source !== null) !== saved.existed || (saved.existed && source !== saved.source)) {
 		throw new Error(`Stale match in ${match.file}; ${staleAdvice}`);
@@ -123,33 +139,52 @@ interface Edit {
 	text: string;
 }
 
+const DIRECTIVE =
+	/^\/[/*]\s*(?:@ts-(?:expect-error|ignore)|(?:eslint|oxlint)-disable-next-line|prettier-ignore|biome-ignore|deno-lint-ignore|istanbul ignore|c8 ignore|v8 ignore)\b/;
+
 /**
- * Where a statement's doc comment starts, so it moves and goes with the statement rather than ending up on the
- * next one. That's the nearest JSDoc-style block comment above it, with any comments in between, when each starts its own line
- * and no blank line separates them. Other comments stay where they are.
+ * Where the comments that belong to a statement start, so they go with it rather than ending up on the next one.
+ * Each must start its own line with no blank line before what follows. When `all`, as for a move, that's every
+ * such comment; otherwise directives about the next line and up to the nearest JSDoc-style block comment, with
+ * any comments in between, and other comments stay where they are.
  */
-function leadingCommentsStart(node: SgNode, source: string): number {
+function leadingCommentsStart(node: SgNode, source: string, all = false): number {
 	let start = node.range().start.index;
-	let docStart: number | undefined;
+	let belongs: number | undefined;
 	for (let previous = node.prev(); previous?.kind() === "comment"; previous = previous.prev()) {
 		const { start: from, end: to } = previous.range();
 		const ownLine = !source.slice(source.lastIndexOf("\n", from.index - 1) + 1, from.index).trim();
 		if (!ownLine || !/^[\t ]*(\r?\n)?[\t ]*$/.test(source.slice(to.index, start))) break;
 		start = from.index;
-		if (previous.text().startsWith("/**")) {
-			docStart = start;
+		// A directive about the next line, such as `// @ts-expect-error`, would apply to another statement if left.
+		if (all || DIRECTIVE.test(previous.text())) belongs = start;
+		else if (previous.text().startsWith("/**")) {
+			belongs = start;
 			break;
 		}
 	}
-	return docStart ?? node.range().start.index;
+	return belongs ?? node.range().start.index;
 }
 
-/** Removes a statement with its doc comment, and the line break after it when it has whole lines to itself. */
-function removal(saved: Snapshot): Edit {
+/** Where a statement ends, including a comment that follows it on the same line: `const a = 1; // the answer`. */
+function trailingCommentEnd(node: SgNode, source: string): number {
+	const end = node.range().end.index;
+	const next = node.next();
+	if (next?.kind() !== "comment") return end;
+	const between = source.slice(end, next.range().start.index);
+	return /^[\t ]*$/.test(between) && !next.text().includes("\n") ? next.range().end.index : end;
+}
+
+/**
+ * Removes a statement with its doc comment (or, when `allComments`, every comment directly above it and any
+ * comment after it on its last line), and the line break after it
+ * when it has whole lines to itself.
+ */
+function removal(saved: Snapshot, allComments = false): Edit {
 	statement(saved.node);
-	const { end } = saved.node.range();
 	const { source } = saved;
-	const start = leadingCommentsStart(saved.node, source);
+	const end = { index: allComments ? trailingCommentEnd(saved.node, source) : saved.node.range().end.index };
+	const start = leadingCommentsStart(saved.node, source, allComments);
 	const lineStart = source.lastIndexOf("\n", start - 1) + 1;
 	const newline = source.startsWith("\r\n", end.index) ? 2 : source.startsWith("\n", end.index) ? 1 : 0;
 	const wholeLines = !source.slice(lineStart, start).trim() && newline > 0;
@@ -173,7 +208,9 @@ function placement(text: string, destination: Destination) {
 	let indent = indentAt(source, start.index);
 	if (key === "before" || key === "after") {
 		statement(node);
-		offset = key === "before" ? start.index : end.index;
+		// Around the statement's comments: before its doc comment, after a comment on its last line.
+		offset = key === "before" ? leadingCommentsStart(node, source) : trailingCommentEnd(node, source);
+		indent = indentAt(source, offset);
 	} else {
 		if (!container(node))
 			throw new Error("startOf/endOf requires a file root or statement block; select the body explicitly");
@@ -367,7 +404,7 @@ export interface MoveFiles {
 export async function moveDeclaration(from: string, symbol: string, to: string, files: MoveFiles): Promise<void> {
 	const lang = scriptLanguage(from);
 	if (!lang || !scriptLanguage(to)) throw new Error("refactor.move requires JS/TS files");
-	const source = readFileSync(from, "utf8");
+	const source = readUtf8(from);
 	const node = topLevelDeclaration(parse(lang, source).root(), symbol, from);
 	const analysis = await analyzeMove({
 		root: files.root,
@@ -387,15 +424,17 @@ function moveNodes(
 	files?: MoveFiles & { analysis: MoveAnalysis },
 ): void {
 	const source = snapshot(match);
-	const deletion = removal(source);
-	// A doc comment travels with the declaration; a transform sees only the declaration itself.
+	// Comments directly above travel with the declaration; a transform sees only the declaration itself.
+	const deletion = removal(source, true);
 	const comments = source.source.slice(
-		leadingCommentsStart(source.node, source.source),
+		leadingCommentsStart(source.node, source.source, true),
 		source.node.range().start.index,
 	);
+	const trailing = source.source.slice(source.node.range().end.index, trailingCommentEnd(source.node, source.source));
 	const declaration = transform ? transform(source.node.text()) : source.node.text();
-	// A transform's result is checked as it is: joining a non-string to the comment would hide what it returned.
-	const text = comments && typeof declaration === "string" ? comments + declaration : declaration;
+	// A transform's result is checked as it is: joining a non-string to the comments would hide what it returned.
+	const text =
+		(comments || trailing) && typeof declaration === "string" ? comments + declaration + trailing : declaration;
 	const target = placement(text, destination);
 	// A transform is arbitrary user code: recheck both snapshots before any writes.
 	snapshot(match);
@@ -427,7 +466,7 @@ function moveNodes(
 				: null;
 		const placed = { ...target.edit };
 		// The source still uses a declaration it did not export, so the target now has to export it.
-		if (plan?.exportMoved) placed.text = placed.text.replace(text, `${comments}export ${declaration}`);
+		if (plan?.exportMoved) placed.text = placed.text.replace(text, () => `${comments}export ${declaration}${trailing}`);
 		const targetEdits: Edit[] = [];
 		for (const edit of plan?.target ?? []) {
 			// Edits at the declaration's insertion point are combined with it: imports inserted there come

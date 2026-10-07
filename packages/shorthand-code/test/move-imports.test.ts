@@ -435,6 +435,119 @@ test("comments inside import lists don't stop a move", async () => {
 	await typeCheck(root);
 });
 
+test("moved code keeps its dollar signs when the target has to export it", async () => {
+	const root = project({
+		"src/price.ts":
+			'function format(a: number) {\n\treturn `$${a.toFixed(2)}` + "$&";\n}\nexport function label(a: number) {\n\treturn format(a);\n}\n',
+	});
+
+	await moveDeclaration(join(root, "src/price.ts"), "format", join(root, "src/format.ts"), everyFile(root));
+
+	expect(read(root, "src/format.ts")).toBe(
+		'export function format(a: number) {\n\treturn `$${a.toFixed(2)}` + "$&";\n}\n',
+	);
+	await typeCheck(root);
+});
+
+test("a default export elsewhere in either file doesn't stop a move, but moving one is refused", async () => {
+	const root = project({
+		"src/app.ts":
+			"export function helper(n: number) {\n\treturn n + 1;\n}\nexport default function App() {\n\treturn helper(1);\n}\n",
+		"src/util.ts": "export default class Other {}\n",
+	});
+
+	await moveDeclaration(join(root, "src/app.ts"), "helper", join(root, "src/util.ts"), everyFile(root));
+	expect(read(root, "src/util.ts")).toContain("export function helper");
+	await typeCheck(root);
+	expect(
+		String(
+			await rejection(moveDeclaration(join(root, "src/app.ts"), "App", join(root, "src/util.ts"), everyFile(root))),
+		),
+	).toContain("moving a default export is not supported yet");
+});
+
+test("moving into the module a declaration imports from uses that module's own declaration", async () => {
+	const root = project({
+		"src/b.ts": "export function helperB() {\n\treturn 1;\n}\n",
+		"src/a.ts": 'import { helperB } from "./b";\nexport function f() {\n\treturn helperB();\n}\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "f", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe(
+		"export function helperB() {\n\treturn 1;\n}\nexport function f() {\n\treturn helperB();\n}\n",
+	);
+	await typeCheck(root);
+});
+
+test("a target that re-exports the moved declaration from the source now exports its own", async () => {
+	const root = project({
+		"src/a.ts": "export function moved() {\n\treturn 1;\n}\nexport const keep = 2;\n",
+		"src/index.ts": 'export { moved, keep } from "./a";\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moved", join(root, "src/index.ts"), everyFile(root));
+
+	expect(read(root, "src/index.ts")).toBe('export { keep } from "./a";\nexport function moved() {\n\treturn 1;\n}\n');
+	await typeCheck(root);
+});
+
+test("a dependency the source exports through an export list isn't exported twice", async () => {
+	const root = project({
+		"src/a.ts": "const helper = () => 1;\nexport function moved() {\n\treturn helper();\n}\nexport { helper };\n",
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "moved", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toBe("const helper = () => 1;\nexport { helper };\n");
+	await typeCheck(root);
+});
+
+test("a move that would leave a module variable assigned through an import is refused", async () => {
+	const root = project({
+		"src/a.ts": [
+			"export let count = 0;",
+			"export function bump() {",
+			"\tcount++;",
+			"}",
+			"let cache: string | undefined;",
+			"export function load() {",
+			'\treturn (cache ??= "x");',
+			"}",
+			"export function local() {",
+			"\tlet count = 1;",
+			"\tcount++;",
+			"\treturn count;",
+			"}",
+			"",
+		].join("\n"),
+	});
+
+	for (const [symbol, message] of [
+		["bump", "it assigns count"],
+		["load", "it assigns cache"],
+		["count", "count is assigned elsewhere"],
+	])
+		expect(
+			String(await rejection(moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
+		).toContain(message);
+	await moveDeclaration(join(root, "src/a.ts"), "local", join(root, "src/b.ts"), everyFile(root));
+	await typeCheck(root);
+});
+
+test("an import added where the source's first statement gains export doesn't join the two", async () => {
+	const root = project({
+		"src/a.ts": "const base = 10;\nexport const limit = base * 2;\nexport const doubled = limit * 2;\n",
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/limit.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toBe(
+		'import { limit } from "./limit";\nexport const base = 10;\nexport const doubled = limit * 2;\n',
+	);
+	await typeCheck(root);
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

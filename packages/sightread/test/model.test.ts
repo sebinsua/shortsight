@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { normalizeResult, omittedKeys } from "../src/model.ts";
-import { resolveNames, resolveNamesSettled } from "../src/names.ts";
+import { preferFullName, resolveNames, resolveNamesSettled } from "../src/names.ts";
 import { createRangeIndex, type RangeIndex } from "../src/ranges.ts";
 import { renderText } from "../src/render.ts";
 import { startGraphClient, type GraphClient } from "../src/upstream.ts";
@@ -299,3 +299,9 @@ test("repository lookup has exact full text", async () => {
 		await live.close();
 	}
 }, 30_000);
+
+test("a name that is a symbol's full name doesn't also match members named its last part", () => {
+	const handles = ["src/hash.ts#hashPassword:function", "src/hash.ts#Other.hashPassword:method"];
+	expect(preferFullName(handles, "hashPassword")).toEqual(["src/hash.ts#hashPassword:function"]);
+	expect(preferFullName(handles.slice(1), "hashPassword")).toEqual(["src/hash.ts#Other.hashPassword:method"]);
+});

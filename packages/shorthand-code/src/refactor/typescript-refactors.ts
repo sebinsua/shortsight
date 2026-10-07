@@ -1,9 +1,11 @@
-import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { parse } from "@ast-grep/napi";
-import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { parse, type SgNode } from "@ast-grep/napi";
+import { dirname, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
+import { resolveModule } from "./move-imports.ts";
 import { scriptLanguage } from "./placement.ts";
 import {
 	existingProjectFile,
@@ -64,6 +66,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position,
 			newName: options.to,
 		});
+		if (!declaresProperty(file, position)) refuseCapturedRename(edit, options.symbol, options.to);
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
@@ -127,35 +130,193 @@ function keepShorthandPropertyNames(symbol: string, declarationFile: string, dec
 			shorthands.set(file, kinds);
 		}
 		const kind = kinds.get(start);
-		// In `const { parseUser } = api` the key names a property: it keeps its name when the renamed symbol is
-		// this local binding, and follows the rename when it is the export being read.
-		const renamingBinding =
-			kind === "shorthand_property_identifier_pattern" &&
-			file === declarationFile &&
-			start === offsetOf(source, declaration);
-		if (kind === "shorthand_property_identifier") {
-			renamingProperty ??= declaresProperty(declarationFile, declaration);
-			return renamingProperty ? `${text}: ${symbol}` : `${symbol}: ${text}`;
-		}
-		return renamingBinding ? `${symbol}: ${text}` : text;
+		if (kind !== "shorthand_property_identifier" && kind !== "shorthand_property_identifier_pattern") return text;
+		renamingProperty ??= declaresProperty(declarationFile, declaration);
+		// In `{ name }` the key names a property and the value a variable. Renaming the property keeps the
+		// variable, `{ fullName: name }`, and renaming the variable keeps the key, `{ name: displayName }`.
+		if (kind === "shorthand_property_identifier") return renamingProperty ? `${text}: ${symbol}` : `${symbol}: ${text}`;
+		// A pattern, as in `const { name } = user` or `({ name } = parsed)`. When the property is renamed, the
+		// server renames the variable and its uses too, so `{ fullName }` stays consistent. A variable of this
+		// file keeps the key; a pattern elsewhere is reading the export being renamed, as in
+		// `const { parseUser } = api`, and follows the rename.
+		return !renamingProperty && file === declarationFile ? `${symbol}: ${text}` : text;
 	};
 }
 
-/** Whether the name at `position` declares a property (an interface or class member, say) rather than a value. */
+const SCOPES = new Set([
+	"program",
+	"statement_block",
+	"function_declaration",
+	"function_expression",
+	"arrow_function",
+	"method_definition",
+	"generator_function_declaration",
+	"class_body",
+	"for_statement",
+	"for_in_statement",
+	"catch_clause",
+	"module",
+	"internal_module",
+]);
+
+/** The name an identifier declares in its scope, if it declares one: a variable, function, class, parameter or import. */
+function declaresHere(node: SgNode): boolean {
+	const parent = node.parent();
+	if (!parent) return false;
+	switch (String(parent.kind())) {
+		case "variable_declarator":
+		case "function_declaration":
+		case "generator_function_declaration":
+		case "class_declaration":
+		case "enum_declaration":
+			return parent.field("name")?.range().start.index === node.range().start.index;
+		case "required_parameter":
+		case "optional_parameter":
+		case "catch_clause":
+		case "namespace_import":
+		case "import_clause":
+		case "array_pattern":
+		case "rest_pattern":
+		case "pair_pattern":
+		case "arrow_function":
+			return node.kind() === "identifier" || node.kind() === "shorthand_property_identifier_pattern";
+		case "object_pattern":
+			return node.kind() === "shorthand_property_identifier_pattern";
+		case "import_specifier":
+			return (parent.field("alias") ?? parent.field("name"))?.range().start.index === node.range().start.index;
+		default:
+			return false;
+	}
+}
+
+/** Whether a scope declares `name` itself, not in a scope nested inside it. */
+function scopeDeclares(scope: SgNode, name: string): boolean {
+	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
+	return scope
+		.findAll({
+			rule: {
+				any: [
+					{ kind: "identifier", regex: exactly },
+					{ kind: "shorthand_property_identifier_pattern", regex: exactly },
+				],
+			},
+		})
+		.some((node) => {
+			if (!declaresHere(node)) return false;
+			// The scope a declaration belongs to: a function's own name belongs to the scope around it.
+			let owner = node.parent();
+			if (
+				owner &&
+				["function_declaration", "generator_function_declaration", "class_declaration"].includes(String(owner.kind()))
+			)
+				owner = owner.parent();
+			while (owner && !SCOPES.has(String(owner.kind()))) owner = owner.parent();
+			return owner?.range().start.index === scope.range().start.index && owner.kind() === scope.kind();
+		});
+}
+
+/**
+ * Refuses a rename whose new name something already declares in a scope around one of the renamed places, which
+ * would either collide with it or, silently, make those places refer to the other declaration.
+ */
+function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: string): void {
+	const locations = [
+		...Object.entries(edit?.changes ?? {}).map(([uri, edits]) => ({ uri, edits })),
+		...(edit?.documentChanges ?? []).flatMap((change) =>
+			"kind" in change ? [] : [{ uri: change.textDocument.uri, edits: change.edits }],
+		),
+	];
+	const names = [
+		"identifier",
+		"shorthand_property_identifier",
+		"shorthand_property_identifier_pattern",
+		"property_identifier",
+	];
+	for (const { uri, edits } of locations) {
+		const file = fileURLToPath(uri);
+		const lang = scriptLanguage(file);
+		if (!lang) continue;
+		const source = readFileSync(file, "utf8");
+		const byOffset = new Map(
+			parse(lang, source)
+				.root()
+				.findAll({ rule: { any: names.map((kind) => ({ kind })) } })
+				.map((node) => [node.range().start.index, node]),
+		);
+		for (const { range } of edits) {
+			const offset = offsetOf(source, range.start);
+			for (let scope = byOffset.get(offset)?.parent() ?? null; scope; scope = scope.parent()) {
+				if (!SCOPES.has(String(scope.kind())) || !scopeDeclares(scope, to)) continue;
+				const line = source.slice(0, offset).split("\n").length;
+				throw new Error(
+					`refactor.rename: ${to} is already declared where ${JSON.stringify(symbol)} is used, at ${relative(process.cwd(), file)}:${line}, so renaming it there would change what it refers to. Pick another name, or rename that ${to} first.`,
+				);
+			}
+		}
+	}
+}
+
+/** A constructor parameter that also declares a property: `public name: string`, `readonly id: number`. */
+function parameterProperty(node: SgNode | null): boolean {
+	return (
+		node !== null &&
+		["required_parameter", "optional_parameter"].includes(String(node.kind())) &&
+		node.children().some((child) => ["accessibility_modifier", "readonly"].includes(String(child.kind())))
+	);
+}
+
+/**
+ * Whether the name at `position` declares a property (an interface or class member, say) rather than a value.
+ * A constructor parameter with an accessibility modifier or `readonly`, `constructor(public name: string)`,
+ * declares both, and is renamed as the property.
+ */
 function declaresProperty(file: string, position: Position): boolean {
 	const lang = scriptLanguage(file);
 	if (!lang) return false;
 	const source = readFileSync(file, "utf8");
 	const offset = offsetOf(source, position);
+	const kinds = [
+		"property_identifier",
+		"private_property_identifier",
+		"identifier",
+		"required_parameter",
+		"optional_parameter",
+	];
 	return parse(lang, source)
 		.root()
-		.findAll({ rule: { any: [{ kind: "property_identifier" }, { kind: "private_property_identifier" }] } })
-		.some((node) => node.range().start.index === offset);
+		.findAll({ rule: { any: kinds.map((kind) => ({ kind })) } })
+		.some((node) => {
+			if (node.range().start.index !== offset) return false;
+			const kind = String(node.kind());
+			if (kind === "property_identifier" || kind === "private_property_identifier") return true;
+			// The server gives a parameter property's position as the start of the parameter, at its modifier.
+			return parameterProperty(kind === "identifier" ? node.parent() : node);
+		});
 }
 
 function offsetOf(source: string, position: Position): number {
 	const lines = source.split("\n");
 	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character;
+}
+
+/** Git-visible scripts with a relative import, export, require or import() of `target`. */
+function relativeImporters(root: string, target: string): string[] {
+	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+		cwd: root,
+		encoding: "utf8",
+	});
+	if (listed.status !== 0) return [];
+	const real = realpathSync(target);
+	const specifier = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*["'](\.{1,2}\/[^"']*)["']/g;
+	return listed.stdout
+		.split("\0")
+		.filter((file) => /\.[cm]?[jt]sx?$/.test(file))
+		.map((file) => resolve(root, file))
+		.filter((file) => {
+			if (file === target || !existsSync(file)) return false;
+			const text = readFileSync(file, "utf8");
+			return [...text.matchAll(specifier)].some((match) => resolveModule(file, match[1]!) === real);
+		});
 }
 
 export async function renameFile(root: string, options: RenameFileOptions): Promise<void> {
@@ -170,6 +331,13 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];
 		const edit = await server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", { files });
 		const changes = planWorkspaceEdit(root, edit);
+		// The server can return no edits at all, as when a file augments this one with `declare module`. Check its
+		// answer against the files that import this one by a relative path, rather than leave them broken.
+		const missed = relativeImporters(root, from).filter((file) => !changes.has(file));
+		if (missed.length)
+			throw new Error(
+				`refactor.renameFile: TypeScript didn't update the import of ${JSON.stringify(options.from)} in ${missed.map((file) => JSON.stringify(relative(root, file))).join(", ")}, so nothing was renamed. A \`declare module\` augmentation of the file can cause this; update those imports with sg.rewrite and move the file with Bun.`,
+			);
 		editingFiles([...changes.keys(), from, to], () => {
 			for (const [changedFile, source] of changes) writeFileSync(changedFile, source);
 			mkdirSync(dirname(to), { recursive: true });

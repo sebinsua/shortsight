@@ -67,20 +67,22 @@ class MoveError extends Error {
 interface Declaration {
 	names: string[];
 	types: Set<string>;
+	/** Exported by name; a default export's name is only local. */
 	exported: boolean;
+	isDefault: boolean;
 }
 
 /** The names a top-level statement declares, or null when it is not a movable declaration. */
 function declaration(statement: SgNode): Declaration | null {
 	let inner = statement;
 	let exported = false;
+	let isDefault = false;
 	if (statement.kind() === "export_statement") {
 		const declared = statement.field("declaration");
 		if (!declared) return null;
-		if (statement.children().some((child) => child.kind() === "default"))
-			throw new MoveError("moving a default export is not supported yet");
+		isDefault = statement.children().some((child) => child.kind() === "default");
 		inner = declared;
-		exported = true;
+		exported = !isDefault;
 	}
 	if (!DECLARATIONS.has(String(inner.kind()))) return null;
 	const names =
@@ -91,7 +93,49 @@ function declaration(statement: SgNode): Declaration | null {
 					.flatMap((declarator) => patternNames(declarator.field("name")))
 			: [inner.field("name")?.text()].filter((name): name is string => Boolean(name));
 	const types = new Set(TYPE_DECLARATIONS.has(String(inner.kind())) ? names : []);
-	return { names, types, exported };
+	return { names, types, exported, isDefault };
+}
+
+/**
+ * An insertion where another edit starts, such as an import added at the top of a file whose first statement gains
+ * `export`, joined into that edit: placement reads two edits at one place as joining statements.
+ */
+function withInsertionsMerged(edits: TextEdit[]): TextEdit[] {
+	const merged = edits.filter((edit) => edit.start !== edit.end || edit.text === "");
+	for (const insertion of edits.filter((edit) => edit.start === edit.end && edit.text !== "")) {
+		const at = merged.find((edit) => edit.start === insertion.start && edit.end > edit.start);
+		if (at) at.text = insertion.text + at.text;
+		else merged.push(insertion);
+	}
+	return merged;
+}
+
+/** A `let` or `var` declaration, exported or not: what it declares can be assigned again. */
+function reassignable(statement: SgNode): boolean {
+	const inner = statement.kind() === "export_statement" ? statement.field("declaration") : statement;
+	if (!inner) return false;
+	if (inner.kind() === "variable_declaration") return true;
+	return inner.kind() === "lexical_declaration" && inner.children().some((child) => child.kind() === "let");
+}
+
+/** Plain names assigned under `root` (`x = …`, `x += …`, `x ??= …`, `x++`), leaving out `except`. */
+function assignedNames(root: SgNode, except?: SgNode): string[] {
+	const skipped = except?.range();
+	return root
+		.findAll({
+			rule: {
+				any: ["assignment_expression", "augmented_assignment_expression", "update_expression"].map((kind) => ({
+					kind,
+				})),
+			},
+		})
+		.filter(
+			(node) =>
+				!skipped || node.range().start.index < skipped.start.index || node.range().end.index > skipped.end.index,
+		)
+		.map((node) => node.field("left") ?? node.field("argument"))
+		.filter((target) => target?.kind() === "identifier")
+		.map((target) => target!.text());
 }
 
 /** The names a top-level statement declares, for analysing it before a move. */
@@ -101,13 +145,7 @@ export function declaredNames(statement: SgNode): string[] {
 
 /** The one top-level statement of a file that declares `symbol`, for moving it by name. */
 export function topLevelDeclaration(root: SgNode, symbol: string, file: string): SgNode {
-	const found = root.children().filter((statement) => {
-		try {
-			return declaration(statement)?.names.includes(symbol);
-		} catch {
-			return statement.field("declaration")?.field("name")?.text() === symbol;
-		}
-	});
+	const found = root.children().filter((statement) => declaration(statement)?.names.includes(symbol));
 	if (found.length === 0) throw new MoveError(`found no top-level declaration of ${symbol} in ${file}`);
 	if (found.length > 1) throw new MoveError(`${symbol} has overloads or merged declarations in ${file}`);
 	return found[0]!;
@@ -435,11 +473,29 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	const { sourceFile, node, targetFile, targetRoot } = input;
 	const moved = declaration(node);
 	if (!moved) return null;
+	// Only moving the default export itself is unsupported; another one in either file doesn't matter.
+	if (moved.isDefault) throw new MoveError("moving a default export is not supported yet");
 	const sourceRoot = node.getRoot().root();
 	const sourceText = sourceRoot.text();
 	const targetText = targetRoot.text();
 	const names = new Set(moved.names);
 	const source = topLevel(sourceRoot);
+	// A module variable becomes an import on one side of the move, and an import can't be assigned.
+	const variable = (statement: SgNode | undefined) => statement !== undefined && reassignable(statement);
+	for (const name of assignedNames(node)) {
+		if (names.has(name) || !input.analysis.dependencies.has(name)) continue;
+		if (source.declarations.get(name)?.some((entry) => variable(entry.statement)))
+			throw new MoveError(
+				`it assigns ${name}, a module variable of ${sourceFile} that would become an import; move ${name} with it or change it through a function`,
+			);
+	}
+	if (reassignable(node)) {
+		const outside = assignedNames(sourceRoot, node).filter((name) => names.has(name));
+		if (outside.length)
+			throw new MoveError(
+				`${outside[0]} is assigned elsewhere in ${sourceFile}, and would be an import there; move that code too or assign it through a function`,
+			);
+	}
 	for (const name of names) {
 		if (source.declarations.get(name)!.length > 1)
 			throw new MoveError(`${name} has overloads or merged declarations in ${sourceFile}`);
@@ -490,6 +546,18 @@ export function planImports(input: MoveInput): ImportPlan | null {
 		if (binding && !(binding.kind === "named" && names.has(binding.imported) && importedFromSource(binding)))
 			throw new MoveError(`${targetFile} already imports a different ${name}`);
 	}
+	// Likewise the target's re-exports of the moved names from the source: the declaration itself is there now.
+	for (const statement of targetRoot.children()) {
+		const from = statement.kind() === "export_statement" ? moduleName(statement) : undefined;
+		const clause = statement.children().find((child) => child.kind() === "export_clause");
+		if (!from || !clause || !sameFile(resolveModule(targetFile, from), sourceFile)) continue;
+		const reexported = specifiersOf(clause).filter((specifier) => names.has(specifier.field("name")!.text()));
+		if (!reexported.length) continue;
+		const renamed = reexported.find((specifier) => specifier.field("alias"));
+		if (renamed) throw new MoveError(`${targetFile} re-exports ${renamed.text()} from ${sourceFile}`);
+		if (!moved.exported) throw new MoveError(`${targetFile} re-exports ${reexported[0]!.text()} from ${sourceFile}`);
+		nowLocal.set(statement, new Set(reexported.map((specifier) => specifier.field("name")!.text())));
+	}
 	for (const [statement, removed] of nowLocal) {
 		const { start, end } = statement.range();
 		targetEdits.push({
@@ -513,6 +581,12 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			const resolved = resolveModule(sourceFile, binding.module);
 			if (binding.module.startsWith(".") && !resolved)
 				throw new MoveError(`cannot resolve ${JSON.stringify(binding.module)} from ${sourceFile}`);
+			// Imported from the target itself: there it's the target's own declaration.
+			if (resolved === realTarget && binding.kind === "named" && target.declarations.has(binding.imported)) {
+				if (binding.local !== binding.imported)
+					throw new MoveError(`${sourceFile} imports ${binding.imported} from ${targetFile} as ${binding.local}`);
+				continue;
+			}
 			if (existing || target.declarations.has(name)) {
 				const sameBinding =
 					existing?.kind === binding.kind &&
@@ -539,7 +613,7 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) continue;
 				throw new MoveError(`${targetFile} already has a different ${name}`);
 			}
-			if (!local.exported) {
+			if (!local.exported && !source.listed.has(name)) {
 				const { start, end } = local.statement.range();
 				sourceEdits.push({ start: start.index, end: end.index, text: `export ${local.statement.text()}` });
 			}
@@ -670,5 +744,16 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			importers.push({ file, source: text, root, edits });
 		}
 	}
-	return { source: sourceEdits, target: targetEdits, importers, exportMoved: stillUsed && !moved.exported };
+	// Each file now imports the other. Calls between them are fine, but code that runs while a module loads, such as
+	// `export const doubled = limit * 2`, can then read a binding before it is initialized.
+	if (fromSource.length && stillUsed)
+		console.error(
+			`warning: refactor.move left ${relative(dirname(sourceFile), sourceFile)} and ${relative(dirname(sourceFile), targetFile)} importing each other. That fails at run time if either uses the other's exports while loading, at the top level; move those declarations too if so.`,
+		);
+	return {
+		source: withInsertionsMerged(sourceEdits),
+		target: targetEdits,
+		importers,
+		exportMoved: stillUsed && !moved.exported,
+	};
 }

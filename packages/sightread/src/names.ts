@@ -62,6 +62,16 @@ const named = (wanted: string) => (handle: string) => {
 	return parsed?.name === wanted || parsed?.name.split(".").at(-1) === wanted;
 };
 
+/**
+ * The handles whose symbol is exactly `wanted`, when there are any, rather than members merely named its last part:
+ * `src/hash.ts#hashPassword` is the function, not also `Other.hashPassword`. Otherwise that handle, which an
+ * ambiguity error offers, would be just as ambiguous.
+ */
+export function preferFullName(handles: string[], wanted: string): string[] {
+	const full = handles.filter((handle) => fromHandle(handle)?.name === wanted);
+	return full.length ? full : handles;
+}
+
 const withoutKind = (handle: string) => handle.slice(0, handle.lastIndexOf(":"));
 
 // A name may carry its file, `src/lib/pricing.ts#applyDiscount`, to choose among same-named symbols. The file
@@ -141,7 +151,9 @@ export async function resolveNamesSettled(
 			fromHandle(paths?.toRepositoryHandle(handle) ?? handle)?.file === file ||
 			fromHandle(handle)?.file === file;
 		const handles = hitsFor(file === undefined ? name : given).filter(inFile);
+		// A bare name stays ambiguous between a function and members named like it; `file#name` means the former.
 		let exact = handles.filter(named(name));
+		if (file !== undefined) exact = preferFullName(exact, name);
 		// `src/lib/index.ts#formatAmount` names what a barrel re-exports, perhaps renamed or through a namespace
 		// (`src/index.ts#Accordion.Root`): use its declaration.
 		let namespace: string | undefined;
