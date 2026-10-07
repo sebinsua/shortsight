@@ -262,7 +262,9 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	// An existing path is taken literally and anything else as a glob, as glob() reads it.
 	const fromRoot = paths.map((path) => {
 		const rooted = relative(repositoryRoot, resolve(path)) || ".";
-		return statSync(resolve(path), { throwIfNoEntry: false }) ? `:(literal)${rooted}` : `:(glob)${rooted}`;
+		return statSync(resolve(path), { throwIfNoEntry: false })
+			? `:(literal)${rooted}`
+			: `:(glob)${literalDirectories(rooted)}`;
 	});
 	const output = git(
 		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
@@ -884,6 +886,15 @@ function withTrailingComment(template: { text: string; literal: [number, number]
 		: template;
 }
 
+/**
+ * A statement pattern written without `;` (`const $A = f($B)`) still matches the statement's `;`, and a replacement
+ * without one would drop it: if the next line starts with `[` or `(`, the two statements then run together.
+ */
+function keepSemicolon(result: unknown, match: SgMatch): unknown {
+	if (typeof result !== "string" || !result.trim() || !match.node.text().endsWith(";")) return result;
+	return /[;}]\s*$/.test(result) ? result : `${result};`;
+}
+
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
 function conflicting(a: Edit, b: Edit): boolean {
 	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
@@ -904,7 +915,7 @@ function applyRewrites(
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
-		const changes = replacementEdits(result, match, file);
+		const changes = replacementEdits(keepSemicolon(result, match), match, file);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
 		if (changes.length > 0) planned.push({ match, edits: changes });

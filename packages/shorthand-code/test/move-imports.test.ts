@@ -755,6 +755,30 @@ test("a helper the move would export is refused when a barrel already exports th
 	).toContain("already exports format");
 });
 
+test("the target's default export, used by the moved code, is its own; a barrel collision in the target is refused", async () => {
+	const root = project({
+		"src/b.ts": "export default function Button() {\n\treturn 1;\n}\n",
+		"src/a.ts": 'import Button from "./b";\nexport function iconButton() {\n\treturn Button();\n}\n',
+		"src/ui/source.ts": 'export const label = "x";\nexport const other = 1;\n',
+		"src/ui/button.ts": "export const Button = 1;\n",
+		"src/ui/format.ts": "export function label() {\n\treturn 1;\n}\n",
+		"src/ui/index.ts": 'export * from "./button";\nexport * from "./format";\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "iconButton", join(root, "src/b.ts"), everyFile(root));
+	expect(read(root, "src/b.ts")).toBe(
+		"export default function Button() {\n\treturn 1;\n}\nexport function iconButton() {\n\treturn Button();\n}\n",
+	);
+	await typeCheck(root);
+	expect(
+		String(
+			await rejection(
+				moveDeclaration(join(root, "src/ui/source.ts"), "label", join(root, "src/ui/button.ts"), everyFile(root)),
+			),
+		),
+	).toContain("already exports label");
+});
+
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {
 	const root = project({
 		"src/data.json": '{ "a": 1, "b": 2 }\n',

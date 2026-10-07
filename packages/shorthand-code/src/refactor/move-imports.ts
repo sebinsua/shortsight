@@ -146,9 +146,10 @@ export function repointRelativePaths(text: string, from: string, to: string): st
  * Refuses exporting `names` from `file` when a barrel that re-exports it wholesale (`export * from "./a"`) already
  * exports one of them from elsewhere: its importers of that name would become ambiguous, or change meaning.
  */
-function refuseBarrelCollisions(file: string, names: string[], barrels: string[]): void {
+function refuseBarrelCollisions(file: string, names: string[], barrels: string[], leaving?: string): void {
 	if (!names.length) return;
 	const real = existsSync(file) ? realpathSync(file) : resolve(file);
+	const left = leaving && existsSync(leaving) ? realpathSync(leaving) : undefined;
 	const star = /\bexport\s+\*\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
 	for (const barrel of barrels) {
 		if (!existsSync(barrel) || barrel === file) continue;
@@ -157,9 +158,10 @@ function refuseBarrelCollisions(file: string, names: string[], barrels: string[]
 		if (!modules.includes(real)) continue;
 		for (const name of names) {
 			const other = modules.find(
-				(module) => module && module !== real && exportsName(readFileSync(module, "utf8"), name),
+				(module) => module && module !== real && module !== left && exportsName(readFileSync(module, "utf8"), name),
 			);
-			if (exportsName(text, name) || other)
+			// The barrel's own exports, unless the name leaves another file it re-exports (that re-export follows it).
+			if ((!left && exportsName(text, name)) || other)
 				throw new MoveError(
 					`it would have to export ${name} from ${file}, but ${barrel} re-exports that file and already exports ${name}${other ? ` from ${other}` : ""}; rename ${name} first`,
 				);
@@ -732,6 +734,13 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			const resolved = resolveModule(sourceFile, binding.module);
 			if (binding.module.startsWith(".") && !resolved)
 				throw new MoveError(`cannot resolve ${JSON.stringify(binding.module)} from ${sourceFile}`);
+			// The target's default export, imported by its own name: there it's the target's own declaration.
+			if (
+				resolved === realTarget &&
+				binding.kind === "default" &&
+				target.declarations.get(binding.local)?.some((entry) => entry.isDefault)
+			)
+				continue;
 			// Imported from the target itself: there it's the target's own declaration.
 			if (resolved === realTarget && binding.kind === "named" && target.declarations.has(binding.imported)) {
 				if (binding.local !== binding.imported)
@@ -956,6 +965,9 @@ export function planImports(input: MoveInput): ImportPlan | null {
 			`warning: refactor.move left ${relative(dirname(sourceFile), sourceFile)} and ${relative(dirname(sourceFile), targetFile)} importing each other. That fails at run time if either uses the other's exports while loading, at the top level; move those declarations too if so.`,
 		);
 	refuseBarrelCollisions(sourceFile, newlyExported, input.filesReexportingAll());
+	// The moved declaration is exported from the target now (the source no longer has it).
+	if (moved.exported || stillUsed)
+		refuseBarrelCollisions(targetFile, [...names], input.filesReexportingAll(), sourceFile);
 	return {
 		source: withInsertionsMerged(sourceEdits),
 		target: targetEdits,

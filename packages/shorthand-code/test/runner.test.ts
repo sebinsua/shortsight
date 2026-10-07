@@ -550,6 +550,46 @@ await refactor.rename({ file: "src/a.ts", symbol: "Props.label", to: "title" });
 			expect(ambiguous.output).not.toContain("found no declaration");
 		});
 
+		test("rename checks the new name and counts every kind of member, and renameFile repoints asset paths", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: { strict: true, module: "esnext", moduleResolution: "bundler" },
+				}),
+				"src/a.ts":
+					"export class Session { refresh() {} }\nexport function del() {}\nexport class Repo { constructor(private readonly db: number) {} connection = 1 }\nexport enum Color { Red, Blue }\n",
+				"src/Button.ts": 'import "./global.css";\nexport const logo = new URL("./logo.svg", import.meta.url);\n',
+				"src/global.css": "\n",
+				"src/logo.svg": "\n",
+			});
+			for (const [symbol, to, message] of [
+				["Session.refresh", "Session.renew", 'give the new name alone, such as "renew"'],
+				["del", "delete", "delete is a reserved word"],
+				["Repo.connection", "db", "second member named db"],
+				["Color.Red", "Blue", "second member named Blue"],
+			]) {
+				const result = await run(
+					repo,
+					`await refactor.rename({ file: "src/a.ts", symbol: "${symbol}", to: "${to}" });`,
+					{
+						timeoutMs: 15_000,
+					},
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.output).toContain(message);
+			}
+			const moved = await run(
+				repo,
+				`await refactor.renameFile({ from: "src/Button.ts", to: "src/components/Button.ts" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(moved.exitCode, moved.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/components/Button.ts")).text()).toBe(
+				'import "../global.css";\nexport const logo = new URL("../logo.svg", import.meta.url);\n',
+			);
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3217,6 +3257,23 @@ sg.insert("done();", { endOf: sg.one({ rule: { kind: "statement_block", inside: 
 			`console.log(JSON.stringify(glob("**/*.tsx", "app/[id]")), sg.find("x()", "app/[id]/*.tsx").map((m) => m.file).join(","));`,
 		);
 		expect(result.output.trim()).toBe('["app/[id]/page.tsx"] app/[id]/page.tsx');
+	});
+
+	test("a statement rewrite keeps the semicolon its pattern left out, and grep globs keep bracketed directories", async () => {
+		const repo = await makeRepo({
+			"a.ts": 'const config = loadConfig("dev");\n[primary, secondary].forEach((s) => s.start());\n',
+			"app/(marketing)/[slug]/page.tsx": "foo(1)\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("const $A = loadConfig($B)", "const $A = loadSettings($B)", "a.ts");
+console.log(grep("foo", "app/(marketing)/[slug]/*.tsx").length);`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim()).toBe("1");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			'const config = loadSettings("dev");\n[primary, secondary].forEach((s) => s.start());\n',
+		);
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

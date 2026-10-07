@@ -78,6 +78,10 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const binding = declaresShorthandBinding(file, position);
 		if (binding) dropPropertyEdits(edit);
 		const renamingProperty = !binding && declaresProperty(file, position);
+		if (!renamingProperty && RESERVED.has(options.to))
+			throw new Error(
+				`refactor.rename: ${options.to} is a reserved word, so it can't name ${JSON.stringify(options.symbol)}`,
+			);
 		if (!renamingProperty) refuseBarrelCollision(root, file, options.symbol, options.to);
 		if (renamingProperty) refuseMemberCollision(file, position, options.symbol, options.to);
 		refuseCapturedRename(edit, options.symbol, options.to, renamingProperty);
@@ -372,8 +376,20 @@ function refuseMemberCollision(file: string, position: Position, symbol: string,
 	if (!list) return;
 	const names = list
 		.children()
-		.flatMap((member) => [member.field("name"), member.field("key"), member.field("property")])
-		.filter((name): name is SgNode => name !== null)
+		.flatMap((member) => [
+			member.field("name"),
+			member.field("key"),
+			member.field("property"),
+			// A bare enum member, and an object's shorthand property.
+			...(["property_identifier", "shorthand_property_identifier"].includes(String(member.kind())) ? [member] : []),
+			// A constructor's parameter properties: `constructor(private readonly db: Db)`.
+			...(member.kind() === "method_definition" && member.field("name")?.text() === "constructor"
+				? (member.field("parameters")?.children() ?? [])
+						.filter(parameterProperty)
+						.map((parameter) => parameter.field("pattern"))
+				: []),
+		])
+		.filter((name): name is SgNode => name !== null && name !== undefined)
 		.map((name) => name.text());
 	if (names.includes(to))
 		throw new Error(
@@ -492,6 +508,28 @@ function refuseBarrelCollision(root: string, file: string, symbol: string, to: s
 	}
 }
 
+/** Whether a relative specifier leads somewhere from `file`: a file as written, or a module TypeScript-style. */
+function leadsSomewhere(file: string, specifier: string): boolean {
+	return existsSync(resolve(dirname(file), specifier)) || resolveModule(file, specifier) !== undefined;
+}
+
+/**
+ * Relative paths in a moved file that worked from where it was and don't from where it goes: static and side-effect
+ * imports of assets, `import()`, `require()` and `new URL()`. Ones TypeScript already updated work from both.
+ */
+function repointMovedPaths(text: string, from: string, to: string): string {
+	if (dirname(from) === dirname(to)) return text;
+	return text.replace(
+		/(\bfrom\s*|\bimport\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bnew\s+URL\s*\(\s*)(["'])(\.\.?\/[^"'\n]*)\2/g,
+		(whole, before: string, quote: string, specifier: string) => {
+			if (!leadsSomewhere(from, specifier) || leadsSomewhere(to, specifier)) return whole;
+			let path = relative(dirname(to), resolve(dirname(from), specifier)).replaceAll("\\", "/");
+			if (!path.startsWith(".")) path = `./${path}`;
+			return `${before}${quote}${path}${quote}`;
+		},
+	);
+}
+
 /** Git-visible JS and TS files. */
 function scriptFiles(root: string): string[] {
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
@@ -538,6 +576,10 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];
 		const edit = await server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", { files });
 		const changes = planWorkspaceEdit(root, edit);
+		// The moved file's relative paths TypeScript doesn't resolve, such as CSS or a `new URL("./logo.svg")`.
+		const moved = changes.get(from) ?? readFileSync(from, "utf8");
+		const repointed = repointMovedPaths(moved, from, to);
+		if (repointed !== moved) changes.set(from, repointed);
 		// The server can return no edits at all, as when a file augments this one with `declare module`. Check its
 		// answer against the files that import this one by a relative path, rather than leave them broken.
 		const missed = relativeImporters(root, from).filter((file) => !changes.has(file));
@@ -586,7 +628,26 @@ function validateRename(options: RenameOptions): void {
 		throw new TypeError("refactor.rename expects { file, symbol, to } strings");
 	if (!options.file || !options.symbol || !options.to)
 		throw new Error("refactor.rename file, symbol and to must not be empty");
+	// The new name alone: `to: "Session.renew"` would be written out as is.
+	const privateName = options.symbol.split(".").at(-1)!.startsWith("#");
+	if (
+		!(
+			privateName
+				? /^#[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u
+				: /^[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u
+		).test(options.to)
+	)
+		throw new Error(
+			`refactor.rename: ${JSON.stringify(options.to)} isn't a name; give the new name alone${options.to.includes(".") ? `, such as ${JSON.stringify(options.to.split(".").at(-1))}` : ""}`,
+		);
 }
+
+/** Words a variable, function, class or import can't be named, though a property can. */
+const RESERVED = new Set(
+	"break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public await".split(
+		" ",
+	),
+);
 
 function validateRenameFile(options: RenameFileOptions): void {
 	if (!options || typeof options.from !== "string" || typeof options.to !== "string")
