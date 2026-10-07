@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { delimiter, dirname, extname, relative, resolve, sep } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import type { MoveAnalysis } from "./move-analysis.ts";
-import { HEADER, PRAGMA, scriptLanguage } from "./placement.ts";
+import { HEADER, PRAGMA, scriptLanguage, withoutComments } from "./placement.ts";
 
 export interface TextEdit {
 	start: number;
@@ -153,7 +153,7 @@ function refuseBarrelCollisions(file: string, names: string[], barrels: string[]
 	const star = /\bexport\s+\*\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
 	for (const barrel of barrels) {
 		if (!existsSync(barrel) || barrel === file) continue;
-		const text = readFileSync(barrel, "utf8");
+		const text = withoutComments(barrel, readFileSync(barrel, "utf8"));
 		const modules = [...text.matchAll(star)].map((match) => resolveModule(barrel, match[1]!));
 		if (!modules.includes(real)) continue;
 		for (const name of names) {

@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname, resolve as resolvePath, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	createMessageConnection,
@@ -15,6 +15,8 @@ interface TypeScriptServer {
 	process: ChildProcessWithoutNullStreams;
 	connection: MessageConnection;
 	files: Map<string, string>;
+	/** Files opened so their projects load, by version: their text overrides the disk, so it's kept current. */
+	opened: Map<string, number>;
 }
 
 let current: TypeScriptServer | undefined;
@@ -69,7 +71,61 @@ export function recordTypeScriptFiles(connection: MessageConnection, files: stri
 		const value = fingerprint(file);
 		if (value) current.files.set(file, value);
 		else current.files.delete(file);
+		const version = current.opened.get(file);
+		if (version === undefined) continue;
+		const uri = pathToFileURL(file).href;
+		if (!value) {
+			current.opened.delete(file);
+			void connection.sendNotification("textDocument/didClose", { textDocument: { uri } }).catch(() => {});
+			continue;
+		}
+		current.opened.set(file, version + 1);
+		void connection
+			.sendNotification("textDocument/didChange", {
+				textDocument: { uri, version: version + 1 },
+				contentChanges: [{ text: documentText(file) }],
+			})
+			.catch(() => {});
 	}
+}
+
+/** A file's text as the server reads it from disk: without a byte order mark, which it doesn't count. */
+function documentText(file: string): string {
+	return readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+}
+
+function languageId(file: string): string {
+	if (/\.[cm]?tsx$/.test(file)) return "typescriptreact";
+	if (/\.[cm]?jsx$/.test(file)) return "javascriptreact";
+	return /\.[cm]?js$/.test(file) ? "javascript" : "typescript";
+}
+
+/**
+ * Opens a script in each TypeScript project, so rename and references see them all: the server only loads the
+ * projects of files it has open, and in a monorepo of project references (`"files": [], "references": [...]`) an
+ * edit's importers can be in another one.
+ */
+async function openEveryProject(connection: MessageConnection, root: string): Promise<Map<string, number>> {
+	const files = [...projectFiles(root).keys()];
+	const scripts = files.filter((file) => /\.[cm]?[jt]sx?$/.test(file) && !file.endsWith(".d.ts"));
+	const projects = files
+		.filter((file) => /(^|[\\/])tsconfig(\.[\w-]+)?\.json$/.test(file))
+		.map((file) => dirname(file));
+	const opened = new Map<string, number>();
+	for (const project of projects) {
+		const script = scripts.find((file) => file.startsWith(project + sep) && !file.includes(`${sep}node_modules${sep}`));
+		if (!script || opened.has(script)) continue;
+		opened.set(script, 1);
+		await connection.sendNotification("textDocument/didOpen", {
+			textDocument: {
+				uri: pathToFileURL(script).href,
+				languageId: languageId(script),
+				version: 1,
+				text: documentText(script),
+			},
+		});
+	}
+	return opened;
 }
 
 async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
@@ -78,6 +134,7 @@ async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
 		server.once("spawn", ready);
 		server.once("error", reject);
 	});
+	let opened = new Map<string, number>();
 	const connection = createMessageConnection(
 		new StreamMessageReader(server.stdout),
 		new StreamMessageWriter(server.stdin),
@@ -99,13 +156,14 @@ async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
 			},
 		});
 		await connection.sendNotification("initialized", {});
+		opened = await openEveryProject(connection, root);
 	} catch (error) {
 		connection.dispose();
 		if (server.exitCode === null) server.kill("SIGKILL");
 		throw error;
 	}
 	server.stderr.resume();
-	const started = { root, process: server, connection, files: projectFiles(root) };
+	const started = { root, process: server, connection, files: projectFiles(root), opened };
 	server.once("exit", () => {
 		if (current?.process !== server) return;
 		connection.dispose();

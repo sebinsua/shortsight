@@ -892,16 +892,40 @@ function withTrailingComment(template: { text: string; literal: [number, number]
  */
 function keepSemicolon(result: unknown, match: SgMatch): unknown {
 	if (typeof result !== "string") return result;
-	// `{ parseUser }` as a reference: a new name keeps the key, as rename does.
-	if (match.node.kind() === "shorthand_property_identifier" && /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(result))
-		return result === match.node.text() ? result : `${match.node.text()}: ${result}`;
-	if (!result.trim() || !match.node.text().endsWith(";")) return result;
+	// A shorthand reference renamed: `{ timeout }` keeps the side that isn't renamed. Renaming a property keeps the
+	// variable, `{ timeoutMs: timeout }`; renaming a variable keeps the key, `{ timeout: limit }`.
+	const kind = String(match.node.kind());
+	const original = match.node.text();
+	const renamesProperty = referencesProperty.get(match);
+	const shorthand =
+		kind === "shorthand_property_identifier" ||
+		(kind === "shorthand_property_identifier_pattern" && renamesProperty !== undefined);
+	if (shorthand && /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(result) && result !== original)
+		return renamesProperty ? `${result}: ${original}` : `${original}: ${result}`;
+	const lang = LANGUAGES[match.file.split(".").pop()!];
+	// A replacement ending in a line comment would comment out the rest of its line (`foo();` → `bar() // x;`).
+	const after = match.node.getRoot().root().text().slice(match.node.range().end.index);
+	if (
+		!original.endsWith(";") &&
+		lang !== Lang.Css &&
+		lang !== Lang.Html &&
+		/\/\/[^\n]*$/.test(result) &&
+		/^[^\n]*\S/.test(after)
+	) {
+		const ends = parse(lang ?? Lang.Tsx, result)
+			.root()
+			.findAll({ rule: { kind: "comment" } })
+			.some((node) => node.text().startsWith("//") && !result.slice(node.range().end.index).trim());
+		if (ends) return `${result}\n`;
+	}
+	if (!result.trim() || !original.endsWith(";")) return result;
+	// A CSS declaration (`color: red;`) needs its `;` back.
+	if (lang === Lang.Css) return /[;}]\s*$/.test(result) ? result : `${result};`;
+	if (lang === Lang.Html) return result;
 	// Whether the replacement ends with a statement that needs one: a declaration or block that ends in `}` doesn't,
 	// but `const config = { ...defaults }` does.
-	const statements = parse(Lang.Tsx, result)
-		.root()
-		.children()
-		.filter((node) => node.isNamed() && node.kind() !== "comment");
+	const root = parse(lang ?? Lang.Tsx, result).root();
+	const statements = root.children().filter((node) => node.isNamed() && node.kind() !== "comment");
 	const last = statements.at(-1);
 	const unterminated =
 		last !== undefined &&
@@ -924,9 +948,13 @@ function keepSemicolon(result: unknown, match: SgMatch): unknown {
 					"enum_declaration",
 				].includes(String(last.field("declaration")?.kind()))));
 	if (!unterminated) return result;
-	// Before a trailing line comment, or the `;` would be part of it.
-	const comment = /[ \t]*\/\/[^\n]*$/.exec(result);
-	return comment ? `${result.slice(0, comment.index)};${comment[0]}` : `${result};`;
+	// Before a comment that ends the replacement, or the `;` would be part of it (a `//` in a string isn't one).
+	const comment = root
+		.findAll({ rule: { kind: "comment" } })
+		.find((node) => !result.slice(node.range().end.index).trim());
+	if (!comment) return `${result};`;
+	const at = result.slice(0, comment.range().start.index).trimEnd().length;
+	return `${result.slice(0, at)};${result.slice(at)}`;
 }
 
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
@@ -1254,7 +1282,7 @@ function referenceCall(node: SgNode): SgNode | undefined {
 
 function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 	const parsed = new Map<string, NonNullable<ReturnType<typeof parseFile>>>();
-	return locations.map(({ uri, range }) => {
+	return locations.map(({ uri, range, property }) => {
 		const file = fileURLToPath(uri);
 		let document = parsed.get(file);
 		if (!document) {
@@ -1289,9 +1317,14 @@ function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 			});
 		if (!node)
 			throw new Error(`refactor.references could not locate the identifier at ${gitPath(file)}:${start.line + 1}`);
-		return toMatch(gitPath(file), node, document.source, "", file, referenceCall(node));
+		const match = toMatch(gitPath(file), node, document.source, "", file, referenceCall(node));
+		if (property !== undefined) referencesProperty.set(match, property);
+		return match;
 	});
 }
+
+/** Whether a reference match is to a property rather than a variable, which decides a shorthand's kept side. */
+const referencesProperty = new WeakMap<SgMatch, boolean>();
 
 function normalizeEditLineEndings(text: string): string {
 	return text.replace(/\r\n?/g, "\n");

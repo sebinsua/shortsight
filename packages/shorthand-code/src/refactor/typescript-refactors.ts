@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
 import { exportsName, relativeCandidates, resolveModule } from "./move-imports.ts";
-import { scriptLanguage } from "./placement.ts";
+import { scriptLanguage, withoutComments } from "./placement.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
@@ -45,6 +45,8 @@ export interface ReferencesOptions<File = string> {
 export interface ReferenceLocation {
 	uri: string;
 	range: Range;
+	/** The symbol is a property (a member), not a variable: `{ timeout }` names it as the key. */
+	property?: boolean;
 }
 
 export interface RenameFileOptions<File = string> {
@@ -129,13 +131,14 @@ export async function references(root: string, options: ReferencesOptions): Prom
 			"refactor.references",
 			readFileSync(file, "utf8"),
 		);
-		return (
+		const property = declaresProperty(file, position);
+		const locations =
 			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
 				textDocument: { uri },
 				position,
 				context: { includeDeclaration: options.includeDeclaration === true },
-			})) ?? []
-		);
+			})) ?? [];
+		return locations.map((location) => ({ ...location, property }));
 	});
 }
 
@@ -499,7 +502,7 @@ function refuseBarrelCollision(root: string, file: string, symbol: string, to: s
 	const reexport = /\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
 	for (const barrel of scriptFiles(root)) {
 		if (barrel === file) continue;
-		const text = readFileSync(barrel, "utf8");
+		const text = withoutComments(barrel, readFileSync(barrel, "utf8"));
 		const modules = [...text.matchAll(reexport)].map((match) => ({
 			star: match[0].includes("*"),
 			path: resolveModule(barrel, match[1]!),
@@ -597,7 +600,7 @@ function relativeImporters(root: string, target: string, destination: string): s
 		.map((file) => resolve(root, file))
 		.filter((file) => {
 			if (file === target || !existsSync(file)) return false;
-			const text = readFileSync(file, "utf8");
+			const text = withoutComments(file, readFileSync(file, "utf8"));
 			return [...text.matchAll(specifier)].some(
 				(match) => resolveModule(file, match[1]!) === real && !stillLeadsTo(file, match[1]!, target, destination),
 			);
@@ -611,6 +614,11 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 	if (from === to) throw new Error("refactor.renameFile source and destination are the same file");
 	if (lstatSync(to, { throwIfNoEntry: false }))
 		throw new Error(`refactor.renameFile destination already exists: ${JSON.stringify(options.to)}`);
+	// The TypeScript server only renames modules; given a stylesheet or a document, it stops.
+	if (!/\.(?:[cm]?[jt]sx?|json)$/.test(from))
+		throw new Error(
+			`refactor.renameFile moves JavaScript and TypeScript modules; move ${JSON.stringify(options.from)} with Bun and update the paths to it with sg.rewrite`,
+		);
 
 	await withTypeScriptServer(root, async (server) => {
 		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];

@@ -66,6 +66,23 @@ export function readUtf8(path: string): string {
 	}
 }
 
+/** A script's text with its comments blanked out (same offsets), so a commented-out import isn't read as one. */
+export function withoutComments(path: string, text: string): string {
+	const lang = scriptLanguage(path);
+	if (!lang) return text;
+	let output = text;
+	for (const comment of parse(lang, text)
+		.root()
+		.findAll({ rule: { kind: "comment" } })) {
+		const { start, end } = comment.range();
+		output =
+			output.slice(0, start.index) +
+			text.slice(start.index, end.index).replace(/[^\n]/g, " ") +
+			output.slice(end.index);
+	}
+	return output;
+}
+
 export function scriptLanguage(filename: string): Lang | undefined {
 	return languages[filename.split(".").pop()!];
 }

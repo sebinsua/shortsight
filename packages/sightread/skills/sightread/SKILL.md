@@ -21,7 +21,8 @@ sightread '[{"type":"references","symbol":"Session.refresh"},{"type":"trace","fr
   reading the file. With `--json`, each use also gives the exact range of its call and of each
   argument, enough to script many edits without a parser.
 - To see what a change affects, ask for `trace` with `"direction": "reverse"`; for what something
-  calls, `"forward"`.
+  calls, `"forward"`. A trace follows symbols, so calls at a file's top level, such as in tests, aren't
+  in it; `references` finds every use.
 - For what a symbol uses and contains, `details`. To get your bearings, `overview`. For a branch,
   `sightread diff`.
 

@@ -609,6 +609,42 @@ await refactor.rename({ file: "src/a.ts", symbol: "Props.label", to: "title" });
 			}
 		});
 
+		test("rename reaches every project of a solution, and renameFile ignores commented-out imports", async () => {
+			const compilerOptions = {
+				composite: true,
+				strict: true,
+				module: "esnext",
+				moduleResolution: "bundler",
+				outDir: "dist",
+				rootDir: "src",
+			};
+			const repo = await makeRepo({
+				".gitignore": "dist\n",
+				"tsconfig.json": JSON.stringify({ files: [], references: [{ path: "packages/a" }, { path: "packages/b" }] }),
+				"packages/a/tsconfig.json": JSON.stringify({ compilerOptions, include: ["src"] }),
+				"packages/b/tsconfig.json": JSON.stringify({
+					compilerOptions,
+					include: ["src"],
+					references: [{ path: "../a" }],
+				}),
+				"packages/a/src/index.ts": "export function parseUser(s: string) { return s; }\n",
+				"packages/a/src/debug.ts": "export const debug = 1;\n",
+				"packages/a/src/other.ts": '// import { debug } from "./debug";\nexport const y = 1;\n',
+				"packages/b/src/index.ts": 'import { parseUser } from "../../a/src/index";\nexport const x = parseUser("y");\n',
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "packages/a/src/index.ts", symbol: "parseUser", to: "decodeUser" });
+await refactor.renameFile({ from: "packages/a/src/debug.ts", to: "packages/a/src/util/debug.ts" });`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "packages/b/src/index.ts")).text()).toBe(
+				'import { decodeUser } from "../../a/src/index";\nexport const x = decodeUser("y");\n',
+			);
+			expect(await Bun.file(path.join(repo, "packages/a/src/util/debug.ts")).exists()).toBe(true);
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -3331,6 +3367,33 @@ sg.rewrite(refs, () => "decodeUser");`,
 		expect(result.exitCode, result.output).toBe(0);
 		expect(await Bun.file(path.join(repo, "pkg/src/b.ts")).exists()).toBe(true);
 		expect(await Bun.file(path.join(repo, "src/a.ts")).exists()).toBe(true);
+	});
+
+	test("a URL isn't a comment, a renamed property keeps its variable, and CSS keeps its semicolons", async () => {
+		const repo = await makeRepo({
+			"tsconfig.json": "{}",
+			"a.ts": "const API = getUrl();\nfoo();\n",
+			"c.ts":
+				"export interface Config { timeout: number }\nexport function f(config: Config) { const { timeout } = config; return timeout * 2; }\nexport function g(timeout: number): Config { return { timeout }; }\n",
+			"s.css": ".a{ color: red; margin: 0; }\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("const API = $V", 'const API = "https://api.example.com"', "a.ts");
+sg.rewrite("foo()", "bar() // was foo", "a.ts");
+const refs = await refactor.references({ file: "c.ts", symbol: "Config.timeout" });
+sg.rewrite(refs, () => "timeoutMs");
+sg.rewrite("color: $V;", "color: var(--fg)", "s.css");`,
+			{ timeoutMs: 15_000 },
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			'const API = "https://api.example.com";\nbar() // was foo\n;\n',
+		);
+		expect(await Bun.file(path.join(repo, "c.ts")).text()).toBe(
+			"export interface Config { timeout: number }\nexport function f(config: Config) { const { timeoutMs: timeout } = config; return timeout * 2; }\nexport function g(timeout: number): Config { return { timeoutMs: timeout }; }\n",
+		);
+		expect(await Bun.file(path.join(repo, "s.css")).text()).toBe(".a{ color: var(--fg); margin: 0; }\n");
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

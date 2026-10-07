@@ -95,6 +95,9 @@ Pass nodes to `sg` as its scope to search only those symbols' lines:
 sg.rewrite("hashPassword($A)", "hashPassword($A, pepper)", callers.nodes);
 ```
 
+A trace's nodes are symbols, so a call at a file's top level, including inside a test's `describe`
+or `it`, isn't among them. To change every call, use `refactor.references` instead.
+
 The graph shows the repository before this program's edits: query first, then pass all the nodes
 to one `sg` call. Scoping `sg` to a node in a file the program already edited throws. A caller that
 calls a symbol twice is one edge, and `sg` inside a caller can also match a same-named call on
