@@ -56,6 +56,10 @@ const refs = await refactor.references({ file: "src/session.ts", symbol: "Sessio
 sg.rewrite(refs, () => "renew");
 ```
 
+References leave out the declaration unless you pass `includeDeclaration: true`, and an import's name
+is a reference only where it's used. To rename a symbol, use `refactor.rename`, which also updates
+declarations, imports and re-exports.
+
 When a reference is being called, `match.call` is the whole call or `new` expression. To replace the
 call, return `m.call.replace(...)`: returning `"logger.info(m)"` for `log("info", m)` would give
 `logger.info(m)("info", m)`. To add an argument, append it to the last one, which keeps calls split
