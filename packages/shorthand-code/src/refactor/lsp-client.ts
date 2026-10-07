@@ -29,11 +29,8 @@ export async function withTypeScriptServer<T>(
 ): Promise<T> {
 	const result = operations.then(async () => {
 		const projectRoot = realpathSync(root);
-		if (current?.root === projectRoot) {
-			if (!sameFiles(current.files, projectFiles(projectRoot))) disposeCurrent();
-		} else {
-			disposeCurrent();
-		}
+		if (current?.root === projectRoot) await catchUp(current, projectFiles(projectRoot));
+		else disposeCurrent();
 		if (!current) {
 			current = await startTypeScriptServer(projectRoot);
 		}
@@ -173,8 +170,32 @@ async function startTypeScriptServer(root: string): Promise<TypeScriptServer> {
 	return started;
 }
 
-function sameFiles(left: Map<string, string>, right: Map<string, string>): boolean {
-	return left.size === right.size && [...left].every(([file, signature]) => right.get(file) === signature);
+/**
+ * Brings a running server up to date with files the program changed since its last call, with `edit`, `sg` or
+ * its own writes, rather than starting it again. A changed tsconfig or package.json can change which projects
+ * exist, so the server starts again for those.
+ */
+async function catchUp(server: TypeScriptServer, files: Map<string, string>): Promise<void> {
+	const changed = [...files].filter(
+		([file, signature]) => server.files.has(file) && server.files.get(file) !== signature,
+	);
+	const created = [...files.keys()].filter((file) => !server.files.has(file));
+	const deleted = [...server.files.keys()].filter((file) => !files.has(file));
+	if (!changed.length && !created.length && !deleted.length) return;
+	const configuration = /(^|[\\/])(?:tsconfig(?:\.[\w-]+)?|jsconfig|package)\.json$/;
+	if ([...changed.map(([file]) => file), ...created, ...deleted].some((file) => configuration.test(file))) {
+		disposeCurrent();
+		return;
+	}
+	const touched = [...changed.map(([file]) => file), ...created, ...deleted];
+	recordTypeScriptFiles(server.connection, touched);
+	await notifyTypeScriptServer(server.connection, "workspace/didChangeWatchedFiles", {
+		changes: [
+			...changed.map(([file]) => ({ uri: pathToFileURL(file).href, type: 2 })),
+			...created.map((file) => ({ uri: pathToFileURL(file).href, type: 1 })),
+			...deleted.map((file) => ({ uri: pathToFileURL(file).href, type: 3 })),
+		],
+	});
 }
 
 function projectFiles(root: string): Map<string, string> {

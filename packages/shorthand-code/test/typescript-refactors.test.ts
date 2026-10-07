@@ -153,16 +153,18 @@ test("consecutive refactors share current TypeScript project state", async () =>
 	);
 });
 
-test("the TypeScript server is reused until other code changes the project", async () => {
+test("the TypeScript server is reused when other code changes the project, and told what changed", async () => {
 	const root = await fixture({ "src/app.ts": "export const value = 1;\n" });
 	let first!: MessageConnection;
 	await withTypeScriptServer(root, async (server) => {
 		first = server;
 	});
+	await Bun.write(path.join(root, "src/new.ts"), "export const added = 2;\n");
 	await withTypeScriptServer(root, async (server) => {
 		expect(server).toBe(first);
 	});
-	await Bun.write(path.join(root, "src/new.ts"), "export const added = 2;\n");
+	// A configuration change can change which projects exist, so the server starts again.
+	await Bun.write(path.join(root, "tsconfig.json"), JSON.stringify({ include: ["src"] }));
 	await withTypeScriptServer(root, async (server) => {
 		expect(server).not.toBe(first);
 	});
