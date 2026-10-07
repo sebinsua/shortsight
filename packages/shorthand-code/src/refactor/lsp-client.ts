@@ -149,6 +149,8 @@ export async function checkerProject(connection: MessageConnection, file: string
 		// Unreferenced once and for all, so it doesn't keep the program running: while a refactor waits on it, the
 		// server is referenced. (Referenced again, Bun keeps its output stream referenced after all.)
 		const child = checkerProcess(server.checker);
+		// A request still being written when the process stops would otherwise be an uncaught error.
+		child?.stdin?.on("error", () => {});
 		for (const handle of [child, child?.stdin, child?.stdout, child?.stderr])
 			(handle as unknown as { unref?: () => void } | null | undefined)?.unref?.();
 	}
@@ -328,9 +330,9 @@ function disposeCurrent(): void {
 	const { connection, process: server, checker } = current;
 	current = undefined;
 	connection.dispose();
-	// Closing only asks the checker's process to end; the runner waits for a program's processes to exit.
+	// Stopped as the server is: closing the API only asks its process to end, and the runner waits for a program's
+	// processes to exit. Closing as well would write to the stopped process.
 	const checkerChild = checkerProcess(checker);
-	void checker?.api.close().catch(() => {});
 	if (checkerChild?.exitCode === null) checkerChild.kill("SIGKILL");
 	if (server.exitCode === null) server.kill("SIGKILL");
 	server.unref();
