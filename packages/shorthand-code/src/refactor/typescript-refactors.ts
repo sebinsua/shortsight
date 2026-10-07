@@ -92,6 +92,11 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const binding = declaresShorthandBinding(file, position);
 		if (binding) dropPropertyEdits(edit);
 		const renamingProperty = !binding && declaresProperty(file, position);
+		// Renaming a member leaves locals alone: `const { email } = user` becomes `{ emailAddress: email }`, rather
+		// than renaming the local and its uses, some of which the server leaves out (`return { email }`). A
+		// parameter property is itself a local, so it's renamed with its uses.
+		const keepLocals = renamingProperty && !declaresParameterProperty(file, position);
+		if (keepLocals) dropLocalEdits(edit);
 		if (!renamingProperty && RESERVED.has(options.to))
 			throw new Error(
 				`refactor.rename: ${options.to} is a reserved word, so it can't name ${JSON.stringify(options.symbol)}`,
@@ -102,7 +107,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
-			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position),
+			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position, keepLocals),
 		);
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
@@ -148,7 +153,12 @@ export async function references(root: string, options: ReferencesOptions): Prom
  * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes. When the renamed
  * symbol is the property itself (`User.name`), it's the other way round: `{ name }` becomes `{ fullName: name }`.
  */
-function keepShorthandPropertyNames(symbol: string, declarationFile: string, declaration: Position): AdjustEdit {
+function keepShorthandPropertyNames(
+	symbol: string,
+	declarationFile: string,
+	declaration: Position,
+	keepLocals = false,
+): AdjustEdit {
 	const shorthands = new Map<string, Map<number, string>>();
 	let renamingProperty: boolean | undefined;
 	return (file, source, start, end, text) => {
@@ -178,8 +188,44 @@ function keepShorthandPropertyNames(symbol: string, declarationFile: string, dec
 		// server renames the variable and its uses too, so `{ fullName }` stays consistent. A variable of this
 		// file keeps the key; a pattern elsewhere is reading the export being renamed, as in
 		// `const { parseUser } = api`, and follows the rename.
+		if (keepLocals) return `${text}: ${symbol}`;
 		return !renamingProperty && file === declarationFile ? `${symbol}: ${text}` : text;
 	};
+}
+
+/** Whether the name at `position` is a constructor parameter that declares a property, `public name: string`. */
+function declaresParameterProperty(file: string, position: Position): boolean {
+	const lang = scriptLanguage(file);
+	if (!lang) return false;
+	const source = readFileSync(file, "utf8");
+	const offset = offsetOf(source, position);
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { any: ["identifier", "required_parameter", "optional_parameter"].map((kind) => ({ kind })) } })
+		.some(
+			(node) =>
+				node.range().start.index === offset && parameterProperty(node.kind() === "identifier" ? node.parent() : node),
+		);
+}
+
+/** Leaves out the edits that land on plain identifiers: when a member is renamed, those are locals' uses. */
+function dropLocalEdits(edit: WorkspaceEdit | null): void {
+	const kept = (uri: string, edits: TextEdit[]) => {
+		const file = fileURLToPath(uri);
+		const lang = scriptLanguage(file);
+		if (!lang) return edits;
+		const source = readFileSync(file, "utf8");
+		const locals = new Set(
+			parse(lang, source)
+				.root()
+				.findAll({ rule: { kind: "identifier" } })
+				.map((node) => node.range().start.index),
+		);
+		return edits.filter(({ range }) => !locals.has(offsetOf(source, range.start)));
+	};
+	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
+	for (const change of edit?.documentChanges ?? [])
+		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
 }
 
 const SCOPES = new Set([

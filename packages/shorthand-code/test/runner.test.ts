@@ -301,7 +301,7 @@ await refactor.rename({ file, symbol: "parseUser", to: "decodeUser" });`,
 
 			expect(result.exitCode).toBe(0);
 			expect(await Bun.file(path.join(repo, "src/user.ts")).text()).toBe(
-				"export interface User { fullName: string }\nexport function make(name: string): User { return { fullName: name }; }\nexport function read(u: User) { const { fullName } = u; return fullName.length; }\n",
+				"export interface User { fullName: string }\nexport function make(name: string): User { return { fullName: name }; }\nexport function read(u: User) { const { fullName: name } = u; return name.length; }\n",
 			);
 		});
 
@@ -643,6 +643,27 @@ await refactor.renameFile({ from: "packages/a/src/debug.ts", to: "packages/a/src
 				'import { decodeUser } from "../../a/src/index";\nexport const x = decodeUser("y");\n',
 			);
 			expect(await Bun.file(path.join(repo, "packages/a/src/util/debug.ts")).exists()).toBe(true);
+		});
+
+		test("renaming a member leaves destructured locals and their uses alone, and references work on a BOM file's first line", async () => {
+			const bom = String.fromCharCode(0xfeff);
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/u.ts":
+					"export interface User { email: string; id: number }\nexport function f(user: User) { const { email, id } = user; return { email, id, at: 1 }; }\n",
+				"src/b.ts": `${bom}export function log(s: string) { return s; }\nlog("x");\n`,
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/u.ts", symbol: "User.email", to: "emailAddress" });
+console.log((await refactor.references({ file: "src/b.ts", symbol: "log", includeDeclaration: true })).length);`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(result.output.trim()).toBe("2");
+			expect(await Bun.file(path.join(repo, "src/u.ts")).text()).toBe(
+				"export interface User { emailAddress: string; id: number }\nexport function f(user: User) { const { emailAddress: email, id } = user; return { email, id, at: 1 }; }\n",
+			);
 		});
 
 		test("references finds a private member", async () => {
@@ -3394,6 +3415,25 @@ sg.rewrite("color: $V;", "color: var(--fg)", "s.css");`,
 			"export interface Config { timeout: number }\nexport function f(config: Config) { const { timeoutMs: timeout } = config; return timeout * 2; }\nexport function g(timeout: number): Config { return { timeoutMs: timeout }; }\n",
 		);
 		expect(await Bun.file(path.join(repo, "s.css")).text()).toBe(".a{ color: var(--fg); margin: 0; }\n");
+	});
+
+	test("a captured block's trailing comment stays after the template, a statement's comment ends its line, and grep expands braces", async () => {
+		const repo = await makeRepo({
+			"c.ts": "if (ready) {\n  start();\n} // ready path\nswitch (x) {\n  case 1: legacy(); break;\n}\n",
+			"src/d.tsx": "oldApi();\n",
+			"src/e.ts": "oldApi();\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("if ($C) $BODY", "if ($C) $BODY else { fallback(); }", "c.ts");
+sg.rewrite("legacy();", "modern(); // TODO: remove legacy", "c.ts");
+console.log(grep("oldApi", "src/**/*.{ts,tsx}").length, grep("oldApi", "src/**/*.{vue,svelte}").length);`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim()).toBe("2 0");
+		expect(await Bun.file(path.join(repo, "c.ts")).text()).toBe(
+			"if (ready) {\n  start();\n} else { fallback(); } // ready path\nswitch (x) {\n  case 1: modern(); // TODO: remove legacy\n break;\n}\n",
+		);
 	});
 
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {

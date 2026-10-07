@@ -260,12 +260,17 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	// Git runs from the root, with paths relative to it, and its files are named from here again below: see git().
 	// Git's own pathspecs differ from glob and sg scopes: `*` crosses directories and `[id]` is a character class.
 	// An existing path is taken literally and anything else as a glob, as glob() reads it.
-	const fromRoot = paths.map((path) => {
-		const rooted = relative(repositoryRoot, resolve(path)) || ".";
-		return statSync(resolve(path), { throwIfNoEntry: false })
-			? `:(literal)${rooted}`
-			: `:(glob)${literalDirectories(rooted)}`;
-	});
+	const fromRoot = paths
+		.map((path): string[] => {
+			const rooted = relative(repositoryRoot, resolve(path)) || ".";
+			if (statSync(resolve(path), { throwIfNoEntry: false })) return [`:(literal)${rooted}`];
+			// Git doesn't expand braces (`*.{ts,tsx}`): select those files as glob() does.
+			if (/\{[^}]*,[^}]*\}/.test(rooted)) return selectFiles(rooted).map((file) => `:(literal)${file}`);
+			return [`:(glob)${literalDirectories(rooted)}`];
+		})
+		.flat();
+	// A scope that selects nothing matches nothing: no pathspec at all would search every file.
+	if (fromRoot.length === 0) return [];
 	const output = git(
 		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
 		[1],
@@ -891,6 +896,20 @@ function withTrailingComment(template: { text: string; literal: [number, number]
  * without one would drop it: if the next line starts with `[` or `(`, the two statements then run together.
  */
 function keepSemicolon(result: unknown, match: SgMatch): unknown {
+	const kept = withSemicolon(result, match);
+	if (typeof kept !== "string") return kept;
+	// A replacement ending in a line comment would comment out the rest of its line (`legacy(); break;`).
+	const lang = LANGUAGES[match.file.split(".").pop()!];
+	const after = match.node.getRoot().root().text().slice(match.node.range().end.index);
+	if (lang === Lang.Css || lang === Lang.Html || !/\/\/[^\n]*$/.test(kept) || !/^[^\n]*\S/.test(after)) return kept;
+	const ends = parse(lang ?? Lang.Tsx, kept)
+		.root()
+		.findAll({ rule: { kind: "comment" } })
+		.some((node) => node.text().startsWith("//") && !kept.slice(node.range().end.index).trim());
+	return ends ? `${kept}\n` : kept;
+}
+
+function withSemicolon(result: unknown, match: SgMatch): unknown {
 	if (typeof result !== "string") return result;
 	// A shorthand reference renamed: `{ timeout }` keeps the side that isn't renamed. Renaming a property keeps the
 	// variable, `{ timeoutMs: timeout }`; renaming a variable keeps the key, `{ timeout: limit }`.
@@ -903,21 +922,6 @@ function keepSemicolon(result: unknown, match: SgMatch): unknown {
 	if (shorthand && /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(result) && result !== original)
 		return renamesProperty ? `${result}: ${original}` : `${original}: ${result}`;
 	const lang = LANGUAGES[match.file.split(".").pop()!];
-	// A replacement ending in a line comment would comment out the rest of its line (`foo();` → `bar() // x;`).
-	const after = match.node.getRoot().root().text().slice(match.node.range().end.index);
-	if (
-		!original.endsWith(";") &&
-		lang !== Lang.Css &&
-		lang !== Lang.Html &&
-		/\/\/[^\n]*$/.test(result) &&
-		/^[^\n]*\S/.test(after)
-	) {
-		const ends = parse(lang ?? Lang.Tsx, result)
-			.root()
-			.findAll({ rule: { kind: "comment" } })
-			.some((node) => node.text().startsWith("//") && !result.slice(node.range().end.index).trim());
-		if (ends) return `${result}\n`;
-	}
 	if (!result.trim() || !original.endsWith(";")) return result;
 	// A CSS declaration (`color: red;`) needs its `;` back.
 	if (lang === Lang.Css) return /[;}]\s*$/.test(result) ? result : `${result};`;
@@ -1234,7 +1238,8 @@ function toMatch(
 			vars[name] = sequenceText(node.getMultipleMatches(name), source);
 		} else {
 			const captured = node.getMatch(name);
-			if (captured) vars[name] = captured.text();
+			// A block's text takes in a comment after its `}`, which would comment out the rest of a template's line.
+			if (captured) vars[name] = captured.text().replace(/\}(?:[ \t]*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/))+\s*$/, "}");
 		}
 	}
 	return remember(
@@ -1308,11 +1313,13 @@ function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 			})
 			.find((candidate) => {
 				const span = candidate.range();
+				// The server counts characters after a byte order mark; ast-grep's columns on line 0 include it.
+				const bom = (line: number) => (line === 0 && document!.source.startsWith("\uFEFF") ? 1 : 0);
 				return (
 					span.start.line === start.line &&
-					span.start.column === start.character &&
+					span.start.column === start.character + bom(start.line) &&
 					span.end.line === end.line &&
-					span.end.column === end.character
+					span.end.column === end.character + bom(end.line)
 				);
 			});
 		if (!node)
