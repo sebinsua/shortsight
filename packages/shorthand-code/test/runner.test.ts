@@ -3666,6 +3666,17 @@ console.log(sg.rewrite("legacyOptions($X)", "options($X)", "a.ts"));`,
 		);
 	});
 
+	test("removing an operand next to a comma doesn't take the comma as if it were a list item", async () => {
+		const repo = await makeRepo({ "a.ts": "f(a < b, c);\n" });
+		const result = await run(
+			repo,
+			`sg.rewrite({ rule: { kind: "identifier", regex: "^b$", inside: { kind: "binary_expression" } } }, "", "a.ts");`,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("would leave invalid syntax");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("f(a < b, c);\n");
+	});
+
 	test("removing neighbouring list items, or by a returned edit, takes their commas", async () => {
 		const repo = await makeRepo({
 			"a.ts":

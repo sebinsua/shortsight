@@ -847,10 +847,11 @@ function fitted(edit: Edit, match: SgMatch, file: string): Edit {
 }
 
 /**
- * Removing a whole list item takes its comma with it, as ast-grep's fix does with expandEnd: the comma after it,
- * or before it when it's the last. Neighbouring removals are one removal first.
+ * Removing whole list items takes their comma with them, as ast-grep's fix does with expandEnd: the comma after
+ * them, a sibling in the syntax tree, or before them when they're the last. Neighbouring removals are one first.
  */
-function withSeparators(edits: Edit[], source: string): Edit[] {
+function withSeparators(edits: Edit[], root: SgNode): Edit[] {
+	const source = root.text();
 	const adjacent: Edit[] = [];
 	for (const edit of edits.toSorted((a, b) => a.startPos - b.startPos || b.endPos - a.endPos)) {
 		const previous = adjacent.at(-1);
@@ -864,14 +865,26 @@ function withSeparators(edits: Edit[], source: string): Edit[] {
 		else adjacent.push(edit);
 	}
 	return adjacent.map((edit) => {
-		if (edit.insertedText) return edit;
-		const before = /[([{<,]\s*$/.exec(source.slice(Math.max(0, edit.startPos - 200), edit.startPos));
-		const after = /^\s*[,)\]}>]/.exec(source.slice(edit.endPos, edit.endPos + 200));
-		if (!before || !after || edit.startPos === edit.endPos) return edit;
-		const following = /^\s*,\s*/.exec(source.slice(edit.endPos));
-		if (following) return { ...edit, endPos: edit.endPos + following[0].length };
-		const preceding = /\s*,\s*$/.exec(source.slice(Math.max(0, edit.startPos - 200), edit.startPos));
-		return preceding ? { ...edit, startPos: edit.startPos - preceding[0].length } : edit;
+		if (edit.insertedText || edit.startPos === edit.endPos) return edit;
+		// The node holding the removed items: the smallest one around them that isn't exactly them.
+		let parent = root;
+		for (;;) {
+			const child = parent
+				.children()
+				.find((node) => node.range().start.index <= edit.startPos && edit.endPos <= node.range().end.index);
+			if (!child || (child.range().start.index === edit.startPos && child.range().end.index === edit.endPos)) break;
+			parent = child;
+		}
+		const children = parent.children();
+		const first = children.findIndex((node) => node.range().start.index === edit.startPos);
+		const last = children.findIndex((node) => node.range().end.index === edit.endPos);
+		if (first < 0 || last < first) return edit;
+		const [before, after, next] = [children[first - 1], children[last + 1], children[last + 2]];
+		// Up to the next item, or only the comma when a closing bracket follows it.
+		if (after?.text() === ",")
+			return { ...edit, endPos: next?.isNamed() ? next.range().start.index : after.range().end.index };
+		if (before?.text() === ",") return { ...edit, startPos: before.range().start.index };
+		return edit;
 	});
 }
 
@@ -1052,7 +1065,7 @@ function applyRewrites(
 	const source = matches[0].node.getRoot().root().text();
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
 	// edit twice is one edit; only different edits to the same text conflict.
-	const ordered = withSeparators(edits, source)
+	const ordered = withSeparators(edits, matches[0].node.getRoot().root())
 		// Text breaks ties so identical edits sit together, however the matches were ordered.
 		.toSorted(
 			(a, b) =>
