@@ -13,7 +13,8 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { parse } from "@ast-grep/napi";
+import { Lang, parse } from "@ast-grep/napi";
+import { SymbolFlags } from "typescript/unstable/async";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
@@ -306,20 +307,83 @@ export async function moveSymbol(from: string, symbol: string, to: string, files
 
 const where = (uri: string, position: Position) => `${uri}:${position.line}:${position.character}`;
 
-/** Places given the new name that now resolve to a declaration other than one of those places. */
+/**
+ * Places given the new name that now mean something else: the checker's symbol there, through any import, is
+ * declared somewhere other than those places, as when the new name is captured by a declaration in scope there. For a file
+ * outside every tsconfig, the server's definition is asked instead.
+ */
 async function capturedPlaces(
 	server: Parameters<typeof notifyTypeScriptServer>[0],
 	root: string,
 	sites: Map<string, number[]>,
 	name: string,
 ): Promise<string[]> {
-	const places = [...sites].flatMap(([file, offsets]) => {
-		const source = readFileSync(file, "utf8");
-		return offsets.map((offset) => ({ file, position: positionOf(source, offset) }));
-	});
-	const renamed = new Set(places.map(({ file, position }) => where(pathToFileURL(file).href, position)));
+	// The checker counts UTF-16 units after a byte order mark; a declaration is known by where its name ends.
+	const bom = new Map([...sites.keys()].map((file) => [file, readFileSync(file, "utf8").startsWith("\uFEFF") ? 1 : 0]));
+	const renamedEnds = new Set(
+		[...sites].flatMap(([file, offsets]) =>
+			offsets.map((offset) => `${file.toLowerCase()}:${offset - bom.get(file)! + name.length}`),
+		),
+	);
 	const problems: string[] = [];
-	for (const { file, position } of places.slice(0, 500)) {
+	for (const [file, offsets] of sites) {
+		const source = readFileSync(file, "utf8");
+		const project = await checkerProject(server, file);
+		if (!project) {
+			problems.push(...(await definitionsElsewhere(server, root, file, source, offsets, sites, name)));
+			continue;
+		}
+		const symbols = await project.checker.getSymbolAtPosition(
+			file,
+			offsets.map((offset) => offset - bom.get(file)!),
+		);
+		for (const [index, found] of symbols.entries()) {
+			if (!found) continue;
+			const symbol = found.flags & SymbolFlags.Alias ? await project.checker.getAliasedSymbol(found) : found;
+			const declared = await Promise.all(
+				symbol.declarations.map(async (handle) => {
+					const node = (await handle.resolve(project)) as { name?: { end: number } } | undefined;
+					return node?.name ? { handle, end: node.name.end } : undefined;
+				}),
+			);
+			// Every declaration: renamed into an existing interface, a symbol merges with it and keeps both.
+			const other = declared.find(
+				(declaration) => declaration && !renamedEnds.has(`${declaration.handle.path.toLowerCase()}:${declaration.end}`),
+			);
+			if (!other) continue;
+			const otherFile = other && (await project.program.getSourceFile(other.handle.path));
+			const position = positionOf(source, offsets[index]!);
+			problems.push(
+				`${relative(root, file)}:${position.line + 1}: ${name} would refer to ${
+					otherFile
+						? `${relative(root, otherFile.fileName)}:${otherFile.text.slice(0, other.end).split("\n").length}`
+						: "something else"
+				} instead`,
+			);
+		}
+	}
+	return problems;
+}
+
+/** capturedPlaces for a file the checker doesn't have: the server's definition of each place must be one of them. */
+async function definitionsElsewhere(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	root: string,
+	file: string,
+	source: string,
+	offsets: number[],
+	sites: Map<string, number[]>,
+	name: string,
+): Promise<string[]> {
+	const renamed = new Set(
+		[...sites].flatMap(([site, places]) => {
+			const text = site === file ? source : readFileSync(site, "utf8");
+			return places.map((offset) => where(pathToFileURL(site).href, positionOf(text, offset)));
+		}),
+	);
+	const problems: string[] = [];
+	for (const offset of offsets) {
+		const position = positionOf(source, offset);
 		const definitions =
 			(await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
 				"textDocument/definition",
@@ -617,7 +681,8 @@ const samePosition = (a: Position, b: Position) => a.line === b.line && a.charac
  */
 function typeAliasMembers(file: string, source: string): { name: string; position: Position }[] {
 	const lang = scriptLanguage(file);
-	if (!lang || !source) return [];
+	// JavaScript has no type aliases, and its grammar no kind for them.
+	if (!lang || lang === Lang.JavaScript || !source) return [];
 	const members: { name: string; position: Position }[] = [];
 	for (const alias of parse(lang, source)
 		.root()

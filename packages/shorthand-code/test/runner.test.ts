@@ -500,6 +500,23 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			);
 		});
 
+		test("without a tsconfig, a captured rename is refused and a clean one applies", async () => {
+			const repo = await makeRepo({
+				"a.js":
+					"export const limit = 10;\nexport function clamp(n) { const max = 5; return Math.min(n, limit, max); }\n",
+			});
+			const refused = await run(repo, `await refactor.rename({ file: "a.js", symbol: "limit", to: "max" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(refused.exitCode).toBe(1);
+			expect(refused.output).toContain("max would refer to a.js:2 instead");
+			const renamed = await run(repo, `await refactor.rename({ file: "a.js", symbol: "limit", to: "ceiling" });`, {
+				timeoutMs: 15_000,
+			});
+			expect(renamed.exitCode, renamed.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "a.js")).text()).toContain("Math.min(n, ceiling, max)");
+		});
+
 		test("a barrel collision is refused when the barrel re-exports through a paths alias", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({
