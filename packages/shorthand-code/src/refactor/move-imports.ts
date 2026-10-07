@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { delimiter, dirname, extname, relative, resolve, sep } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import type { MoveAnalysis } from "./move-analysis.ts";
-import { HEADER, PRAGMA, scriptLanguage, withoutComments } from "./placement.ts";
+import { HEADER, PRAGMA, scriptLanguage } from "./placement.ts";
 
 export interface TextEdit {
 	start: number;
@@ -111,17 +111,6 @@ function withInsertionsMerged(edits: TextEdit[]): TextEdit[] {
 	return merged;
 }
 
-/** Whether the source declares `name` at the top level in a form the move doesn't import, so it would look global. */
-function declaredUnimportably(root: SgNode, moved: SgNode, name: string): boolean {
-	const escaped = name.replace(/\$/g, "\\$");
-	const forms = new RegExp(
-		`^(?:export\\s+)?(?:(?:declare\\s+)?(?:namespace|module)\\s+${escaped}\\b|declare\\s+(?:const|let|var|function|class|enum|abstract\\s+class)\\s+${escaped}\\b|import\\s+(?:type\\s+)?${escaped}\\s*=)`,
-	);
-	return root.children().some((statement) => !at(statement, moved) && forms.test(statement.text()));
-}
-
-const at = (a: SgNode, b: SgNode) => a.range().start.index === b.range().start.index;
-
 /**
  * The moved code's own relative paths, repointed from where it was to where it goes: `import("./x")` in code or a
  * type, `require("./x")`, and `new URL("./x", import.meta.url)`.
@@ -140,61 +129,6 @@ export function repointRelativePaths(text: string, from: string, to: string): st
 			return resolved ? `${call}${quote}${specifierFor(to, resolved, styleOf(specifier))}${quote}` : whole;
 		},
 	);
-}
-
-/**
- * Refuses exporting `names` from `file` when a barrel that re-exports it wholesale (`export * from "./a"`) already
- * exports one of them from elsewhere: its importers of that name would become ambiguous, or change meaning.
- */
-function refuseBarrelCollisions(file: string, names: string[], barrels: string[], leaving?: string): void {
-	if (!names.length) return;
-	const real = existsSync(file) ? realpathSync(file) : resolve(file);
-	const left = leaving && existsSync(leaving) ? realpathSync(leaving) : undefined;
-	const star = /\bexport\s+\*\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
-	for (const barrel of barrels) {
-		if (!existsSync(barrel) || barrel === file) continue;
-		const text = withoutComments(barrel, readFileSync(barrel, "utf8"));
-		const modules = [...text.matchAll(star)].map((match) => resolveModule(barrel, match[1]!));
-		if (!modules.includes(real)) continue;
-		for (const name of names) {
-			const other = modules.find(
-				(module) => module && module !== real && module !== left && exportsName(readFileSync(module, "utf8"), name),
-			);
-			// The barrel's own exports, unless the name leaves another file it re-exports (that re-export follows it).
-			if ((!left && exportsName(text, name)) || other)
-				throw new MoveError(
-					`it would have to export ${name} from ${file}, but ${barrel} re-exports that file and already exports ${name}${other ? ` from ${other}` : ""}; rename ${name} first`,
-				);
-		}
-	}
-}
-
-/** A `let` or `var` declaration, exported or not: what it declares can be assigned again. */
-function reassignable(statement: SgNode): boolean {
-	const inner = statement.kind() === "export_statement" ? statement.field("declaration") : statement;
-	if (!inner) return false;
-	if (inner.kind() === "variable_declaration") return true;
-	return inner.kind() === "lexical_declaration" && inner.children().some((child) => child.kind() === "let");
-}
-
-/** Plain names assigned under `root` (`x = …`, `x += …`, `x ??= …`, `x++`), leaving out `except`. */
-function assignedNames(root: SgNode, except?: SgNode): string[] {
-	const skipped = except?.range();
-	return root
-		.findAll({
-			rule: {
-				any: ["assignment_expression", "augmented_assignment_expression", "update_expression"].map((kind) => ({
-					kind,
-				})),
-			},
-		})
-		.filter(
-			(node) =>
-				!skipped || node.range().start.index < skipped.start.index || node.range().end.index > skipped.end.index,
-		)
-		.map((node) => node.field("left") ?? node.field("argument"))
-		.filter((target) => target?.kind() === "identifier")
-		.map((target) => target!.text());
 }
 
 /** The names a top-level statement declares, for analysing it before a move. */
@@ -366,21 +300,6 @@ const SOURCE_FOR_JS: Record<string, string[]> = {
 	".mjs": [".mts"],
 	".cjs": [".cts"],
 };
-
-/**
- * The file a specifier resolves to. Relative specifiers are resolved here, including TypeScript's `.js`
- * spelling of a `.ts` file; others go through Bun's resolver, which follows tsconfig `paths` and packages
- * in node_modules, including workspace packages linked into the repository.
- */
-/** Whether a module's text exports `name`: by a declaration, or in an export list (as itself or an alias). */
-export function exportsName(text: string, name: string): boolean {
-	const escaped = name.replace(/\$/g, "\\$");
-	const declared = new RegExp(
-		`\\bexport\\s+(?:declare\\s+)?(?:async\\s+)?(?:const|let|var|function\\*?|class|abstract\\s+class|interface|type|enum|namespace)\\s+${escaped}\\b`,
-	);
-	const listed = new RegExp(`\\bexport\\s*(?:type\\s*)?\\{[^}]*(?:^|[\\s,{]|as\\s+)${escaped}\\s*(?:,|\\}|$)`, "m");
-	return declared.test(text) || listed.test(text);
-}
 
 /** The files a relative specifier could mean, in the order module resolution tries them. */
 export function relativeCandidates(from: string, specifier: string): string[] {
@@ -637,22 +556,6 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	const targetText = targetRoot.text();
 	const names = new Set(moved.names);
 	const source = topLevel(sourceRoot);
-	// A module variable becomes an import on one side of the move, and an import can't be assigned.
-	const variable = (statement: SgNode | undefined) => statement !== undefined && reassignable(statement);
-	for (const name of assignedNames(node)) {
-		if (names.has(name) || !input.analysis.dependencies.has(name)) continue;
-		if (source.declarations.get(name)?.some((entry) => variable(entry.statement)))
-			throw new MoveError(
-				`it assigns ${name}, a module variable of ${sourceFile} that would become an import; move ${name} with it or change it through a function`,
-			);
-	}
-	if (reassignable(node)) {
-		const outside = assignedNames(sourceRoot, node).filter((name) => names.has(name));
-		if (outside.length)
-			throw new MoveError(
-				`${outside[0]} is assigned elsewhere in ${sourceFile}, and would be an import there; move that code too or assign it through a function`,
-			);
-	}
 	for (const name of names) {
 		if (source.declarations.get(name)!.length > 1)
 			throw new MoveError(`${name} has overloads or merged declarations in ${sourceFile}`);
@@ -727,8 +630,6 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	const fromSource: { text: string; typeOnly: boolean }[] = [];
 	// The target's type-only imports of what the moved code uses as a value, which must become value imports.
 	const toValue = new Set<Binding>();
-	// Source declarations the move has to export, which a barrel could already export from elsewhere.
-	const newlyExported: string[] = [];
 	const free = input.analysis.dependencies;
 	const order = [...sourceBindings.map((binding) => binding.local), ...source.declarations.keys()];
 	const ordered = [...order.filter((name) => free.has(name)), ...[...free].filter((name) => !order.includes(name))];
@@ -805,17 +706,12 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				continue;
 			}
 			// Every declaration of the name: overload signatures must all be exported or none.
-			if (!local.exported && !source.listed.has(name)) newlyExported.push(name);
 			if (!local.exported && !source.listed.has(name))
 				for (const entry of source.declarations.get(name) ?? []) {
 					const { start, end } = entry.statement.range();
 					sourceEdits.push({ start: start.index, end: end.index, text: `export ${entry.statement.text()}` });
 				}
 			fromSource.push({ text: name, typeOnly });
-		} else if (declaredUnimportably(sourceRoot, node, name)) {
-			throw new MoveError(
-				`it uses ${name}, which ${sourceFile} declares as a namespace, with \`declare\` or with \`import … = require\`, and the target can't import that; move or export ${name} as an ordinary declaration first`,
-			);
 		} else if (existing || target.declarations.has(name)) {
 			// A global in the source would refer to the target's own binding after the move.
 			throw new MoveError(`${name} is a global where it is used, but ${targetFile} declares its own ${name}`);
@@ -971,10 +867,6 @@ export function planImports(input: MoveInput): ImportPlan | null {
 		console.error(
 			`warning: refactor.move left ${relative(dirname(sourceFile), sourceFile)} and ${relative(dirname(sourceFile), targetFile)} importing each other. That fails at run time if either uses the other's exports while loading, at the top level; move those declarations too if so.`,
 		);
-	refuseBarrelCollisions(sourceFile, newlyExported, input.filesReexportingAll());
-	// The moved declaration is exported from the target now (the source no longer has it).
-	if (moved.exported || stillUsed)
-		refuseBarrelCollisions(targetFile, [...names], input.filesReexportingAll(), sourceFile);
 	return {
 		source: withInsertionsMerged(sourceEdits),
 		target: targetEdits,

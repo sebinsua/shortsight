@@ -12,12 +12,12 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { parse, type SgNode } from "@ast-grep/napi";
+import { parse } from "@ast-grep/napi";
 import { dirname, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { notifyTypeScriptServer, recordTypeScriptFiles, withTypeScriptServer } from "./lsp-client.ts";
-import { exportsName, relativeCandidates, resolveModule } from "./move-imports.ts";
+import { relativeCandidates, resolveModule } from "./move-imports.ts";
 import { scriptLanguage, withoutComments } from "./placement.ts";
 import {
 	existingProjectFile,
@@ -26,7 +26,6 @@ import {
 	type Position,
 	type AdjustEdit,
 	type Range,
-	type TextEdit,
 	type WorkspaceEdit,
 } from "./workspace-edit.ts";
 
@@ -45,8 +44,6 @@ export interface ReferencesOptions<File = string> {
 export interface ReferenceLocation {
 	uri: string;
 	range: Range;
-	/** The symbol is a property (a member), not a variable: `{ timeout }` names it as the key. */
-	property?: boolean;
 }
 
 export interface RenameFileOptions<File = string> {
@@ -87,35 +84,10 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 			position,
 			newName: options.to,
 		});
-		// `export const { auth } = NextAuth()` declares a variable that reads a property, and the server renames them as
-		// one: everywhere the property is named would change too. Renaming the variable leaves the property alone.
-		const binding = declaresShorthandBinding(file, position);
-		if (binding) dropPropertyEdits(edit);
-		// `{ parseUser }` declares a member that is also a variable: the server would rename the variable.
-		if (declaresShorthandMember(file, position))
-			throw new Error(
-				`refactor.rename: ${JSON.stringify(options.symbol)} is a shorthand for a variable; write it as ${options.symbol.split(".").at(-1)}: ${options.symbol.split(".").at(-1)} first, or rename the variable`,
-			);
-		const renamingProperty = !binding && declaresProperty(file, position);
-		// Renaming a member leaves locals alone: `const { email } = user` becomes `{ emailAddress: email }`, rather
-		// than renaming the local and its uses, some of which the server leaves out (`return { email }`). A
-		// parameter property is itself a local, so it's renamed with its uses.
-		const keepLocals = renamingProperty;
-		// Where the server edits, per file: a parameter property is the member only when it's among them.
-		const edited = editedOffsets(edit);
-		if (keepLocals) dropLocalEdits(edit, options.symbol.split(".").at(-1)!, edited);
-		if (!renamingProperty && RESERVED.has(options.to))
-			throw new Error(
-				`refactor.rename: ${options.to} is a reserved word, so it can't name ${JSON.stringify(options.symbol)}`,
-			);
-		if (!renamingProperty) refuseBarrelCollision(root, file, options.symbol, options.to);
-		if (renamingProperty) refuseMemberCollision(file, position, options.symbol, options.to);
-		refuseCapturedRename(edit, options.symbol, options.to, renamingProperty);
-		if (renamingProperty) await refuseSharedMember(server, edit, options.symbol);
 		const changes = planWorkspaceEdit(
 			root,
 			edit,
-			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position, keepLocals, edited),
+			keepShorthandPropertyNames(options.symbol.split(".").at(-1)!, file, position),
 		);
 		if (changes.size === 0) throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
 		editingFiles([...changes.keys()], () => {
@@ -144,39 +116,23 @@ export async function references(root: string, options: ReferencesOptions): Prom
 			"refactor.references",
 			readFileSync(file, "utf8"),
 		);
-		const property = declaresProperty(file, position);
-		const locations =
+		return (
 			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
 				textDocument: { uri },
 				position,
 				context: { includeDeclaration: options.includeDeclaration === true },
-			})) ?? [];
-		return locations.map((location) => ({ ...location, property }));
+			})) ?? []
+		);
 	});
 }
 
 /**
  * The server renames without aliases, so imports and re-exports follow the new name (see lsp-client.ts). That
  * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
- * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes. When the renamed
- * symbol is the property itself (`User.name`), it's the other way round: `{ name }` becomes `{ fullName: name }`.
+ * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
  */
-function keepShorthandPropertyNames(
-	symbol: string,
-	declarationFile: string,
-	declaration: Position,
-	keepLocals = false,
-	edited = new Map<string, Set<number>>(),
-): AdjustEdit {
+function keepShorthandPropertyNames(symbol: string, declarationFile: string, declaration: Position): AdjustEdit {
 	const shorthands = new Map<string, Map<number, string>>();
-	let renamingProperty: boolean | undefined;
-	const memberUsesIn = new Map<string, Set<number>>();
-	const memberUsesFor = (file: string, source: string) => {
-		const lang = scriptLanguage(file);
-		const uses = lang ? memberUses(parse(lang, source).root(), symbol, edited.get(file)) : new Set<number>();
-		memberUsesIn.set(file, uses);
-		return uses;
-	};
 	return (file, source, start, end, text) => {
 		if (source.slice(start, end) !== symbol) return text;
 		let kinds = shorthands.get(file);
@@ -195,488 +151,14 @@ function keepShorthandPropertyNames(
 			shorthands.set(file, kinds);
 		}
 		const kind = kinds.get(start);
-		if (kind !== "shorthand_property_identifier" && kind !== "shorthand_property_identifier_pattern") return text;
-		renamingProperty ??= declaresProperty(declarationFile, declaration);
-		// Inside the constructor that declares it, a parameter property is a variable too: `{ db }` keeps its key,
-		// as the variable is renamed with it.
-		if (keepLocals && (memberUsesIn.get(file) ?? memberUsesFor(file, source)).has(start)) return `${symbol}: ${text}`;
-		// In `{ name }` the key names a property and the value a variable. Renaming the property keeps the
-		// variable, `{ fullName: name }`, and renaming the variable keeps the key, `{ name: displayName }`.
-		if (kind === "shorthand_property_identifier") return renamingProperty ? `${text}: ${symbol}` : `${symbol}: ${text}`;
-		// A pattern, as in `const { name } = user` or `({ name } = parsed)`. Renaming a member keeps the local,
-		// `{ fullName: name }`. A variable of this file keeps the key; a pattern elsewhere is reading the export
-		// being renamed, as in `const { parseUser } = api`, and follows the rename.
-		if (keepLocals) return `${text}: ${symbol}`;
-		return !renamingProperty && file === declarationFile ? `${symbol}: ${text}` : text;
+		// In `const { parseUser } = api` the key names a property: it keeps its name when the renamed symbol is
+		// this local binding, and follows the rename when it is the export being read.
+		const renamingBinding =
+			kind === "shorthand_property_identifier_pattern" &&
+			file === declarationFile &&
+			start === offsetOf(source, declaration);
+		return kind === "shorthand_property_identifier" || renamingBinding ? `${symbol}: ${text}` : text;
 	};
-}
-
-/**
- * Refuses renaming a member that an edited access shares with another type: `s.label` on a `Circle | Square`
- * reads both types' `label`, so renaming only Circle's would leave Square's unreachable there.
- */
-async function refuseSharedMember(
-	server: Parameters<typeof notifyTypeScriptServer>[0],
-	edit: WorkspaceEdit | null,
-	symbol: string,
-): Promise<void> {
-	const locations = [
-		...Object.entries(edit?.changes ?? {}).map(([uri, edits]) => ({ uri, edits })),
-		...(edit?.documentChanges ?? []).flatMap((change) =>
-			"kind" in change ? [] : [{ uri: change.textDocument.uri, edits: change.edits }],
-		),
-	];
-	const renamed = new Set(
-		locations.flatMap(({ uri, edits }) =>
-			edits.map(({ range }) => `${uri}:${range.start.line}:${range.start.character}`),
-		),
-	);
-	let asked = 0;
-	for (const { uri, edits } of locations) {
-		const file = fileURLToPath(uri);
-		const lang = scriptLanguage(file);
-		if (!lang) continue;
-		const source = readFileSync(file, "utf8");
-		const accesses = new Map(
-			parse(lang, source)
-				.root()
-				.findAll({ rule: { kind: "property_identifier", inside: { kind: "member_expression", field: "property" } } })
-				.map((node) => [node.range().start.index, node]),
-		);
-		for (const { range } of edits) {
-			if (!accesses.has(offsetOf(source, range.start)) || ++asked > 200) continue;
-			const definitions =
-				(await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
-					"textDocument/definition",
-					{ textDocument: { uri }, position: range.start },
-				)) ?? [];
-			// The server gives one definition for a method called on a union (`(p: Cat | Dog).speak()`), but each
-			// type of the receiver, so their members of this name count too.
-			const access = accesses.get(offsetOf(source, range.start))!;
-			const receiver = access.parent()?.field("object")?.range().start;
-			const types = receiver
-				? ((await server.sendRequest<Array<{ uri: string; range: Range }> | { uri: string; range: Range } | null>(
-						"textDocument/typeDefinition",
-						{ textDocument: { uri }, position: { line: receiver.line, character: receiver.column } },
-					)) ?? [])
-				: [];
-			const members = [types].flat().flatMap((type) => membersNamed(type, access.text()));
-			for (const definition of [...[definitions].flat(), ...members]) {
-				if (renamed.has(`${definition.uri}:${definition.range.start.line}:${definition.range.start.character}`))
-					continue;
-				throw new Error(
-					`refactor.rename: ${relative(process.cwd(), file)}:${range.start.line + 1} reads ${JSON.stringify(symbol)} through a type that also has another member of that name (at ${relative(process.cwd(), fileURLToPath(definition.uri))}:${definition.range.start.line + 1}), such as a union; rename both, or narrow that access first.`,
-				);
-			}
-		}
-	}
-}
-
-/** The members named `name` of the class or interface declared at a type definition's location. */
-function membersNamed(type: { uri: string; range: Range }, name: string): { uri: string; range: Range }[] {
-	const file = fileURLToPath(type.uri);
-	const lang = scriptLanguage(file);
-	if (!lang || !existsSync(file)) return [];
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, type.range.start);
-	const declaration = parse(lang, source)
-		.root()
-		.findAll({
-			rule: {
-				any: ["class_declaration", "abstract_class_declaration", "interface_declaration"].map((kind) => ({ kind })),
-			},
-		})
-		.find((node) => node.range().start.index <= offset && offset < node.range().end.index);
-	return (declaration?.field("body")?.children() ?? [])
-		.map((member) => member.field("name"))
-		.filter((member): member is SgNode => member?.text() === name)
-		.map((member) => ({
-			uri: type.uri,
-			range: {
-				start: { line: member.range().start.line, character: member.range().start.column },
-				end: { line: member.range().end.line, character: member.range().end.column },
-			},
-		}));
-}
-
-/** The offsets each file's edits start at. */
-function editedOffsets(edit: WorkspaceEdit | null): Map<string, Set<number>> {
-	const offsets = new Map<string, Set<number>>();
-	const add = (uri: string, edits: TextEdit[]) => {
-		const file = fileURLToPath(uri);
-		if (!existsSync(file)) return;
-		const source = readFileSync(file, "utf8");
-		const set = offsets.get(file) ?? new Set<number>();
-		for (const { range } of edits) set.add(offsetOf(source, range.start));
-		offsets.set(file, set);
-	};
-	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) add(uri, edits);
-	for (const change of edit?.documentChanges ?? []) if (!("kind" in change)) add(change.textDocument.uri, change.edits);
-	return offsets;
-}
-
-/**
- * Leaves out the edits that land on plain identifiers: when a member is renamed, those are locals' uses. A
- * constructor parameter that declares the member (`constructor(public email: string)`) is the member itself,
- * so it and its uses in that constructor are still renamed.
- */
-function dropLocalEdits(edit: WorkspaceEdit | null, name: string, edited: Map<string, Set<number>>): void {
-	const kept = (uri: string, edits: TextEdit[]) => {
-		const file = fileURLToPath(uri);
-		const lang = scriptLanguage(file);
-		if (!lang) return edits;
-		const source = readFileSync(file, "utf8");
-		const root = parse(lang, source).root();
-		const members = memberUses(root, name, edited.get(file));
-		const locals = new Set(
-			root
-				.findAll({ rule: { kind: "identifier" } })
-				.map((node) => node.range().start.index)
-				.filter((offset) => !members.has(offset)),
-		);
-		return edits.filter(({ range }) => !locals.has(offsetOf(source, range.start)));
-	};
-	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
-	for (const change of edit?.documentChanges ?? [])
-		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
-}
-
-/**
- * Where a member named `name` is written as a plain name though it isn't a local: a constructor parameter that
- * declares it and that parameter's uses in the constructor (shorthands included), and bare references to an enum
- * member inside its enum (`ReadWrite = Read | Write`).
- */
-function memberUses(root: SgNode, name: string, edited = new Set<number>()): Set<number> {
-	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
-	const named = { any: ["identifier", "shorthand_property_identifier"].map((kind) => ({ kind, regex: exactly })) };
-	const uses = new Set<number>();
-	for (const parameter of root.findAll({
-		rule: { any: [{ kind: "required_parameter" }, { kind: "optional_parameter" }] },
-	})) {
-		// Only a parameter the server renames is the member: another class's `constructor(private logger)` isn't.
-		const pattern = parameter.field("pattern");
-		if (!parameterProperty(parameter) || pattern?.text() !== name || !edited.has(pattern.range().start.index)) continue;
-		uses.add(parameter.field("pattern")!.range().start.index);
-		for (const use of parameter.parent()?.parent()?.field("body")?.findAll({ rule: named }) ?? [])
-			uses.add(use.range().start.index);
-	}
-	for (const body of root.findAll({ rule: { kind: "enum_body" } })) {
-		const declares = body.children().some((member) => (member.field("name") ?? member).text() === name);
-		if (declares) for (const use of body.findAll({ rule: named })) uses.add(use.range().start.index);
-	}
-	return uses;
-}
-
-/** Whether the name at `position` is an object literal's shorthand member, `{ parseUser }`. */
-function declaresShorthandMember(file: string, position: Position): boolean {
-	const lang = scriptLanguage(file);
-	if (!lang) return false;
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, position);
-	return parse(lang, source)
-		.root()
-		.findAll({ rule: { kind: "shorthand_property_identifier" } })
-		.some((node) => node.range().start.index === offset);
-}
-
-const SCOPES = new Set([
-	"program",
-	"statement_block",
-	"function_declaration",
-	"function_expression",
-	"arrow_function",
-	"method_definition",
-	"generator_function_declaration",
-	"class_declaration",
-	"abstract_class_declaration",
-	"class_body",
-	"interface_declaration",
-	"type_alias_declaration",
-	"for_statement",
-	"for_in_statement",
-	"catch_clause",
-	"module",
-	"internal_module",
-	// Type signatures: their parameter names declare nothing anywhere else.
-	"method_signature",
-	"abstract_method_signature",
-	"function_signature",
-	"function_type",
-	"constructor_type",
-	"call_signature",
-	"construct_signature",
-]);
-
-/** Declarations whose own name belongs to the scope around them, not to the scope they make. */
-const NAMED_FROM_OUTSIDE = new Set([
-	"function_declaration",
-	"generator_function_declaration",
-	"function_signature",
-	"class_declaration",
-	"abstract_class_declaration",
-	"interface_declaration",
-	"type_alias_declaration",
-	"internal_module",
-	"module",
-]);
-
-type Space = "value" | "type";
-const BOTH: Space[] = ["value", "type"];
-
-const at = (node: SgNode | null | undefined, other: SgNode) =>
-	node?.range().start.index === other.range().start.index && node.kind() === other.kind();
-
-/**
- * What an identifier declares in its scope, a value, a type or both, or nothing when it doesn't declare: a variable,
- * function, class, enum, interface, type alias, type parameter, namespace, parameter, loop variable or import.
- */
-function declaredSpaces(node: SgNode): Space[] {
-	const parent = node.parent();
-	if (!parent) return [];
-	const named = (field: SgNode | null) => at(field, node);
-	switch (String(parent.kind())) {
-		case "variable_declarator":
-		case "function_declaration":
-		case "generator_function_declaration":
-		case "function_signature":
-			return named(parent.field("name")) ? ["value"] : [];
-		case "class_declaration":
-		case "abstract_class_declaration":
-		case "enum_declaration":
-		case "internal_module":
-		case "module":
-			return named(parent.field("name")) ? BOTH : [];
-		case "interface_declaration":
-		case "type_alias_declaration":
-		case "type_parameter":
-			return named(parent.field("name")) ? ["type"] : [];
-		case "required_parameter":
-		case "optional_parameter":
-			return named(parent.field("pattern")) ? ["value"] : [];
-		case "arrow_function":
-		case "catch_clause":
-			return named(parent.field("parameter")) ? ["value"] : [];
-		case "for_in_statement":
-		case "assignment_pattern":
-		case "object_assignment_pattern":
-			return named(parent.field("left")) ? ["value"] : [];
-		case "pair_pattern":
-			return named(parent.field("value")) ? ["value"] : [];
-		case "array_pattern":
-		case "rest_pattern":
-			return node.kind() === "identifier" ? ["value"] : [];
-		case "object_pattern":
-			return node.kind() === "shorthand_property_identifier_pattern" ? ["value"] : [];
-		case "namespace_import":
-		case "import_clause":
-			return node.kind() === "identifier" ? BOTH : [];
-		case "import_specifier":
-			return named(parent.field("alias") ?? parent.field("name")) ? BOTH : [];
-		default:
-			return [];
-	}
-}
-
-/** Whether a scope itself, not a scope nested inside it, declares `name` in one of `spaces`. */
-function scopeDeclares(scope: SgNode, name: string, spaces: Space[]): boolean {
-	const exactly = `^${name.replace(/\$/g, "\\$")}$`;
-	return scope
-		.findAll({
-			rule: {
-				any: ["identifier", "type_identifier", "shorthand_property_identifier_pattern"].map((kind) => ({
-					kind,
-					regex: exactly,
-				})),
-			},
-		})
-		.some((node) => {
-			if (!declaredSpaces(node).some((space) => spaces.includes(space))) return false;
-			let owner = node.parent();
-			if (owner && NAMED_FROM_OUTSIDE.has(String(owner.kind()))) owner = owner.parent();
-			while (owner && !SCOPES.has(String(owner.kind()))) owner = owner.parent();
-			return at(owner, scope);
-		});
-}
-
-/**
- * Which names a renamed place would bind or refer to, or none for places nothing can capture: a member's name
- * (`A.parse`), the original name in `import { parse as p }`, a re-export's specifier, and, when a property is
- * renamed, an object literal's shorthand (it keeps its value: `{ fullName: name }`).
- */
-function capturable(node: SgNode, renamingProperty: boolean): Space[] {
-	const parent = node.parent();
-	const kind = String(node.kind());
-	if (kind === "property_identifier" || kind === "private_property_identifier") return [];
-	if (kind === "shorthand_property_identifier") return renamingProperty ? [] : ["value"];
-	if (parent && ["import_specifier", "export_specifier"].includes(String(parent.kind()))) {
-		if (parent.field("alias") && at(parent.field("name"), node)) return [];
-		const statement = parent.parent()?.parent();
-		if (parent.kind() === "export_specifier" && statement?.kind() === "export_statement" && statement.field("source"))
-			return [];
-		return BOTH;
-	}
-	return kind === "type_identifier" ? ["type"] : ["value"];
-}
-
-/**
- * Refuses a rename whose new name something already declares in a scope around one of the renamed places, which
- * would either collide with it or, silently, make those places refer to the other declaration. Types and values
- * are apart: a type named like a value doesn't capture it.
- */
-function refuseCapturedRename(edit: WorkspaceEdit | null, symbol: string, to: string, renamingProperty: boolean): void {
-	const locations = [
-		...Object.entries(edit?.changes ?? {}).map(([uri, edits]) => ({ uri, edits })),
-		...(edit?.documentChanges ?? []).flatMap((change) =>
-			"kind" in change ? [] : [{ uri: change.textDocument.uri, edits: change.edits }],
-		),
-	];
-	const kinds = [
-		"identifier",
-		"type_identifier",
-		"shorthand_property_identifier",
-		"shorthand_property_identifier_pattern",
-		"property_identifier",
-		"private_property_identifier",
-	];
-	for (const { uri, edits } of locations) {
-		const file = fileURLToPath(uri);
-		const lang = scriptLanguage(file);
-		if (!lang) continue;
-		const source = readFileSync(file, "utf8");
-		const byOffset = new Map(
-			parse(lang, source)
-				.root()
-				.findAll({ rule: { any: kinds.map((kind) => ({ kind })) } })
-				.map((node) => [node.range().start.index, node]),
-		);
-		for (const { range } of edits) {
-			const offset = offsetOf(source, range.start);
-			const node = byOffset.get(offset);
-			const spaces = node ? capturable(node, renamingProperty) : [];
-			if (!spaces.length) continue;
-			for (let scope = node!.parent(); scope; scope = scope.parent()) {
-				if (!SCOPES.has(String(scope.kind())) || !scopeDeclares(scope, to, spaces)) continue;
-				const line = source.slice(0, offset).split("\n").length;
-				throw new Error(
-					`refactor.rename: ${to} is already declared where ${JSON.stringify(symbol)} is used, at ${relative(process.cwd(), file)}:${line}, so renaming it there would change what it refers to. Pick another name, or rename that ${to} first.`,
-				);
-			}
-		}
-	}
-}
-
-const MEMBER_LISTS = new Set(["interface_body", "object_type", "class_body", "object", "enum_body"]);
-
-/** Refuses renaming a member to the name of another member of the same interface, class, type or object. */
-function refuseMemberCollision(file: string, position: Position, symbol: string, to: string): void {
-	const lang = scriptLanguage(file);
-	if (!lang) return;
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, position);
-	const root = parse(lang, source).root();
-	const declared = root
-		.findAll({
-			rule: {
-				any: ["property_identifier", "private_property_identifier", "required_parameter", "optional_parameter"].map(
-					(kind) => ({ kind }),
-				),
-			},
-		})
-		.find((node) => node.range().start.index === offset);
-	let list = declared?.parent() ?? null;
-	while (list && !MEMBER_LISTS.has(String(list.kind()))) list = list.parent();
-	if (!list) return;
-	const names = list
-		.children()
-		.flatMap((member) => [
-			member.field("name"),
-			member.field("key"),
-			member.field("property"),
-			// A bare enum member, and an object's shorthand property.
-			...(["property_identifier", "shorthand_property_identifier"].includes(String(member.kind())) ? [member] : []),
-			// A constructor's parameter properties: `constructor(private readonly db: Db)`.
-			...(member.kind() === "method_definition" && member.field("name")?.text() === "constructor"
-				? (member.field("parameters")?.children() ?? [])
-						.filter(parameterProperty)
-						.map((parameter) => parameter.field("pattern"))
-				: []),
-		])
-		.filter((name): name is SgNode => name !== null && name !== undefined)
-		.map((name) => name.text());
-	if (names.includes(to))
-		throw new Error(
-			`refactor.rename: ${JSON.stringify(symbol)} would become a second member named ${to}; pick another name, or rename that ${to} first.`,
-		);
-}
-
-/** Whether the name at `position` is a shorthand in a destructuring declaration, `const { auth } = …`. */
-function declaresShorthandBinding(file: string, position: Position): boolean {
-	const lang = scriptLanguage(file);
-	if (!lang) return false;
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, position);
-	return parse(lang, source)
-		.root()
-		.findAll({ rule: { kind: "shorthand_property_identifier_pattern" } })
-		.some((node) => node.range().start.index === offset);
-}
-
-/** Leaves out the edits that land on property names: a member access, a key, or a type's member. */
-function dropPropertyEdits(edit: WorkspaceEdit | null): void {
-	const kept = (uri: string, edits: TextEdit[]) => {
-		const file = fileURLToPath(uri);
-		const lang = scriptLanguage(file);
-		if (!lang) return edits;
-		const source = readFileSync(file, "utf8");
-		const properties = new Set(
-			parse(lang, source)
-				.root()
-				.findAll({ rule: { any: [{ kind: "property_identifier" }, { kind: "private_property_identifier" }] } })
-				.map((node) => node.range().start.index),
-		);
-		return edits.filter(({ range }) => !properties.has(offsetOf(source, range.start)));
-	};
-	for (const [uri, edits] of Object.entries(edit?.changes ?? {})) edit!.changes![uri] = kept(uri, edits);
-	for (const change of edit?.documentChanges ?? [])
-		if (!("kind" in change)) change.edits = kept(change.textDocument.uri, change.edits);
-}
-
-/** A constructor parameter that also declares a property: `public name: string`, `readonly id: number`. */
-function parameterProperty(node: SgNode | null): boolean {
-	return (
-		node !== null &&
-		["required_parameter", "optional_parameter"].includes(String(node.kind())) &&
-		node.children().some((child) => ["accessibility_modifier", "readonly"].includes(String(child.kind())))
-	);
-}
-
-/**
- * Whether the name at `position` declares a property (an interface or class member, say) rather than a value.
- * A constructor parameter with an accessibility modifier or `readonly`, `constructor(public name: string)`,
- * declares both, and is renamed as the property.
- */
-function declaresProperty(file: string, position: Position): boolean {
-	const lang = scriptLanguage(file);
-	if (!lang) return false;
-	const source = readFileSync(file, "utf8");
-	const offset = offsetOf(source, position);
-	const kinds = [
-		"property_identifier",
-		"private_property_identifier",
-		"identifier",
-		"required_parameter",
-		"optional_parameter",
-	];
-	return parse(lang, source)
-		.root()
-		.findAll({ rule: { any: kinds.map((kind) => ({ kind })) } })
-		.some((node) => {
-			if (node.range().start.index !== offset) return false;
-			const kind = String(node.kind());
-			if (kind === "property_identifier" || kind === "private_property_identifier") return true;
-			// The server gives a parameter property's position as the start of the parameter, at its modifier.
-			return parameterProperty(kind === "identifier" ? node.parent() : node);
-		});
 }
 
 function offsetOf(source: string, position: Position): number {
@@ -684,40 +166,6 @@ function offsetOf(source: string, position: Position): number {
 	// TypeScript counts characters after a byte order mark; the source and ast-grep's offsets include it.
 	const bom = source.startsWith("\uFEFF") && position.line === 0 ? 1 : 0;
 	return lines.slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) + position.character + bom;
-}
-
-/**
- * Refuses a rename that a barrel would turn into a different symbol: one that re-exports the renamed declaration's
- * file (`export * from "./date"`) and already exports the new name, itself or through its other `export *` modules,
- * would make its importers of the new name ambiguous, or silently resolve them to the other one.
- */
-function refuseBarrelCollision(root: string, file: string, symbol: string, to: string): void {
-	const source = readFileSync(file, "utf8");
-	const name = symbol.split(".").at(-1)!;
-	if (symbol.includes(".") || !exportsName(source, name)) return;
-	const real = realpathSync(file);
-	const reexport = /\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+["'](\.{1,2}\/[^"']*)["']/g;
-	for (const barrel of scriptFiles(root)) {
-		if (barrel === file) continue;
-		const text = withoutComments(barrel, readFileSync(barrel, "utf8"));
-		const modules = [...text.matchAll(reexport)].map((match) => ({
-			star: match[0].includes("*"),
-			path: resolveModule(barrel, match[1]!),
-		}));
-		if (!modules.some((module) => module.path === real)) continue;
-		// The barrel's own exports, without the re-export of the renamed file, which it would follow.
-		const own = text.replace(reexport, (whole, specifier: string) =>
-			resolveModule(barrel, specifier) === real ? "" : whole,
-		);
-		const other = modules.find(
-			(module) =>
-				module.star && module.path && module.path !== real && exportsName(readFileSync(module.path, "utf8"), to),
-		);
-		if (exportsName(own, to) || other)
-			throw new Error(
-				`refactor.rename: ${relative(root, barrel)} re-exports ${relative(root, file)} and already exports ${to}${other ? ` from ${relative(root, other.path!)}` : ""}, so its importers of ${to} would change meaning. Pick another name.`,
-			);
-	}
 }
 
 /**
@@ -763,20 +211,6 @@ function repointMovedPaths(text: string, from: string, to: string): string {
 			return `${before}${quote}${path}${quote}`;
 		},
 	);
-}
-
-/** Git-visible JS and TS files. */
-function scriptFiles(root: string): string[] {
-	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
-		cwd: root,
-		encoding: "utf8",
-	});
-	if (listed.status !== 0) return [];
-	return listed.stdout
-		.split("\0")
-		.filter((path) => /\.[cm]?[jt]sx?$/.test(path))
-		.map((path) => resolve(root, path))
-		.filter((path) => existsSync(path));
 }
 
 /**
@@ -892,13 +326,6 @@ function validateRename(options: RenameOptions): void {
 			`refactor.rename: ${JSON.stringify(options.to)} isn't a name; give the new name alone${options.to.includes(".") ? `, such as ${JSON.stringify(options.to.split(".").at(-1))}` : ""}`,
 		);
 }
-
-/** Words a variable, function, class or import can't be named, though a property can. */
-const RESERVED = new Set(
-	"break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public await".split(
-		" ",
-	),
-);
 
 function validateRenameFile(options: RenameFileOptions): void {
 	if (!options || typeof options.from !== "string" || typeof options.to !== "string")

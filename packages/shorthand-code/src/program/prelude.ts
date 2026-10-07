@@ -840,18 +840,10 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
 	const literal: [number, number][] = [];
 	let last = 0;
 	for (const variable of template.matchAll(METAVARIABLE)) {
-		let before = template.slice(last, variable.index);
-		const value = match.vars[variable[2]!] ?? variable[0];
-		let end = variable.index + variable[0].length;
-		// An empty `$$$` takes its comma with it: `[$$$DEPS, client]` on `[]` is `[client]`, not `[, client]`.
-		if (variable[1] === "$$$" && value === "") {
-			const after = /^\s*,\s*/.exec(template.slice(end));
-			if (after) end += after[0].length;
-			else before = before.replace(/,\s*$/, "");
-		}
+		const before = template.slice(last, variable.index);
 		if (before) literal.push([text.length, text.length + before.length]);
-		text += before + value;
-		last = end;
+		text += before + (match.vars[variable[2]!] ?? variable[0]);
+		last = variable.index + variable[0].length;
 	}
 	const rest = template.slice(last);
 	if (rest) literal.push([text.length, text.length + rest.length]);
@@ -878,157 +870,6 @@ function outsideCaptures(text: string, match: SgMatch, also: string[] = []): [nu
 	}
 	if (last < text.length) literal.push([last, text.length]);
 	return literal;
-}
-
-/**
- * A comment after a block's `}` (`} // eslint-disable-line complexity`) is parsed inside the block, so it's part of a
- * match like `function $F() { $$$BODY }` that no template reproduces. Keep it after the replacement.
- */
-function withTrailingComment(template: { text: string; literal: [number, number][] }, match: SgMatch) {
-	const brace = closingBraceEnd(match.node);
-	if (brace === undefined) return template;
-	const tail = match.node.getRoot().root().text().slice(brace, match.node.range().end.index);
-	return !template.text.trimEnd().endsWith(tail.trim()) ? { ...template, text: template.text + tail } : template;
-}
-
-/**
- * Where a node's last block closes, when only comments follow its `}` inside the node: tree-sitter puts a comment
- * after a block (`} // end`) inside the block. Found from the tree, so a `}//` in a string or template isn't one.
- */
-function closingBraceEnd(node: SgNode): number | undefined {
-	for (let current: SgNode | undefined = node; current; current = current.children().at(-1)) {
-		const children = current.children();
-		const brace = children.findLastIndex((child) => child.kind() === "}");
-		if (
-			brace >= 0 &&
-			brace < children.length - 1 &&
-			children.slice(brace + 1).every((child) => child.kind() === "comment")
-		)
-			return children[brace]!.range().end.index;
-	}
-	return undefined;
-}
-
-/**
- * A statement pattern written without `;` (`const $A = f($B)`) still matches the statement's `;`, and a replacement
- * without one would drop it: if the next line starts with `[` or `(`, the two statements then run together.
- */
-function keepSemicolon(result: unknown, match: SgMatch): unknown {
-	const kept = withSemicolon(result, match);
-	if (typeof kept !== "string") return kept;
-	// A replacement ending in a line comment would comment out the rest of its line (`legacy(); break;`).
-	const lang = LANGUAGES[match.file.split(".").pop()!];
-	const after = match.node.getRoot().root().text().slice(match.node.range().end.index);
-	if (lang === Lang.Css || lang === Lang.Html || !/\/\/[^\n]*$/.test(kept) || !/^[^\n]*\S/.test(after)) return kept;
-	const ends = parse(lang ?? Lang.Tsx, kept)
-		.root()
-		.findAll({ rule: { kind: "comment" } })
-		.some((node) => node.text().startsWith("//") && !kept.slice(node.range().end.index).trim());
-	return ends ? `${kept}\n` : kept;
-}
-
-function withSemicolon(result: unknown, match: SgMatch): unknown {
-	if (typeof result !== "string") return result;
-	// A shorthand reference renamed: `{ timeout }` keeps the side that isn't renamed. Renaming a property keeps the
-	// variable, `{ timeoutMs: timeout }`; renaming a variable keeps the key, `{ timeout: limit }`.
-	const kind = String(match.node.kind());
-	const original = match.node.text();
-	const renamesProperty = referencesProperty.get(match);
-	const shorthand =
-		kind === "shorthand_property_identifier" ||
-		(kind === "shorthand_property_identifier_pattern" && renamesProperty !== undefined);
-	if (shorthand && /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(result) && result !== original)
-		return renamesProperty ? `${result}: ${original}` : `${original}: ${result}`;
-	const lang = LANGUAGES[match.file.split(".").pop()!];
-	if (!result.trim() || !original.endsWith(";")) return result;
-	// A CSS declaration (`color: red;`) needs its `;` back.
-	if (lang === Lang.Css) return /[;}]\s*$/.test(result) ? result : `${result};`;
-	if (lang === Lang.Html) return result;
-	// Whether the replacement ends with a statement that needs one: a declaration or block that ends in `}` doesn't,
-	// but `const config = { ...defaults }` does.
-	const root = parse(lang ?? Lang.Tsx, result).root();
-	const statements = root.children().filter((node) => node.isNamed() && node.kind() !== "comment");
-	const last = statements.at(-1);
-	const unterminated =
-		last !== undefined &&
-		!last.text().trimEnd().endsWith(";") &&
-		([
-			"expression_statement",
-			"lexical_declaration",
-			"variable_declaration",
-			"import_statement",
-			"type_alias_declaration",
-			"return_statement",
-			"throw_statement",
-		].includes(String(last.kind())) ||
-			(last.kind() === "export_statement" &&
-				![
-					"function_declaration",
-					"class_declaration",
-					"abstract_class_declaration",
-					"interface_declaration",
-					"enum_declaration",
-				].includes(String(last.field("declaration")?.kind()))));
-	if (!unterminated) return result;
-	// Before a comment that ends the replacement, or the `;` would be part of it (a `//` in a string isn't one).
-	const comment = root
-		.findAll({ rule: { kind: "comment" } })
-		.find((node) => !result.slice(node.range().end.index).trim());
-	if (!comment) return `${result};`;
-	const at = result.slice(0, comment.range().start.index).trimEnd().length;
-	return `${result.slice(0, at)};${result.slice(at)}`;
-}
-
-const LISTS = new Set([
-	"enum_body",
-	"arguments",
-	"object",
-	"array",
-	"object_pattern",
-	"array_pattern",
-	"named_imports",
-	"export_clause",
-	"formal_parameters",
-	"type_arguments",
-	"type_parameters",
-]);
-
-/**
- * Removing items from a comma-separated list (`{ url, debug: true, retries }` without `debug`) takes their commas
- * with them, which the grammar would otherwise accept as empty slots. Planned per list, so neighbouring items can
- * go together: a run of removed items takes everything up to the next kept item or, at the end, from the last kept
- * item; removing every item empties the list.
- */
-function withListCommas(edits: Edit[], root: SgNode): Edit[] {
-	const removals = edits.filter((edit) => edit.insertedText === "" && edit.endPos > edit.startPos);
-	if (!removals.length) return edits;
-	const lists = root.findAll({ rule: { any: [...LISTS].map((kind) => ({ kind })) } });
-	const replaced = new Set<Edit>();
-	const added: Edit[] = [];
-	for (const list of lists) {
-		const items = list.namedChildren().filter((child) => child.kind() !== "comment");
-		const removed = items.map((item) =>
-			removals.find((edit) => edit.startPos === item.range().start.index && edit.endPos === item.range().end.index),
-		);
-		if (!removed.some(Boolean)) continue;
-		for (let index = 0; index < items.length;) {
-			if (!removed[index]) {
-				index++;
-				continue;
-			}
-			let end = index;
-			while (end + 1 < items.length && removed[end + 1]) end++;
-			for (let at = index; at <= end; at++) replaced.add(removed[at]!);
-			const next = items[end + 1];
-			const previous = items[index - 1];
-			const template = removed[index]!;
-			const startPos = next || !previous ? items[index]!.range().start.index : previous.range().end.index;
-			const endPos = next ? next.range().start.index : items[end]!.range().end.index;
-			added.push({ ...template, startPos, endPos, insertedText: "" });
-			index = end + 1;
-		}
-	}
-	return [...edits.filter((edit) => !replaced.has(edit)), ...added];
 }
 
 /**
@@ -1078,12 +919,11 @@ function applyRewrites(
 	const planned: { match: SgMatch; edits: Edit[] }[] = [];
 	for (const match of matches) {
 		if (typeof replacement === "string") checkTemplate(replacement, new Set(Object.keys(match.vars)));
-		const template =
-			typeof replacement === "string" ? withTrailingComment(interpolate(replacement, match), match) : undefined;
+		const template = typeof replacement === "string" ? interpolate(replacement, match) : undefined;
 		const result = template
 			? template.text
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
-		const changes = replacementEdits(asBody(keepSemicolon(result, match), match), match, file);
+		const changes = replacementEdits(asBody(result, match), match, file);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
 		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
 		else {
@@ -1117,10 +957,9 @@ function applyRewrites(
 		if (inside) nested.push(entry.match);
 		else kept.push(entry);
 	}
-	const listEdits = kept.flatMap((entry) => entry.edits);
+	const edits = kept.flatMap((entry) => entry.edits);
 	const count = kept.length;
-	if (listEdits.length === 0) return 0;
-	const edits = withListCommas(listEdits, matches[0]!.node.getRoot().root());
+	if (edits.length === 0) return 0;
 	const source = matches[0].node.getRoot().root().text();
 	// Two matches can reach one place, such as a call found through a class and its interface. The same
 	// edit twice is one edit; only different edits to the same text conflict.
@@ -1347,14 +1186,14 @@ function toMatch(
 	const vars: Record<string, string> = {};
 	for (const [, dollars, name] of JSON.stringify(pattern).matchAll(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g)) {
 		if (dollars === "$$$") {
-			vars[name] = sequenceText(node.getMultipleMatches(name), source);
+			// Slice the original source so separators and formatting are kept ("a, b" rather than "a,b").
+			const nodes = node.getMultipleMatches(name);
+			const first = nodes[0];
+			const last = nodes[nodes.length - 1];
+			vars[name] = first && last ? source.slice(first.range().start.index, last.range().end.index) : "";
 		} else {
 			const captured = node.getMatch(name);
-			// A block's text takes in a comment after its `}`, which would comment out the rest of a template's line.
-			if (captured) {
-				const brace = closingBraceEnd(captured);
-				vars[name] = brace === undefined ? captured.text() : source.slice(captured.range().start.index, brace);
-			}
+			if (captured) vars[name] = captured.text();
 		}
 	}
 	return remember(
@@ -1363,24 +1202,6 @@ function toMatch(
 		true,
 		sourceFile,
 	);
-}
-
-/**
- * A `$$$` capture's text, sliced from the original source so separators and formatting are kept ("a, b" rather than
- * "a,b"), but without a trailing comma: in `f(\n  a,\n  b,\n)`, `f($$$ARGS, c)` would otherwise give `b,, c`. A
- * trailing comment is kept; a line comment then ends the line, so the rest of the template isn't commented out.
- */
-function sequenceText(nodes: SgNode[], source: string): string {
-	// A comment after a block's `}` (`} // end`) is parsed inside the block, so the `}` can be among the nodes.
-	const closing = nodes.findIndex((item) => item.kind() === "}");
-	const items = closing < 0 ? nodes : nodes.slice(0, closing);
-	const lastItem = items.findLastIndex((item) => item.kind() !== "," && item.kind() !== "comment");
-	if (lastItem < 0) return "";
-	const comments = items.slice(lastItem + 1).filter((item) => item.kind() === "comment");
-	const text =
-		source.slice(items[0]!.range().start.index, items[lastItem]!.range().end.index) +
-		comments.map((comment) => ` ${comment.text()}`).join("");
-	return comments.at(-1)?.text().startsWith("//") ? `${text}\n` : text;
 }
 
 /** A reference can edit its enclosing call only when it names the callee. */
@@ -1402,7 +1223,7 @@ function referenceCall(node: SgNode): SgNode | undefined {
 
 function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 	const parsed = new Map<string, NonNullable<ReturnType<typeof parseFile>>>();
-	return locations.map(({ uri, range, property }) => {
+	return locations.map(({ uri, range }) => {
 		const file = fileURLToPath(uri);
 		let document = parsed.get(file);
 		if (!document) {
@@ -1439,14 +1260,9 @@ function referenceMatches(locations: ReferenceLocation[]): SgMatch[] {
 			});
 		if (!node)
 			throw new Error(`refactor.references could not locate the identifier at ${gitPath(file)}:${start.line + 1}`);
-		const match = toMatch(gitPath(file), node, document.source, "", file, referenceCall(node));
-		if (property !== undefined) referencesProperty.set(match, property);
-		return match;
+		return toMatch(gitPath(file), node, document.source, "", file, referenceCall(node));
 	});
 }
-
-/** Whether a reference match is to a property rather than a variable, which decides a shorthand's kept side. */
-const referencesProperty = new WeakMap<SgMatch, boolean>();
 
 function normalizeEditLineEndings(text: string): string {
 	return text.replace(/\r\n?/g, "\n");
