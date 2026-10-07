@@ -156,7 +156,7 @@ test("a declaration the target already imports from the source becomes local the
 	await moveDeclaration(join(root, "src/a.ts"), "limit", join(root, "src/target.ts"), everyFile(root));
 
 	expect(read(root, "src/target.ts")).toBe(
-		'import { other } from "./a";\nexport const both = () => limit + other;\nexport const limit = 3;\n',
+		'import { other } from "./a";\nexport const limit = 3;\nexport const both = () => limit + other;\n',
 	);
 	await typeCheck(root);
 });
@@ -546,6 +546,91 @@ test("an import added where the source's first statement gains export doesn't jo
 		'import { limit } from "./limit";\nexport const base = 10;\nexport const doubled = limit * 2;\n',
 	);
 	await typeCheck(root);
+});
+
+test("a declaration moved into a file that uses it goes before its first use there", async () => {
+	const root = project({
+		"src/a.ts": "export const LIMIT = 5;\nexport class Base {}\n",
+		"src/b.ts":
+			'import { LIMIT, Base } from "./a";\nexport const doubled = LIMIT * 2;\nexport class Child extends Base {}\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "LIMIT", join(root, "src/b.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "Base", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe(
+		"export const LIMIT = 5;\nexport const doubled = LIMIT * 2;\nexport class Base {}\nexport class Child extends Base {}\n",
+	);
+	await typeCheck(root);
+});
+
+test("a dependency that is the source's default export is imported as one", async () => {
+	const root = project({
+		"src/a.ts":
+			"export default function helper() {\n\treturn 1;\n}\nexport function foo() {\n\treturn helper() + 1;\n}\n",
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "foo", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/b.ts")).toBe(
+		'import helper from "./a";\nexport function foo() {\n\treturn helper() + 1;\n}\n',
+	);
+	await typeCheck(root);
+});
+
+test("an overloaded dependency is exported on every signature", async () => {
+	const root = project({
+		"src/a.ts": [
+			"function fmt(x: string): string;",
+			"function fmt(x: number): string;",
+			"function fmt(x: string | number) {",
+			"\treturn String(x);",
+			"}",
+			"export function foo() {",
+			'\treturn fmt(1) + fmt("a");',
+			"}",
+			"export const keep = fmt(2);",
+			"",
+		].join("\n"),
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "foo", join(root, "src/b.ts"), everyFile(root));
+
+	expect(read(root, "src/a.ts")).toStartWith(
+		"export function fmt(x: string): string;\nexport function fmt(x: number): string;\nexport function fmt(",
+	);
+	await typeCheck(root);
+});
+
+test("the moved code's own relative paths are repointed", async () => {
+	const root = project({
+		"src/heavy.ts": "export interface Runner {\n\trun(): void;\n}\nexport const r: Runner = { run() {} };\n",
+		"src/a.ts":
+			'export type Run = import("./heavy").Runner;\nexport async function load() {\n\tconst m = await import("./heavy");\n\treturn m.r;\n}\n',
+	});
+
+	await moveDeclaration(join(root, "src/a.ts"), "load", join(root, "src/lib/b.ts"), everyFile(root));
+	await moveDeclaration(join(root, "src/a.ts"), "Run", join(root, "src/lib/b.ts"), everyFile(root));
+
+	expect(read(root, "src/lib/b.ts")).toBe(
+		'export async function load() {\n\tconst m = await import("../heavy");\n\treturn m.r;\n}\nexport type Run = import("../heavy").Runner;\n',
+	);
+	await typeCheck(root);
+});
+
+test("a dependency declared as a namespace or with declare is refused rather than treated as a global", async () => {
+	const root = project({
+		"src/a.ts":
+			"namespace Utils {\n\texport const x = 1;\n}\ndeclare const VERSION: string;\nexport function f() {\n\treturn Utils.x;\n}\nexport function g() {\n\treturn VERSION;\n}\n",
+	});
+
+	for (const [symbol, name] of [
+		["f", "Utils"],
+		["g", "VERSION"],
+	])
+		expect(
+			String(await rejection(moveDeclaration(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),
+		).toContain(`it uses ${name}, which`);
 });
 
 test("import attributes survive in the source and are copied with the imports the target needs", async () => {

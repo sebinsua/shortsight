@@ -5,7 +5,7 @@
  * before anything is written.
  */
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, relative, resolve } from "node:path";
+import { dirname, extname, relative, resolve, sep } from "node:path";
 import { parse, type SgNode } from "@ast-grep/napi";
 import type { MoveAnalysis } from "./move-analysis.ts";
 import { scriptLanguage } from "./placement.ts";
@@ -60,7 +60,8 @@ const OTHER_DECLARATIONS = new Set(["function_signature", "ambient_declaration",
 
 class MoveError extends Error {
 	constructor(message: string) {
-		super(`refactor.move: ${message}`);
+		// Files are named from the program's working directory, as the program names them.
+		super(`refactor.move: ${message.replaceAll(process.cwd() + sep, "")}`);
 	}
 }
 
@@ -108,6 +109,37 @@ function withInsertionsMerged(edits: TextEdit[]): TextEdit[] {
 		else merged.push(insertion);
 	}
 	return merged;
+}
+
+/** Whether the source declares `name` at the top level in a form the move doesn't import, so it would look global. */
+function declaredUnimportably(root: SgNode, moved: SgNode, name: string): boolean {
+	const escaped = name.replace(/\$/g, "\\$");
+	const forms = new RegExp(
+		`^(?:export\\s+)?(?:(?:declare\\s+)?(?:namespace|module)\\s+${escaped}\\b|declare\\s+(?:const|let|var|function|class|enum|abstract\\s+class)\\s+${escaped}\\b|import\\s+(?:type\\s+)?${escaped}\\s*=)`,
+	);
+	return root.children().some((statement) => !at(statement, moved) && forms.test(statement.text()));
+}
+
+const at = (a: SgNode, b: SgNode) => a.range().start.index === b.range().start.index;
+
+/**
+ * The moved code's own relative paths, repointed from where it was to where it goes: `import("./x")` in code or a
+ * type, `require("./x")`, and `new URL("./x", import.meta.url)`.
+ */
+export function repointRelativePaths(text: string, from: string, to: string): string {
+	if (dirname(from) === dirname(to)) return text;
+	return text.replace(
+		/(\bimport\s*\(\s*|\brequire\s*\(\s*|\bnew\s+URL\s*\(\s*)(["'])(\.\.?\/[^"'\n]*)\2/g,
+		(whole, call: string, quote: string, specifier: string) => {
+			if (/URL/.test(call)) {
+				let path = relative(dirname(to), resolve(dirname(from), specifier)).replaceAll("\\", "/");
+				if (!path.startsWith(".")) path = `./${path}`;
+				return `${call}${quote}${path}${quote}`;
+			}
+			const resolved = resolveModule(from, specifier);
+			return resolved ? `${call}${quote}${specifierFor(to, resolved, styleOf(specifier))}${quote}` : whole;
+		},
+	);
 }
 
 /** A `let` or `var` declaration, exported or not: what it declares can be assigned again. */
@@ -236,22 +268,36 @@ function importBindings(root: SgNode): Binding[] {
 	return bindings;
 }
 
+interface TopLevelEntry {
+	statement: SgNode;
+	/** Exported by name. */
+	exported: boolean;
+	type: boolean;
+	/** The file's default export, named here only locally. */
+	isDefault: boolean;
+}
+
 interface TopLevel {
-	declarations: Map<string, { statement: SgNode; exported: boolean; type: boolean }[]>;
+	declarations: Map<string, TopLevelEntry[]>;
 	/** Names exported by a local list such as `export { a, b as c }`. */
 	listed: Set<string>;
 }
 
 function topLevel(root: SgNode): TopLevel {
-	const declarations = new Map<string, { statement: SgNode; exported: boolean; type: boolean }[]>();
+	const declarations = new Map<string, TopLevelEntry[]>();
 	const listed = new Set<string>();
-	const add = (name: string, entry: { statement: SgNode; exported: boolean; type: boolean }) =>
+	const add = (name: string, entry: TopLevelEntry) =>
 		declarations.set(name, [...(declarations.get(name) ?? []), entry]);
 	for (const statement of root.children()) {
 		const declared = declaration(statement);
 		if (declared)
 			for (const name of declared.names)
-				add(name, { statement, exported: declared.exported, type: declared.types.has(name) });
+				add(name, {
+					statement,
+					exported: declared.exported,
+					type: declared.types.has(name),
+					isDefault: declared.isDefault,
+				});
 		const inner = statement.kind() === "export_statement" ? statement.field("declaration") : statement;
 		if (inner && OTHER_DECLARATIONS.has(String(inner.kind()))) {
 			const name =
@@ -260,7 +306,13 @@ function topLevel(root: SgNode): TopLevel {
 					.namedChildren()
 					.find((child) => child.field("name"))
 					?.field("name");
-			if (name) add(name.text(), { statement, exported: statement.kind() === "export_statement", type: false });
+			if (name)
+				add(name.text(), {
+					statement,
+					exported: statement.kind() === "export_statement",
+					type: false,
+					isDefault: false,
+				});
 		}
 		if (statement.kind() === "export_statement" && !statement.field("source")) {
 			const clause = statement.children().find((child) => child.kind() === "export_clause");
@@ -560,11 +612,11 @@ export function planImports(input: MoveInput): ImportPlan | null {
 	}
 	for (const [statement, removed] of nowLocal) {
 		const { start, end } = statement.range();
-		targetEdits.push({
-			start: start.index,
-			end: end.index,
-			text: withoutSpecifiers(statement, (imported) => removed.has(imported)),
-		});
+		const text = withoutSpecifiers(statement, (imported) => removed.has(imported));
+		// A statement left with nothing goes with its line.
+		const newline =
+			!text && targetText.startsWith("\r\n", end.index) ? 2 : !text && targetText[end.index] === "\n" ? 1 : 0;
+		targetEdits.push({ start: start.index, end: end.index + newline, text });
 	}
 
 	// Dependencies: copy the source's imports, and import (exporting if needed) the source's own declarations.
@@ -613,11 +665,23 @@ export function planImports(input: MoveInput): ImportPlan | null {
 				if (existing?.kind === "named" && existing.imported === name && importedFromSource(existing)) continue;
 				throw new MoveError(`${targetFile} already has a different ${name}`);
 			}
-			if (!local.exported && !source.listed.has(name)) {
-				const { start, end } = local.statement.range();
-				sourceEdits.push({ start: start.index, end: end.index, text: `export ${local.statement.text()}` });
+			if (local.isDefault) {
+				// The source's default export: import it as that.
+				const module = specifierFor(targetFile, sourceFile, style(targetRoot, sourceRoot));
+				targetLines.push(`import ${local.type ? "type " : ""}${name} from "${module}";`);
+				continue;
 			}
+			// Every declaration of the name: overload signatures must all be exported or none.
+			if (!local.exported && !source.listed.has(name))
+				for (const entry of source.declarations.get(name) ?? []) {
+					const { start, end } = entry.statement.range();
+					sourceEdits.push({ start: start.index, end: end.index, text: `export ${entry.statement.text()}` });
+				}
 			fromSource.push({ text: name, typeOnly: local.type });
+		} else if (declaredUnimportably(sourceRoot, node, name)) {
+			throw new MoveError(
+				`it uses ${name}, which ${sourceFile} declares as a namespace, with \`declare\` or with \`import … = require\`, and the target can't import that; move or export ${name} as an ordinary declaration first`,
+			);
 		} else if (existing || target.declarations.has(name)) {
 			// A global in the source would refer to the target's own binding after the move.
 			throw new MoveError(`${name} is a global where it is used, but ${targetFile} declares its own ${name}`);

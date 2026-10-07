@@ -631,14 +631,16 @@ function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
 function findMatches(helper: string, pattern: string | NapiConfig, files: FileScope): SgMatch[] {
 	const matches: SgMatch[] = [];
 	const ranges = scopeRanges(helper, files);
+	const search = patternSearch(helper, pattern);
 	for (const file of sourceFiles(helper, files)) {
 		const parsed = parseFile(file);
 		if (!parsed) continue;
-		for (const node of findNodes(helper, parsed.root, pattern)) {
+		for (const node of search.nodes(file, parsed.root)) {
 			const match = toMatch(file, node, parsed.source, pattern);
 			if (withinScope(match, ranges)) matches.push(match);
 		}
 	}
+	search.finish();
 	return matches;
 }
 
@@ -666,9 +668,41 @@ function findNodes(helper: string, root: SgNode, pattern: string | NapiConfig): 
 		} catch {
 			// Not a class member either. Preserve the original failure below.
 		}
-		error.message = `${helper}: ${error.message}\nPatterns must parse as one syntax node. For a fragment, use { rule: { pattern: { context: "complete surrounding code", selector: "node_kind" } } }.`;
-		throw error;
+		throw new PatternParseError(
+			`${helper}: ${error.message}\nPatterns must parse as one syntax node. For a fragment, use { rule: { pattern: { context: "complete surrounding code", selector: "node_kind" } } }.`,
+		);
 	}
+}
+
+/** A string pattern that doesn't parse as one node in some file's language. */
+class PatternParseError extends Error {}
+
+/**
+ * Finds a pattern across files of several languages. A pattern can parse in one and not another, as
+ * `useState<$T>($A)` parses as TypeScript but not as HTML or JavaScript: such a file has no match. It's an error
+ * only when nothing matched and it parsed in no JS or TS file, since HTML takes almost any text as content.
+ */
+function patternSearch(helper: string, pattern: string | NapiConfig) {
+	let parsedInScript = false;
+	let matched = false;
+	let failure: PatternParseError | undefined;
+	return {
+		nodes(file: string, root: SgNode): SgNode[] {
+			try {
+				const nodes = findNodes(helper, root, pattern);
+				if (/\.[cm]?[jt]sx?$/.test(file)) parsedInScript = true;
+				if (nodes.length) matched = true;
+				return nodes;
+			} catch (error) {
+				if (!(error instanceof PatternParseError)) throw error;
+				failure ??= error;
+				return [];
+			}
+		},
+		finish(): void {
+			if (failure && !parsedInScript && !matched) throw failure;
+		},
+	};
 }
 
 /** Explicit destinations may be ignored or missing, but cannot resolve outside the repository. */
@@ -740,6 +774,11 @@ const METAVARIABLE = /(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g;
 
 /** A template's metavariables that the pattern doesn't capture: a typo would otherwise be written out literally. */
 function checkTemplate(template: string, captured: ReadonlySet<string>): void {
+	// `$$$` and `$_` match without capturing, so a template can't refer to them; `$$$` would be written out as is.
+	if (/\$\$\$(?![A-Z_])/.test(template))
+		throw new Error(
+			"sg.rewrite: the replacement uses $$$, which captures nothing. Name it in both the pattern and the replacement, such as $$$ARGS.",
+		);
 	const unknown = [...new Set([...template.matchAll(METAVARIABLE)].map((match) => match[0]))].filter(
 		(name) => !captured.has(name.replace(/^\$+/, "")),
 	);
@@ -772,6 +811,27 @@ function interpolate(template: string, match: SgMatch): { text: string; literal:
 	return { text: text + rest, literal };
 }
 
+/**
+ * A callback's text without what it carried over from the match: wherever it repeats a captured value, as
+ * `console.info(${m.vars.A})` does, that text is the original code rather than new.
+ */
+function outsideCaptures(text: string, match: SgMatch): [number, number][] {
+	const carried: [number, number][] = [];
+	for (const value of Object.values(match.vars)
+		.filter(Boolean)
+		.toSorted((a, b) => b.length - a.length))
+		for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length))
+			if (!carried.some(([from, to]) => at < to && at + value.length > from)) carried.push([at, at + value.length]);
+	const literal: [number, number][] = [];
+	let last = 0;
+	for (const [from, to] of carried.toSorted((a, b) => a[0] - b[0])) {
+		if (from > last) literal.push([last, from]);
+		last = to;
+	}
+	if (last < text.length) literal.push([last, text.length]);
+	return literal;
+}
+
 /** Whether two edits conflict. The same edit twice is one edit, as when a call is found through a class and its interface. */
 function conflicting(a: Edit, b: Edit): boolean {
 	if (a.startPos === b.startPos && a.endPos === b.endPos && a.insertedText === b.insertedText) return false;
@@ -793,6 +853,7 @@ function applyRewrites(
 			: programCode(() => (replacement as (match: SgMatch) => RewriteResult)(match));
 		const changes = replacementEdits(result, match, file);
 		if (template && changes[0]) literalText.set(changes[0], template.literal);
+		else if (typeof result === "string" && changes[0]) literalText.set(changes[0], outsideCaptures(result, match));
 		if (changes.length > 0) planned.push({ match, edits: changes });
 	}
 	// Outer matches first. A match inside one whose edits it clashes with is left alone, as ast-grep's CLI does:
@@ -977,11 +1038,13 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	let count = 0,
 		matched = 0;
 	const skipped: SgMatch[] = [];
+	const search = patternSearch("sg.rewrite", pattern);
 	for (const file of sourceFiles("sg.rewrite", scope)) {
 		count += editingFiles([file], () => {
 			const parsed = parseFile(file);
 			if (!parsed) return 0;
-			const matches = findNodes("sg.rewrite", parsed.root, pattern)
+			const matches = search
+				.nodes(file, parsed.root)
 				.map((node) => toMatch(file, node, parsed.source, pattern))
 				.filter((match) => withinScope(match, ranges));
 			matched += matches.length;
@@ -995,6 +1058,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 			);
 		});
 	}
+	search.finish();
 	explainNested(nested);
 	if (matched === 0) {
 		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(scope)}`);

@@ -106,9 +106,9 @@ test("remove preserves adjacent comments", () => {
 
 test("remove and move take a statement's doc comment with it, and leave other comments", () => {
 	const path = fixture(
-		"// header\n\n/** About a. */\n// note\na();\n/** Stays: a blank line follows. */\n\nb(); // trailing\n/** About c. */ c();\n",
+		"// header\n\n/** About a. */\n// note\nconst a = 1;\n/** Stays: a blank line follows. */\n\nb(); // trailing\n/** About c. */ c();\n",
 	);
-	remove(match(path, "a();"));
+	remove(match(path, "const a = 1;"));
 	expect(readFileSync(path, "utf8")).toBe(
 		"// header\n\n/** Stays: a blank line follows. */\n\nb(); // trailing\n/** About c. */ c();\n",
 	);
@@ -136,6 +136,25 @@ test("remove takes a directive about the next line with its statement", () => {
 	);
 	remove(match(path, 'export const port: number = "8080";'));
 	expect(readFileSync(path, "utf8")).toBe('// keep\nexport const host = "x";\n');
+});
+
+test("remove leaves a file's header and region or file-wide directives", () => {
+	const path = fixture(
+		'/**\n * @license MIT\n */\nimport { unused } from "./u";\nimport { used } from "./v";\nused();\n/* c8 ignore start */\ndebugOnly();\notherDebug();\n/* c8 ignore stop */\n',
+	);
+	remove(match(path, 'import { unused } from "./u";'));
+	remove(match(path, "debugOnly();"));
+	expect(readFileSync(path, "utf8")).toBe(
+		'/**\n * @license MIT\n */\nimport { used } from "./v";\nused();\n/* c8 ignore start */\notherDebug();\n/* c8 ignore stop */\n',
+	);
+});
+
+test("a nested statement can move out before what contains it", () => {
+	const path = fixture("export function outer() {\n\tfunction inner() {\n\t\treturn 1;\n\t}\n\treturn inner();\n}\n");
+	move(match(path, "function inner($$$P) { $$$B }"), { before: match(path, "export function outer($$$P) { $$$B }") });
+	expect(readFileSync(path, "utf8")).toBe(
+		"function inner() {\n\t\treturn 1;\n\t}\nexport function outer() {\n\treturn inner();\n}\n",
+	);
 });
 
 test("a statement on lines of its own is removed with its line, indentation and all", () => {

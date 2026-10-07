@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { analyzeMove, type MoveAnalysis } from "./move-analysis.ts";
-import { declaredNames, planImports, topLevelDeclaration } from "./move-imports.ts";
+import { declaredNames, planImports, repointRelativePaths, topLevelDeclaration } from "./move-imports.ts";
 
 export interface Match {
 	file: string;
@@ -139,8 +139,29 @@ interface Edit {
 	text: string;
 }
 
+/** Directives about the next line only: `ignore start`, `ignore file` and the like apply to a region or file. */
 const DIRECTIVE =
-	/^\/[/*]\s*(?:@ts-(?:expect-error|ignore)|(?:eslint|oxlint)-disable-next-line|prettier-ignore|biome-ignore|deno-lint-ignore|istanbul ignore|c8 ignore|v8 ignore)\b/;
+	/^\/[/*]\s*(?:@ts-(?:expect-error|ignore)\b|(?:eslint|oxlint)-disable-next-line\b|prettier-ignore\b|biome-ignore\b|deno-lint-ignore(?!-file)\b|(?:istanbul|c8|v8) ignore (?:next|if|else)\b)/;
+
+/** A file's header comment, such as a licence, which belongs to the file rather than to its first statement. */
+const HEADER = /@license|@preserve|@copyright|@file(?:overview)?\b|SPDX-License-Identifier|\bCopyright\b/i;
+
+/** Statements a doc comment describes: declarations, exported or not. */
+const DOCUMENTED = new Set([
+	"export_statement",
+	"function_declaration",
+	"generator_function_declaration",
+	"class_declaration",
+	"abstract_class_declaration",
+	"lexical_declaration",
+	"variable_declaration",
+	"interface_declaration",
+	"type_alias_declaration",
+	"enum_declaration",
+	"internal_module",
+	"module",
+	"ambient_declaration",
+]);
 
 /**
  * Where the comments that belong to a statement start, so they go with it rather than ending up on the next one.
@@ -155,11 +176,13 @@ function leadingCommentsStart(node: SgNode, source: string, all = false): number
 		const { start: from, end: to } = previous.range();
 		const ownLine = !source.slice(source.lastIndexOf("\n", from.index - 1) + 1, from.index).trim();
 		if (!ownLine || !/^[\t ]*(\r?\n)?[\t ]*$/.test(source.slice(to.index, start))) break;
+		// The file's header, such as a licence, stays with the file, as does everything above it.
+		if (HEADER.test(previous.text())) break;
 		start = from.index;
 		// A directive about the next line, such as `// @ts-expect-error`, would apply to another statement if left.
 		if (all || DIRECTIVE.test(previous.text())) belongs = start;
 		else if (previous.text().startsWith("/**")) {
-			belongs = start;
+			if (DOCUMENTED.has(String(node.kind()))) belongs = start;
 			break;
 		}
 	}
@@ -414,7 +437,37 @@ export async function moveDeclaration(from: string, symbol: string, to: string, 
 		files: files.scripts(),
 	});
 	const match = remember({ file: from, text: node.text(), node }, source);
-	return editingFiles([from, to], () => moveNodes(match, { endOf: file(to) }, undefined, { ...files, analysis }));
+	return editingFiles([from, to], () =>
+		moveNodes(match, destinationIn(to, declaredNames(node)), (text) => repointRelativePaths(text, from, to), {
+			...files,
+			analysis,
+		}),
+	);
+}
+
+/**
+ * Where a moved declaration goes in `to`: before the first top-level statement there that uses it, since code that
+ * runs while the module loads (`export const doubled = LIMIT * 2`, `class Child extends Base`) needs it declared
+ * first; otherwise at the end.
+ */
+function destinationIn(to: string, names: string[]): Destination {
+	const lang = scriptLanguage(to);
+	if (!lang || !existsSync(to)) return { endOf: file(to) };
+	const source = readUtf8(to);
+	const wanted = new Set(names);
+	const user = parse(lang, source)
+		.root()
+		.children()
+		.find(
+			(candidate) =>
+				candidate.isNamed() &&
+				!["import_statement", "comment", "hash_bang_line"].includes(String(candidate.kind())) &&
+				!(candidate.kind() === "export_statement" && candidate.field("source")) &&
+				candidate
+					.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "type_identifier" }] } })
+					.some((node) => wanted.has(node.text())),
+		);
+	return user ? { before: remember({ file: to, text: user.text(), node: user }, source) } : { endOf: file(to) };
 }
 
 function moveNodes(
@@ -441,10 +494,14 @@ function moveNodes(
 	snapshot(target.match);
 	if (source.file === target.saved.file) {
 		const range = target.saved.node.range();
+		// Overlapping when the code goes inside what it's moved out of, or next to something inside it (or itself).
+		// A nested statement can still move out, before or after what contains it.
 		const overlaps =
-			target.key === "before" || target.key === "after"
-				? deletion.start < range.end.index && range.start.index < deletion.end
-				: target.edit.start > deletion.start && target.edit.start < deletion.end;
+			(target.edit.start > deletion.start && target.edit.start < deletion.end) ||
+			(target.key !== "startOf" &&
+				target.key !== "endOf" &&
+				range.start.index >= deletion.start &&
+				range.end.index <= deletion.end);
 		if (overlaps) {
 			throw new Error("Cannot move overlapping source and destination nodes");
 		}

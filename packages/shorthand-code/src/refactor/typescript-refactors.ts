@@ -157,9 +157,20 @@ const SCOPES = new Set([
 	"catch_clause",
 	"module",
 	"internal_module",
+	// Type signatures: their parameter names declare nothing anywhere else.
+	"method_signature",
+	"abstract_method_signature",
+	"function_signature",
+	"function_type",
+	"constructor_type",
+	"call_signature",
+	"construct_signature",
 ]);
 
-/** The name an identifier declares in its scope, if it declares one: a variable, function, class, parameter or import. */
+const at = (node: SgNode | null | undefined, other: SgNode) =>
+	node?.range().start.index === other.range().start.index && node.kind() === other.kind();
+
+/** Whether an identifier declares its name in its scope: a variable, function, class, parameter, loop variable or import. */
 function declaresHere(node: SgNode): boolean {
 	const parent = node.parent();
 	if (!parent) return false;
@@ -168,22 +179,32 @@ function declaresHere(node: SgNode): boolean {
 		case "function_declaration":
 		case "generator_function_declaration":
 		case "class_declaration":
+		case "abstract_class_declaration":
 		case "enum_declaration":
-			return parent.field("name")?.range().start.index === node.range().start.index;
+			return at(parent.field("name"), node);
 		case "required_parameter":
 		case "optional_parameter":
+			return at(parent.field("pattern"), node);
+		case "arrow_function":
+			return at(parent.field("parameter"), node);
 		case "catch_clause":
-		case "namespace_import":
-		case "import_clause":
+			return at(parent.field("parameter"), node);
+		case "for_in_statement":
+			return at(parent.field("left"), node);
+		case "assignment_pattern":
+		case "object_assignment_pattern":
+			return at(parent.field("left"), node);
+		case "pair_pattern":
+			return at(parent.field("value"), node);
 		case "array_pattern":
 		case "rest_pattern":
-		case "pair_pattern":
-		case "arrow_function":
-			return node.kind() === "identifier" || node.kind() === "shorthand_property_identifier_pattern";
+		case "namespace_import":
+		case "import_clause":
+			return node.kind() === "identifier";
 		case "object_pattern":
 			return node.kind() === "shorthand_property_identifier_pattern";
 		case "import_specifier":
-			return (parent.field("alias") ?? parent.field("name"))?.range().start.index === node.range().start.index;
+			return at(parent.field("alias") ?? parent.field("name"), node);
 		default:
 			return false;
 	}
@@ -412,6 +433,10 @@ function symbolPosition(
 	);
 	if (found.length === 0)
 		throw new Error(`${helper} found no declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`);
+	// A bare name means the top-level declaration when there is one, not also members and locals named like it:
+	// otherwise `parseUser`, offered below as a choice, would be just as ambiguous.
+	const topLevel = found.filter((entry) => entry.name === name);
+	if (found.length > 1 && topLevel.length === 1) return topLevel[0]!.position;
 	if (found.length > 1) {
 		const names = [...new Set(found.map((entry) => entry.name))];
 		if (names.length > 1)

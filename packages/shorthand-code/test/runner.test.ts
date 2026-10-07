@@ -347,6 +347,44 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(allowed.exitCode).toBe(0);
 		});
 
+		test("the rename scope check sees loop variables and defaults, and not a type signature's parameters", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/a.ts": [
+					"export const limit = 10;",
+					"export const scale = 2;",
+					"export function clampAll(values: number[]) { const out: number[] = []; for (const v of values) out.push(Math.min(v, limit)); return out; }",
+					"export function sized(o: { size?: number }) { const { size = 1 } = o; return size * scale; }",
+					'export const currentUser = "ada";',
+					"export interface Repo { save(user: string): void }",
+					"export type OnUser = (user: string) => void;",
+					"",
+				].join("\n"),
+			});
+			for (const [symbol, to] of [
+				["limit", "v"],
+				["scale", "size"],
+			]) {
+				const result = await run(
+					repo,
+					`await refactor.rename({ file: "src/a.ts", symbol: "${symbol}", to: "${to}" });`,
+					{
+						timeoutMs: 15_000,
+					},
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.output).toContain(`${to} is already declared`);
+			}
+			const allowed = await run(
+				repo,
+				`await refactor.rename({ file: "src/a.ts", symbol: "currentUser", to: "user" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(allowed.exitCode).toBe(0);
+		});
+
 		test("references finds a private member", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": "{}",
@@ -383,8 +421,12 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 		});
 
 		test("rejects a missing or ambiguous declaration without writing", async () => {
-			const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
-			for (const symbol of ["missing", "value"]) {
+			const source =
+				"export function a() { const value = 1; return value; }\nexport function b() { const value = 2; return value; }\n";
+			for (const [symbol, message] of [
+				["missing", "found no declaration"],
+				["value", '"value" is ambiguous in src/app.ts; use one of: a.value, b.value'],
+			]) {
 				const repo = await makeRepo({ "tsconfig.json": "{}", "src/app.ts": source });
 				const result = await run(
 					repo,
@@ -392,9 +434,28 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 					{ timeoutMs: 15_000 },
 				);
 				expect(result.exitCode).toBe(1);
-				expect(result.output).toMatch(/found (no declaration|more than one declaration)/);
+				expect(result.output).toContain(message);
 				expect(await Bun.file(path.join(repo, "src/app.ts")).text()).toBe(source);
 			}
+		});
+
+		test("a bare name means the top-level declaration, not locals or members named like it", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": "{}",
+				"src/app.ts":
+					"export function parseUser() { return 1; }\nexport const helpers = { parseUser };\nexport function outer() { const parseUser = 2; return parseUser; }\n",
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/app.ts", symbol: "parseUser", to: "decodeUser" });`,
+				{
+					timeoutMs: 15_000,
+				},
+			);
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/app.ts")).text()).toBe(
+				"export function decodeUser() { return 1; }\nexport const helpers = { parseUser: decodeUser };\nexport function outer() { const parseUser = 2; return parseUser; }\n",
+			);
 		});
 
 		test("moves a file and updates resolved module paths", async () => {
@@ -2851,6 +2912,44 @@ sg.rewrite("request($A, $B)", "request($A, $B, {})", "a.js");`,
 		expect(result.exitCode).toBe(0);
 		expect(await Bun.file(path.join(repo, "a.js")).text()).toBe(
 			"async function load(u) { return await fetch(u); }\nrequest(u, { timeoutMs: t });\n",
+		);
+	});
+
+	test("sg.rewrite refuses a bare $$$ in its template", async () => {
+		const repo = await makeRepo({ "a.ts": 'console.log("a", 1);\n' });
+		const result = await run(repo, `sg.rewrite("console.log($$$)", "logger.info($$$)", "a.ts");`);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("the replacement uses $$$, which captures nothing");
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe('console.log("a", 1);\n');
+	});
+
+	test("a TypeScript-only pattern works across a scope that also holds HTML and JavaScript", async () => {
+		const repo = await makeRepo({
+			"a.ts": "const x = useState<number>(0);\n",
+			"index.html": "<p>hi</p>\n",
+			"eslint.config.js": "export default [];\n",
+		});
+		const result = await run(repo, `sg.rewrite("useState<$T>($A)", "useSignal<$T>($A)");`);
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe("const x = useSignal<number>(0);\n");
+		const invalid = await run(repo, `sg.find("a; b");`);
+		expect(invalid.exitCode).toBe(1);
+		expect(invalid.output).toContain("Patterns must parse as one syntax node");
+	});
+
+	test("a later rewrite reaches code a callback carried over from its match", async () => {
+		const repo = await makeRepo({
+			"a.ts": 'import { oldName } from "./x";\nlog(oldName(1));\n',
+			"x.ts": "export function oldName(n: number) { return n; }\n",
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("log($A)", (m) => \`console.info(\${m.vars.A})\`, "a.ts");
+sg.rewrite("oldName", "newName", ["a.ts", "x.ts"]);`,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toBe(
+			'import { newName } from "./x";\nconsole.info(newName(1));\n',
 		);
 	});
 

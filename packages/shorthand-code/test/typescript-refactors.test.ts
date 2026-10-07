@@ -101,7 +101,9 @@ test.each([
 	["missing", "found no declaration"],
 	["value", "is ambiguous"],
 ])("rename rejects %s declarations without writing", async (symbol, message) => {
-	const source = "export const value = 1;\nexport function outer() { const value = 2; return value; }\n";
+	// A bare name would mean a top-level declaration; these two locals have none.
+	const source =
+		"export function a() { const value = 1; return value; }\nexport function b() { const value = 2; return value; }\n";
 	const root = await fixture({
 		"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
 		"src/app.ts": source,
