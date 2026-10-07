@@ -273,6 +273,7 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	const output = git(
 		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
 		[1],
+		utf8Locale(),
 	);
 
 	const matches = [];
@@ -293,10 +294,20 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	return matches;
 }
 
-function git(args: string[], allowedExitCodes: number[] = []): string {
+/**
+ * Git matches a regex in UTF-8 only under a UTF-8 locale: under C, as on many Linux servers and containers, `é`
+ * is a byte it never finds.
+ */
+function utf8Locale(): Record<string, string | undefined> {
+	const locale = process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || "";
+	if (/utf-?8/i.test(locale)) return process.env;
+	return { ...process.env, LC_ALL: "C.UTF-8" };
+}
+
+function git(args: string[], allowedExitCodes: number[] = [], env = process.env): string {
 	// `-C <dir>` calls start in that directory: Git reads its starting directory itself, and on macOS that fails in a
 	// subdirectory of the AgentFS mount once a file has been read there (see start-directory.ts).
-	const result = Bun.spawnSync(["git", ...args], { env: process.env, ...(args[0] === "-C" ? { cwd: args[1] } : {}) });
+	const result = Bun.spawnSync(["git", ...args], { env, ...(args[0] === "-C" ? { cwd: args[1] } : {}) });
 	if (result.exitCode !== 0 && !allowedExitCodes.includes(result.exitCode)) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
 		const command = args[0] === "-C" ? args[2] : args[0]; // named after the subcommand, not its directory
