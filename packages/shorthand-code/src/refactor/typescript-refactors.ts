@@ -14,10 +14,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { parse } from "@ast-grep/napi";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { editingFiles } from "../program/file-outcomes.ts";
 import {
+	checkerProject,
 	documentDiagnostics,
 	notifyTypeScriptServer,
 	recordTypeScriptFiles,
@@ -230,7 +231,7 @@ function checkedEdits(
 			// A file that imports a changed one can break without changing, such as a barrel whose `export *`
 			// now exports the same name twice.
 			const existing = fresh.filter((file) => originals.get(file) !== undefined);
-			for (const file of [...fresh, ...importersOf(existing, scripts())])
+			for (const file of [...fresh, ...(await importersOf(server, existing, scripts()))])
 				if (!before.has(file)) before.set(file, await errors(file));
 		},
 		async write(changes: Map<string, string>) {
@@ -292,7 +293,7 @@ export async function moveSymbol(from: string, symbol: string, to: string, files
 	await withTypeScriptServer(files.root, async (server) => {
 		const checked = checkedEdits(server, files.root, files.scripts);
 		// The importers of the source are the files the move may repoint.
-		await checked.track([from, to, ...importersOf([from], files.scripts())]);
+		await checked.track([from, to, ...(await importersOf(server, [from], files.scripts()))]);
 		try {
 			await moveDeclaration(from, symbol, to, files);
 			await checked.verify(`refactor.move of ${symbol} to ${relative(files.root, to)}`);
@@ -449,16 +450,46 @@ function projectScripts(root: string): string[] {
 		.map((file) => resolve(root, file));
 }
 
-/** The files among `scripts` that import one of these files by a relative path, up to a few hundred. */
-function importersOf(targets: string[], scripts: string[]): string[] {
+/**
+ * The files among `scripts` that import one of these files, up to a few hundred, as TypeScript resolves their
+ * imports: through a tsconfig `paths` alias or a package's exports too. Only files that mention a target's name are
+ * asked about; a file outside every tsconfig is judged by its relative paths instead.
+ */
+async function importersOf(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	targets: string[],
+	scripts: string[],
+): Promise<string[]> {
 	const reals = new Set(targets.map((target) => realpathSync(target)));
-	return scripts
-		.filter((file) => {
-			if (reals.has(file) || !existsSync(file)) return false;
-			const text = withoutComments(file, readFileSync(file, "utf8"));
-			return [...text.matchAll(relativeSpecifier)].some((match) => reals.has(resolveModule(file, match[1]!) ?? ""));
-		})
-		.slice(0, 300);
+	const canonical = new Set([...reals].map((target) => target.toLowerCase()));
+	const names = [...reals].map((target) => {
+		const name = basename(target).replace(/\.[^.]*$/, "");
+		return name === "index" ? basename(dirname(target)) : name;
+	});
+	const importers: string[] = [];
+	for (const file of scripts) {
+		if (importers.length >= 300) break;
+		if (reals.has(file) || !existsSync(file)) continue;
+		const text = readFileSync(file, "utf8");
+		if (!names.some((name) => text.includes(name))) continue;
+		const project = await checkerProject(server, file);
+		const sourceFile = await project?.program.getSourceFile(file);
+		if (project && sourceFile) {
+			const modules = sourceFile.imports.length ? await project.checker.getSymbolAtLocation(sourceFile.imports) : [];
+			if (
+				modules.some((module) =>
+					module?.declarations.some((declaration) => canonical.has(declaration.path.toLowerCase())),
+				)
+			)
+				importers.push(file);
+		} else if (
+			[...withoutComments(file, text).matchAll(relativeSpecifier)].some((match) =>
+				reals.has(resolveModule(file, match[1]!) ?? ""),
+			)
+		)
+			importers.push(file);
+	}
+	return importers;
 }
 
 function relativeImporters(root: string, target: string, destination: string, edited: Map<string, string>): string[] {

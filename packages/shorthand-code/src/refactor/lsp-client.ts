@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve as resolvePath, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { API, type Project, type Snapshot } from "typescript/unstable/async";
 import {
 	createMessageConnection,
 	StreamMessageReader,
@@ -17,6 +18,19 @@ interface TypeScriptServer {
 	files: Map<string, string>;
 	/** Files opened so their projects load, by version: their text overrides the disk, so it's kept current. */
 	opened: Map<string, number>;
+	/** TypeScript's checker on the same files, started when first needed. */
+	checker?: Checker;
+}
+
+/**
+ * A checker API session beside the language server: the server renames, and the checker answers what the server
+ * can't, such as which symbol a place means or which file an import resolves to. It opens every tsconfig rather
+ * than files, as an opened file keeps the contents it had then, and is told of each change the server is.
+ */
+interface Checker {
+	api: API;
+	snapshot: Snapshot;
+	pending: { changed: Set<string>; created: Set<string>; deleted: Set<string> };
 }
 
 let current: TypeScriptServer | undefined;
@@ -66,6 +80,8 @@ export function recordTypeScriptFiles(connection: MessageConnection, files: stri
 	if (current?.connection !== connection) return;
 	for (const file of files) {
 		const value = fingerprint(file);
+		const pending = current.checker?.pending;
+		if (pending) (value ? (current.files.has(file) ? pending.changed : pending.created) : pending.deleted).add(file);
 		if (value) current.files.set(file, value);
 		else current.files.delete(file);
 		const version = current.opened.get(file);
@@ -115,6 +131,42 @@ export async function documentDiagnostics(connection: MessageConnection, file: s
 	}
 }
 
+/**
+ * The checker's view of the files now, and the project holding `file` in it, if any: a file outside every
+ * tsconfig has none.
+ */
+export async function checkerProject(connection: MessageConnection, file: string): Promise<Project | undefined> {
+	if (current?.connection !== connection) return undefined;
+	const server = current;
+	if (!server.checker) {
+		const api = new API({ cwd: server.root });
+		const projects = [...server.files.keys()].filter((candidate) => CONFIG.test(candidate));
+		server.checker = {
+			api,
+			snapshot: await api.updateSnapshot({ openProjects: projects }),
+			pending: { changed: new Set(), created: new Set(), deleted: new Set() },
+		};
+		// Unreferenced once and for all, so it doesn't keep the program running: while a refactor waits on it, the
+		// server is referenced. (Referenced again, Bun keeps its output stream referenced after all.)
+		const child = checkerProcess(server.checker);
+		for (const handle of [child, child?.stdin, child?.stdout, child?.stderr])
+			(handle as unknown as { unref?: () => void } | null | undefined)?.unref?.();
+	}
+	const checker = server.checker;
+	const { changed, created, deleted } = checker.pending;
+	if (changed.size || created.size || deleted.size) {
+		checker.pending = { changed: new Set(), created: new Set(), deleted: new Set() };
+		checker.snapshot = await checker.api.updateSnapshot({
+			fileChanges: { changed: [...changed], created: [...created], deleted: [...deleted] },
+		});
+	}
+	for (const project of checker.snapshot.getProjects())
+		if (await project.program.getSourceFile(file).catch(() => undefined)) return project;
+	return undefined;
+}
+
+const CONFIG = /(^|[\\/])tsconfig(\.[\w-]+)?\.json$/;
+
 /** A file's text as the server reads it from disk: without a byte order mark, which it doesn't count. */
 function documentText(file: string): string {
 	return readFileSync(file, "utf8").replace(/^\uFEFF/, "");
@@ -134,9 +186,7 @@ function languageId(file: string): string {
 async function openEveryProject(connection: MessageConnection, root: string): Promise<Map<string, number>> {
 	const files = [...projectFiles(root).keys()];
 	const scripts = files.filter((file) => /\.[cm]?[jt]sx?$/.test(file) && !file.endsWith(".d.ts"));
-	const projects = files
-		.filter((file) => /(^|[\\/])tsconfig(\.[\w-]+)?\.json$/.test(file))
-		.map((file) => dirname(file));
+	const projects = files.filter((file) => CONFIG.test(file)).map((file) => dirname(file));
 	const opened = new Map<string, number>();
 	for (const project of projects) {
 		const script = scripts.find((file) => file.startsWith(project + sep) && !file.includes(`${sep}node_modules${sep}`));
@@ -267,20 +317,29 @@ function fingerprint(file: string): string | undefined {
 
 function setReferenced(server: TypeScriptServer, referenced: boolean): void {
 	const method = referenced ? "ref" : "unref";
-	server.process[method]();
-	for (const stream of [server.process.stdin, server.process.stdout, server.process.stderr])
-		(stream as unknown as Record<typeof method, () => void>)[method]?.();
+	for (const handle of [server.process, server.process.stdin, server.process.stdout, server.process.stderr])
+		(handle as unknown as Record<typeof method, (() => void) | undefined>)[method]?.();
 	process.removeListener("beforeExit", disposeCurrent);
 	if (!referenced) process.once("beforeExit", disposeCurrent);
 }
 
 function disposeCurrent(): void {
 	if (!current) return;
-	const { connection, process: server } = current;
+	const { connection, process: server, checker } = current;
 	current = undefined;
 	connection.dispose();
+	// Closing only asks the checker's process to end; the runner waits for a program's processes to exit.
+	const checkerChild = checkerProcess(checker);
+	void checker?.api.close().catch(() => {});
+	if (checkerChild?.exitCode === null) checkerChild.kill("SIGKILL");
 	if (server.exitCode === null) server.kill("SIGKILL");
 	server.unref();
+}
+
+/** The checker's process, which is the API client's own: reached so it doesn't keep the program running. */
+function checkerProcess(checker: Checker | undefined): ChildProcessWithoutNullStreams | undefined {
+	return (checker?.api as unknown as { client?: { process?: ChildProcessWithoutNullStreams } } | undefined)?.client
+		?.process;
 }
 
 function typeScriptExecutable(): string {

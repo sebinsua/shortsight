@@ -500,6 +500,32 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			);
 		});
 
+		test("a barrel collision is refused when the barrel re-exports through a paths alias", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: {
+						strict: true,
+						module: "esnext",
+						moduleResolution: "bundler",
+						paths: { "@/*": ["./src/*"] },
+					},
+				}),
+				"src/utils/date.ts": 'export function formatDate(d: number) { return "date:" + d; }\n',
+				"src/utils/number.ts": 'export function format(n: number) { return "num:" + n; }\n',
+				"src/utils/index.ts": 'export * from "@/utils/date";\nexport * from "@/utils/number";\n',
+			});
+			const barrel = await run(
+				repo,
+				`await refactor.rename({ file: "src/utils/date.ts", symbol: "formatDate", to: "format" });`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(barrel.exitCode).toBe(1);
+			expect(barrel.output).toContain(
+				"src/utils/index.ts:2: Module \"@/utils/date\" has already exported a member named 'format'",
+			);
+			expect(await Bun.file(path.join(repo, "src/utils/date.ts")).text()).toContain("formatDate");
+		});
+
 		test("an accessor pair renames as one property, and a barrel collision is refused", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({
