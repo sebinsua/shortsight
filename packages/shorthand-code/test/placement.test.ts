@@ -203,6 +203,13 @@ test("statements in switch cases can be removed and placed after", () => {
 	);
 });
 
+test("startOf a file with a byte order mark goes after the mark", () => {
+	const bom = String.fromCharCode(0xfeff);
+	const path = fixture(`${bom}export const x = 1;\n`);
+	insert("const y = 2;", { startOf: file(path) });
+	expect(readFileSync(path, "utf8")).toBe(`${bom}const y = 2;\nexport const x = 1;\n`);
+});
+
 test("a statement on lines of its own is removed with its line, indentation and all", () => {
 	const path = fixture("function f() {\n\ta();\n\tb();\n}\nfirst();\nsecond(); third();\r\nlast();\n");
 	remove([match(path, "b();"), match(path, "first();"), match(path, "third();"), match(path, "last();")]);

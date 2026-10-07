@@ -273,7 +273,9 @@ function placement(text: string, destination: Destination) {
 			}
 			const last = prologue.at(-1);
 			const lineEnd = last ? source.indexOf("\n", last.range().end.index) : -1;
-			offset = key === "startOf" ? (last ? (lineEnd < 0 ? source.length : lineEnd + 1) : 0) : source.length;
+			// After a byte order mark, which must stay the file's first character.
+			const fileStart = source.startsWith("\uFEFF") ? 1 : 0;
+			offset = key === "startOf" ? (last ? (lineEnd < 0 ? source.length : lineEnd + 1) : fileStart) : source.length;
 			indent = "";
 		} else {
 			offset = key === "startOf" ? start.index + 1 : end.index - 1;
@@ -284,7 +286,8 @@ function placement(text: string, destination: Destination) {
 	}
 	const newline = source.includes("\r\n") ? "\r\n" : "\n";
 	// Never reindent interior lines: whitespace inside template literals can be significant.
-	const prefix = source.slice(0, offset);
+	// A byte order mark isn't text on the line: placing right after it is placing at the start of the file.
+	const prefix = source.slice(0, offset).replace(/^\uFEFF/, "");
 	const suffix = source.slice(offset);
 	const currentIndent = prefix.slice(prefix.lastIndexOf("\n") + 1);
 	const leading =

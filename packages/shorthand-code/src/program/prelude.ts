@@ -258,7 +258,12 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 		if (pattern.flags.includes("i")) flags.push("-i");
 	}
 	// Git runs from the root, with paths relative to it, and its files are named from here again below: see git().
-	const fromRoot = paths.map((path) => relative(repositoryRoot, resolve(path)) || ".");
+	// Git's own pathspecs differ from glob and sg scopes: `*` crosses directories and `[id]` is a character class.
+	// An existing path is taken literally and anything else as a glob, as glob() reads it.
+	const fromRoot = paths.map((path) => {
+		const rooted = relative(repositoryRoot, resolve(path)) || ".";
+		return statSync(resolve(path), { throwIfNoEntry: false }) ? `:(literal)${rooted}` : `:(glob)${rooted}`;
+	});
 	const output = git(
 		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
 		[1],
@@ -1117,11 +1122,7 @@ function toMatch(
 	const vars: Record<string, string> = {};
 	for (const [, dollars, name] of JSON.stringify(pattern).matchAll(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g)) {
 		if (dollars === "$$$") {
-			// Slice the original source so separators and formatting are kept ("a, b" rather than "a,b").
-			const nodes = node.getMultipleMatches(name);
-			const first = nodes[0];
-			const last = nodes[nodes.length - 1];
-			vars[name] = first && last ? source.slice(first.range().start.index, last.range().end.index) : "";
+			vars[name] = sequenceText(node.getMultipleMatches(name), source);
 		} else {
 			const captured = node.getMatch(name);
 			if (captured) vars[name] = captured.text();
@@ -1133,6 +1134,21 @@ function toMatch(
 		true,
 		sourceFile,
 	);
+}
+
+/**
+ * A `$$$` capture's text, sliced from the original source so separators and formatting are kept ("a, b" rather than
+ * "a,b"), but without a trailing comma: in `f(\n  a,\n  b,\n)`, `f($$$ARGS, c)` would otherwise give `b,, c`. A
+ * trailing comment is kept; a line comment then ends the line, so the rest of the template isn't commented out.
+ */
+function sequenceText(nodes: SgNode[], source: string): string {
+	const lastItem = nodes.findLastIndex((item) => item.kind() !== "," && item.kind() !== "comment");
+	if (lastItem < 0) return "";
+	const comments = nodes.slice(lastItem + 1).filter((item) => item.kind() === "comment");
+	const text =
+		source.slice(nodes[0]!.range().start.index, nodes[lastItem]!.range().end.index) +
+		comments.map((comment) => ` ${comment.text()}`).join("");
+	return comments.at(-1)?.text().startsWith("//") ? `${text}\n` : text;
 }
 
 /** A reference can edit its enclosing call only when it names the callee. */

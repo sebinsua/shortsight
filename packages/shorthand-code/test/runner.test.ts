@@ -3141,6 +3141,34 @@ console.log(grep(/Café/).length);`,
 		expect(refused.output).toContain("the replacement uses $$$_REST, which captures nothing");
 	});
 
+	test("a $$$ capture leaves out a trailing comma, and a trailing line comment ends its line", async () => {
+		const repo = await makeRepo({
+			"t.ts": 'thumbnail(\n  image,\n  80,\n);\ndefineConfig({\n  base: "/app/", // note\n});\n',
+		});
+		const result = await run(
+			repo,
+			`sg.rewrite("thumbnail($$$ARGS)", "thumbnail($$$ARGS, opts)", "t.ts");
+sg.rewrite("defineConfig({ $$$P })", "defineConfig({ $$$P, plugins: [] })", "t.ts");`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "t.ts")).text()).toBe(
+			'thumbnail(image,\n  80, opts);\ndefineConfig({ base: "/app/" // note\n, plugins: [] });\n',
+		);
+	});
+
+	test("grep reads a scope as glob and sg do: globs as globs, existing paths literally", async () => {
+		const repo = await makeRepo({
+			"src/a.ts": "needle\n",
+			"src/app/[id]/page.ts": "needle\n",
+			"src/app/i/other.ts": "needle\n",
+		});
+		const result = await run(
+			repo,
+			`console.log(grep("needle", "src/**/*.ts").length, grep("needle", "src/app/[id]").length);`,
+		);
+		expect(result.output.trim()).toBe("3 1");
+	});
+
 	test("sg.rewrite refuses output that breaks the file's syntax", async () => {
 		const repo = await makeRepo({ "src/a.ts": "foo(1);\n" });
 		const result = await run(repo, `sg.rewrite("foo($A)", "bar($A", "src/a.ts");`);
