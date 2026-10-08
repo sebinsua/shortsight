@@ -3014,6 +3014,29 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		}
 	});
 
+	test("sg.rewrite applies a batch of rules together, the earlier rule taking a node both match", async () => {
+		const repo = await makeRepo({
+			"src/a.ts":
+				'export const mascot = "😀"; request("/a", undefined, 750);\nrequest("/b", 3);\nrequest("/c", 2, 500);\n',
+		});
+		const result = await run(
+			repo,
+			`console.log(sg.rewrite([
+	["request($URL, undefined, $T)", "request($URL, { timeoutMs: $T })"],
+	["request($URL, $R, $T)", "request($URL, { retries: $R, timeoutMs: $T })"],
+	["request($URL, $R)", "request($URL, { retries: $R })"],
+	["unused($X)", "used($X)"],
+], "src"));`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output).toContain("3\n");
+		expect(result.output).not.toContain("earlier sg.rewrite produced");
+		expect(result.output).toContain('warning: sg.rewrite matched nothing for "unused($X)"');
+		expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
+			'export const mascot = "😀"; request("/a", { timeoutMs: 750 });\nrequest("/b", { retries: 3 });\nrequest("/c", { retries: 2, timeoutMs: 500 });\n',
+		);
+	});
+
 	test("sg.rewrite does not treat an unchanged replacement as earlier output", async () => {
 		const repo = await makeRepo({ "src/a.ts": "f(1);\nf(2);\n" });
 		const result = await run(

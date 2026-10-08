@@ -151,7 +151,9 @@ sg.rewrite("thumbnail($IMAGE, $QUALITY)", (m) => {
 
 A callback returns text to replace the whole match, a native edit for part of it, or `null` to skip.
 Rewrites apply one after another. A pattern rewrite skips places an earlier rewrite produced, so one
-rewrite per call shape is safe in any order; select them with `sg.find` to rewrite them again.
+rewrite per call shape is safe in any order; select them with `sg.find` to rewrite them again. To apply
+several rules to the code as it was, pass them together: `sg.rewrite([[pattern, replacement], ...], files)`.
+A node two rules match is the earlier rule's, so put specific rules before general ones.
 **`node.replace()` constructs an edit; return it from the callback so `sg.rewrite` applies it.**
 
 ## Replace an implementation while keeping its signature

@@ -28,7 +28,7 @@ Common operations:
 - edit({ path, oldText, newText }) replaces exactly one literal occurrence; missing or ambiguous text is an error. Use text edits for known source, structural matching when it saves enumerating occurrences or preserves varying syntax.
 - await Bun.file(path).text(); await Bun.write(path, text)
 - sg.rewrite(pattern, replacement, files?) discovers and rewrites matching code; omit files for the working directory. $X captures one node; $$$X captures a sequence.
-- sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope.
+- sg.one(pattern, files?) selects exactly one match; sg.find returns an array. sg.rewrite also accepts a selected match or array without a file scope, or a batch of [pattern, replacement] rules applied together to the original code.
 - A rewrite callback receives a match and returns text, a native node.replace(text) edit, or null to skip. Return native edits to apply them. Pass selected arrays together for independent edits; select again after changing their file.
 - await refactor.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names; a parameter is named through its function ("load.id"), or give a place with { at: match | { file, line, column }, to }.
 - await refactor.references({ file, symbol } | { at }) returns resolved identifier matches that pass straight to sg.rewrite(matches, callback).

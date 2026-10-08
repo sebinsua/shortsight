@@ -981,9 +981,11 @@ const rewriteStaleAdvice =
 	"this match predates a change to its file. For independent edits from one selection, rerun with sg.rewrite(matches, callback) to apply them together. Otherwise, select again after editing.";
 
 type Replacement = string | ((match: SgMatch) => RewriteResult);
+type RewriteRule = readonly [pattern: string | NapiConfig, replacement: Replacement];
 type RewriteArgs =
 	| [pattern: string | NapiConfig, replacement: Replacement, files?: FileScope]
-	| [matches: SgMatch | readonly SgMatch[], replacement: Replacement];
+	| [matches: SgMatch | readonly SgMatch[], replacement: Replacement]
+	| [rules: readonly RewriteRule[], files?: FileScope];
 
 const METAVARIABLE = /(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g;
 
@@ -1103,12 +1105,13 @@ function conflicting(a: Edit, b: Edit): boolean {
 
 function applyRewrites(
 	matches: readonly SgMatch[],
-	replacement: Replacement,
+	replacements: Replacement | Map<SgMatch, Replacement>,
 	file: string,
 	nested: SgMatch[] = [],
 ): number {
 	const planned: { match: SgMatch; edits: Edit[] }[] = [];
 	for (const match of matches) {
+		const replacement = replacements instanceof Map ? replacements.get(match)! : replacements;
 		if (typeof replacement === "string") checkTemplate(replacement, new Set(Object.keys(match.vars)));
 		const template = typeof replacement === "string" ? interpolate(replacement, match) : undefined;
 		const result = template
@@ -1272,7 +1275,67 @@ function explainNested(nested: readonly SgMatch[]): void {
 }
 
 /** Rewrites patterns or existing selections; returns matches producing edits, not individual edits. */
+/**
+ * Several rules applied together, as ast-grep's CLI applies a rule file: each to the text as it was before any of
+ * them, so one can't rewrite what another wrote. A node two rules match is the earlier rule's; where matches
+ * overlap otherwise, the outer one applies.
+ */
+function rewriteRules(rules: readonly RewriteRule[], files: FileScope = "."): number {
+	for (const rule of rules)
+		if (!Array.isArray(rule) || rule.length !== 2)
+			throw new TypeError("sg.rewrite expects rules as [pattern, replacement] pairs");
+	for (const [pattern, replacement] of rules)
+		if (typeof replacement === "string")
+			checkTemplate(
+				replacement,
+				new Set([...JSON.stringify(pattern).matchAll(METAVARIABLE)].map((match) => match[2]!)),
+			);
+	const ranges = scopeRanges("sg.rewrite", files);
+	const searches = rules.map(([pattern]) => patternSearch("sg.rewrite", pattern));
+	const matched = rules.map(() => 0);
+	const nested: SgMatch[] = [];
+	let count = 0;
+	for (const file of sourceFiles("sg.rewrite", files)) {
+		count += editingFiles([file], () => {
+			const parsed = parseFile(file);
+			if (!parsed) return 0;
+			const real = realPath(file);
+			const replacements = new Map<SgMatch, Replacement>();
+			// A node two rules match is the earlier rule's, as when a specific rule comes before a general one.
+			const taken = new Set<string>();
+			for (const [index, [pattern, replacement]] of rules.entries()) {
+				const matches = searches[index]!.nodes(file, parsed.root)
+					.map((node) => toMatch(file, node, parsed.source, pattern, file, undefined, real))
+					.filter((match) => withinScope(match, ranges));
+				matched[index]! += matches.length;
+				for (const match of matches) {
+					const { start, end } = match.node.range();
+					if (taken.has(`${start.index}:${end.index}`)) continue;
+					taken.add(`${start.index}:${end.index}`);
+					replacements.set(match, replacement);
+				}
+			}
+			const all = [...replacements.keys()];
+			const earlier = insideEarlierOutput(file, parsed.source, all);
+			return applyRewrites(
+				all.filter((match) => !earlier.has(match)),
+				replacements,
+				file,
+				nested,
+			);
+		});
+	}
+	for (const search of searches) search.finish();
+	explainNested(nested);
+	for (const [index, [pattern]] of rules.entries())
+		if (matched[index] === 0)
+			console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(files)}`);
+	return count;
+}
+
 function rewrite(...[target, replacement, files]: RewriteArgs): number {
+	if (Array.isArray(target) && Array.isArray(target[0]))
+		return rewriteRules(target as readonly RewriteRule[], replacement as FileScope | undefined);
 	const selected = Array.isArray(target) || (typeof target === "object" && target !== null && "node" in target);
 	if (selected) {
 		if (files !== undefined)
@@ -1295,7 +1358,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 			count += editingFiles([file], () => {
 				const currentSources = new Map<string, string | null>();
 				for (const match of matches) getMatchSnapshot(match, currentSources, rewriteStaleAdvice);
-				return applyRewrites(matches, replacement, file, nested);
+				return applyRewrites(matches, replacement as Replacement, file, nested);
 			});
 		}
 		explainNested(nested);
@@ -1325,7 +1388,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 			skipped.push(...earlier);
 			return applyRewrites(
 				matches.filter((match) => !earlier.has(match)),
-				replacement,
+				replacement as Replacement,
 				file,
 				nested,
 			);
@@ -1341,7 +1404,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		explainedSkips = true;
 		const example = skipped[0]!;
 		console.error(
-			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite.`,
+			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite; to apply related rules to the original code together, pass them as one batch: sg.rewrite([[pattern, replacement], ...], files).`,
 		);
 	}
 	return count;
