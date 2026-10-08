@@ -39,15 +39,21 @@ import {
 	type WorkspaceEdit,
 } from "./workspace-edit.ts";
 
-export interface RenameOptions<File = string> {
+/**
+ * What a refactor acts on: a declaration in `file` named by `symbol`, as `parseUser`, `User.name` or a parameter or
+ * local as `load.id`; or the name at `position`, as the server counts it, when the prelude was given a place.
+ */
+export interface Target<File = string> {
 	file: File;
-	symbol: string;
+	symbol?: string;
+	position?: Position;
+}
+
+export interface RenameOptions<File = string> extends Target<File> {
 	to: string;
 }
 
-export interface ReferencesOptions<File = string> {
-	file: File;
-	symbol: string;
+export interface ReferencesOptions<File = string> extends Target<File> {
 	includeDeclaration?: boolean;
 }
 
@@ -76,20 +82,9 @@ interface SymbolInformation {
 export async function rename(root: string, options: RenameOptions): Promise<void> {
 	validateRename(options);
 	const file = existingProjectFile(root, options.file);
-	const from = options.symbol.split(".").at(-1)!;
 	const { to } = options;
 	await withTypeScriptServer(root, async (server) => {
-		const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
-			"textDocument/documentSymbol",
-			{ textDocument: { uri: pathToFileURL(file).href } },
-		);
-		const position = symbolPosition(
-			symbols ?? [],
-			options.symbol,
-			options.file,
-			"refactor.rename",
-			readFileSync(file, "utf8"),
-		);
+		const { position, name: from, label } = await targetPosition(server, file, options, "refactor.rename");
 		const checked = checkedEdits(server, root);
 		// Where the new name was written, as offsets in each file's current contents, and each file's edits in turn.
 		const sites = new Map<string, number[]>();
@@ -119,9 +114,9 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 		};
 
 		try {
-			// TypeScript renames the variable behind `{ parseUser }`, so a member written that way is spelled out
-			// first, as `{ parseUser: parseUser }`, and its key renamed.
-			if (options.symbol.includes(".")) {
+			// TypeScript renames the variable behind `{ parseUser }`, so a member written that way, or a place
+			// given there, is spelled out first, as `{ parseUser: parseUser }`, and its key renamed.
+			if (options.position || options.symbol?.includes(".")) {
 				const source = readFileSync(file, "utf8");
 				const offset = offsetOf(source, position);
 				const lang = scriptLanguage(file);
@@ -139,8 +134,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 					);
 				}
 			}
-			if ((await renameAt(file, position)) === 0)
-				throw new Error(`TypeScript returned no edits for ${JSON.stringify(options.symbol)}`);
+			if ((await renameAt(file, position)) === 0) throw new Error(`TypeScript returned no edits for ${label}`);
 			// TypeScript renames without changing what other code sees: an object literal keeps its key
 			// (`{ from: to }`), and a module keeps its export's name (`export { to as from }`), as does an importer
 			// its local name. The keys stay; each alias is renamed in turn, so the new name goes everywhere else.
@@ -153,7 +147,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 				await place(new Map([[alias.file, collapsed.source]]), new Map([[alias.file, collapsed.edits]]));
 			}
 			await checked.verify(
-				`refactor.rename of ${JSON.stringify(options.symbol)} to ${to}`,
+				`refactor.rename of ${label} to ${to}`,
 				await capturedPlaces(server, checked.root, sites, to),
 				(changed, offset) => (history.get(changed) ?? []).reduce(shiftedOffset, offset),
 			);
@@ -459,23 +453,11 @@ function positionOf(source: string, offset: number): Position {
 
 /** Compiler-resolved reference spans, kept as LSP locations for the caller to turn into sg matches. */
 export async function references(root: string, options: ReferencesOptions): Promise<ReferenceLocation[]> {
-	if (!options || typeof options.file !== "string" || typeof options.symbol !== "string")
-		throw new TypeError("refactor.references expects { file, symbol } strings");
-	if (!options.file || !options.symbol) throw new Error("refactor.references file and symbol must not be empty");
+	validateTarget(options, "refactor.references");
 	const file = existingProjectFile(root, options.file);
 	const uri = pathToFileURL(file).href;
 	return withTypeScriptServer(root, async (server) => {
-		const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
-			"textDocument/documentSymbol",
-			{ textDocument: { uri } },
-		);
-		const position = symbolPosition(
-			symbols ?? [],
-			options.symbol,
-			options.file,
-			"refactor.references",
-			readFileSync(file, "utf8"),
-		);
+		const { position } = await targetPosition(server, file, options, "refactor.references");
 		return (
 			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
 				textDocument: { uri },
@@ -486,11 +468,6 @@ export async function references(root: string, options: ReferencesOptions): Prom
 	});
 }
 
-/**
- * The server renames without aliases, so imports and re-exports follow the new name (see lsp-client.ts). That
- * would also change the key of an object literal shorthand such as `{ parseUser }`, while reads of that property
- * keep the old key. Expand those to `parseUser: decodeUser` so only the referenced value changes.
- */
 /**
  * Moves a file by writing it anew and removing the old one. A rename within one directory, such as `a.ts` to
  * `a.tsx`, isn't recorded correctly by the macOS workspace (AgentFS), and the run can't be applied.
@@ -684,18 +661,18 @@ async function filesChanged(
 	});
 }
 
+function validateTarget(options: Target, helper: string): void {
+	if (!options || typeof options.file !== "string" || (typeof options.symbol !== "string" && !options.position))
+		throw new TypeError(`${helper} expects { file, symbol } strings, or { at } a place`);
+	if (!options.file || options.symbol === "") throw new Error(`${helper} file and symbol must not be empty`);
+}
+
 function validateRename(options: RenameOptions): void {
-	if (
-		!options ||
-		typeof options.file !== "string" ||
-		typeof options.symbol !== "string" ||
-		typeof options.to !== "string"
-	)
-		throw new TypeError("refactor.rename expects { file, symbol, to } strings");
-	if (!options.file || !options.symbol || !options.to)
-		throw new Error("refactor.rename file, symbol and to must not be empty");
+	validateTarget(options, "refactor.rename");
+	if (typeof options.to !== "string") throw new TypeError("refactor.rename expects { to } a string");
+	if (!options.to) throw new Error("refactor.rename to must not be empty");
 	// The new name alone: `to: "Session.renew"` would be written out as is.
-	const privateName = options.symbol.split(".").at(-1)!.startsWith("#");
+	const privateName = (options.symbol?.split(".").at(-1) ?? "").startsWith("#") || options.to.startsWith("#");
 	if (
 		!(
 			privateName
@@ -712,6 +689,80 @@ function validateRenameFile(options: RenameFileOptions): void {
 	if (!options || typeof options.from !== "string" || typeof options.to !== "string")
 		throw new TypeError("refactor.renameFile expects { from, to } strings");
 	if (!options.from || !options.to) throw new Error("refactor.renameFile from and to must not be empty");
+}
+
+/** Where a refactor's target is, the name there, and how to speak of it in a message. */
+async function targetPosition(
+	server: Parameters<typeof notifyTypeScriptServer>[0],
+	file: string,
+	options: Target,
+	helper: string,
+): Promise<{ position: Position; name: string; label: string }> {
+	const source = readFileSync(file, "utf8");
+	if (options.position) {
+		const offset = offsetOf(source, options.position);
+		const name = /^#?[\p{ID_Continue}$\u200c\u200d]*/u.exec(source.slice(offset))![0];
+		if (!name)
+			throw new Error(
+				`${helper}: there is no name at ${options.file}:${options.position.line + 1}:${options.position.character + 1}`,
+			);
+		return { position: options.position, name, label: `${name} at ${options.file}:${options.position.line + 1}` };
+	}
+	const symbols = await server.sendRequest<Array<DocumentSymbol | SymbolInformation> | null>(
+		"textDocument/documentSymbol",
+		{ textDocument: { uri: pathToFileURL(file).href } },
+	);
+	return {
+		position: symbolPosition(symbols ?? [], options.symbol!, options.file, helper, source),
+		name: options.symbol!.split(".").at(-1)!,
+		label: JSON.stringify(options.symbol),
+	};
+}
+
+const BINDINGS = new Set([
+	"required_parameter",
+	"optional_parameter",
+	"variable_declarator",
+	"catch_clause",
+	"rest_pattern",
+	"array_pattern",
+	"pair_pattern",
+	"assignment_pattern",
+	"object_assignment_pattern",
+	"formal_parameters",
+]);
+
+/**
+ * The parameters and locals named `name` inside the declaration of `owner` at `position`, `id` of `load.id`:
+ * the server's document symbols leave out parameters. An identifier declares one when its parent binds names: a
+ * parameter, a variable, a destructuring pattern or a catch clause.
+ */
+function localBindings(file: string, source: string, position: Position, owner: string, name: string): Position[] {
+	const lang = scriptLanguage(file);
+	if (!lang) return [];
+	// The server can give a declaration's position at the `export` before its name.
+	const offset = offsetOf(source, position);
+	const root = parse(lang, source).root();
+	const declaration = root
+		.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "property_identifier" }, { kind: "type_identifier" }] } })
+		.find((node) => node.range().start.index >= offset && node.text() === owner)
+		?.parent();
+	if (!declaration) return [];
+	return declaration
+		.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "shorthand_property_identifier_pattern" }] } })
+		.filter((node) => {
+			if (node.text() !== name) return false;
+			if (node.kind() === "shorthand_property_identifier_pattern") return true;
+			const parent = node.parent();
+			if (parent?.kind() === "arrow_function") return parent.field("parameter")?.id() === node.id();
+			if (!parent || !BINDINGS.has(String(parent.kind()))) return false;
+			// In `{ key: value }` and `x = default` only one side is bound.
+			if (parent.kind() === "pair_pattern") return parent.field("value")?.id() === node.id();
+			if (parent.kind() === "variable_declarator") return parent.field("name")?.id() === node.id();
+			if (parent.kind().toString().includes("assignment_pattern")) return parent.field("left")?.id() === node.id();
+			return true;
+		})
+		.map((node) => positionOf(source, node.range().start.index));
 }
 
 const samePosition = (a: Position, b: Position) => a.line === b.line && a.character === b.character;
@@ -778,8 +829,21 @@ function symbolPosition(
 	const found = entries.filter((entry) =>
 		name.includes(".") ? entry.name === name : entry.name.split(".").at(-1) === name,
 	);
-	if (found.length === 0)
+	if (found.length === 0) {
+		// `load.id`: a parameter or local of a declaration the server does list.
+		const parentName = name.split(".").slice(0, -1).join(".");
+		const parents = parentName ? entries.filter((entry) => entry.name === parentName) : [];
+		const locals =
+			parents.length === 1
+				? localBindings(file, source, parents[0]!.position, parentName.split(".").at(-1)!, name.split(".").at(-1)!)
+				: [];
+		if (locals.length === 1) return locals[0]!;
+		if (locals.length > 1)
+			throw new Error(
+				`${helper}: ${JSON.stringify(name)} is declared more than once, at ${locals.map((local) => `${file}:${local.line + 1}:${local.character + 1}`).join(", ")}; give the place with { at: { file, line, column } }`,
+			);
 		throw new Error(`${helper} found no declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`);
+	}
 	// A bare name means the top-level declaration when there is one, not also members and locals named like it:
 	// otherwise `parseUser`, offered below as a choice, would be just as ambiguous.
 	const topLevel = found.filter((entry) => entry.name === name);

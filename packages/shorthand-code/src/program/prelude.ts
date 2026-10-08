@@ -657,7 +657,61 @@ function pathArgument(helper: string, path: unknown): string {
 	throw new TypeError(`${helper}: expected a file path string`);
 }
 
-function refactorTarget(helper: string, options: { file: string | GraphNode; symbol?: string }) {
+/** A place in a file, as grep and sg give them: 1-based, the column optional when the name is given. */
+export interface Place {
+	file: string;
+	line: number;
+	column?: number;
+}
+
+const NAMES = new Set([
+	"identifier",
+	"property_identifier",
+	"private_property_identifier",
+	"type_identifier",
+	"shorthand_property_identifier",
+	"shorthand_property_identifier_pattern",
+]);
+
+/**
+ * A refactor's file and symbol, or the place it was given with `at`: an sg match, whose own name is used when it's
+ * a declaration (`sg.one("function load($$$P) { $$$B }")` is `load`), or a place, such as a grep result.
+ */
+function refactorTarget(
+	helper: string,
+	options: { file?: string | GraphNode; symbol?: string; at?: SgMatch | Place },
+): { file: string; symbol?: string; position?: { line: number; character: number }; member?: boolean } {
+	const { at } = options;
+	if (at && "node" in at) {
+		const named = NAMES.has(String(at.node.kind()))
+			? at.node
+			: ((at.node.field("name" as never) as SgNode | null) ??
+				at.node.find({ rule: { any: [...NAMES].map((kind) => ({ kind })) } }));
+		if (!named) throw new Error(`${helper}: the match at ${at.file}:${at.line} has no name to act on`);
+		const source = at.node.getRoot().root().text();
+		return {
+			file: gitPath(explicitPath(at.file)),
+			position: serverPosition(source, named.range().start.index),
+			member: ["property_identifier", "private_property_identifier"].includes(String(named.kind())),
+		};
+	}
+	if (at) {
+		if (typeof at.file !== "string" || !Number.isInteger(at.line) || at.line < 1)
+			throw new TypeError(`${helper} expects { at } an sg match or { file, line, column }`);
+		const file = gitPath(pathArgument(helper, at.file));
+		const text = readUtf8(resolve(repositoryRoot, file)).split("\n")[at.line - 1] ?? "";
+		let column = at.column === undefined ? undefined : at.column - 1;
+		if (column === undefined) {
+			const name = options.symbol?.split(".").at(-1);
+			if (!name) throw new Error(`${helper}: give { at } a column, or the name to find on line ${at.line} as symbol`);
+			const found = new RegExp(`(?<![\\w$#])${name.replace(/[$]/g, "\\$&")}(?![\\w$])`).exec(text);
+			if (!found) throw new Error(`${helper}: ${JSON.stringify(name)} isn't on line ${at.line} of ${at.file}`);
+			column = found.index;
+		}
+		// The server counts characters after a byte order mark.
+		const bom = at.line === 1 && text.startsWith("\uFEFF") ? 1 : 0;
+		return { file, position: { line: at.line - 1, character: column - bom } };
+	}
 	const node = isGraphNode(options.file) ? options.file : undefined;
 	if (
 		node &&
@@ -665,10 +719,19 @@ function refactorTarget(helper: string, options: { file: string | GraphNode; sym
 			["file", "project", "package", "directory", "test", "reference", "external"].includes(node.kind ?? ""))
 	)
 		throw new Error(`${helper}: graph node ${node.handle} cannot be used as a symbol target`);
+	if (options.file === undefined) throw new TypeError(`${helper} expects { file, symbol } or { at }`);
 	return {
 		file: gitPath(pathArgument(helper, options.file)),
 		symbol: options.symbol ?? node?.name,
 	};
+}
+
+/** An offset in a file as the TypeScript server counts it: by line, after a byte order mark. */
+function serverPosition(source: string, offset: number): { line: number; character: number } {
+	const before = source.slice(0, offset);
+	const line = before.split("\n").length - 1;
+	const bom = line === 0 && source.startsWith("\uFEFF") ? 1 : 0;
+	return { line, character: offset - (before.lastIndexOf("\n") + 1) - bom };
 }
 
 function find(pattern: string | NapiConfig, files: FileScope = "."): SgMatch[] {
@@ -1451,13 +1514,15 @@ const globals = {
 		rename: (
 			options:
 				| RenameOptions<string | GraphNode>
-				| (Omit<RenameOptions<string | GraphNode>, "symbol"> & { symbol?: string }),
+				| (Omit<RenameOptions<string | GraphNode>, "symbol" | "file" | "position"> & {
+						file?: string | GraphNode;
+						symbol?: string;
+						at?: SgMatch | Place;
+				  }),
 		) =>
 			logged("refactor.rename", [options], () => {
-				const prepared = {
-					...options,
-					...refactorTarget("refactor.rename", options),
-				};
+				const { at: _at, ...rest } = options as typeof options & { at?: unknown };
+				const prepared = { ...rest, ...refactorTarget("refactor.rename", options) };
 				return import("../refactor/typescript-refactors.ts").then(({ rename }) =>
 					rename(repositoryRoot, prepared as RenameOptions),
 				);
@@ -1465,14 +1530,20 @@ const globals = {
 		references: (
 			options:
 				| ReferencesOptions<string | GraphNode>
-				| (Omit<ReferencesOptions<string | GraphNode>, "symbol"> & { symbol?: string }),
+				| (Omit<ReferencesOptions<string | GraphNode>, "symbol" | "file" | "position"> & {
+						file?: string | GraphNode;
+						symbol?: string;
+						at?: SgMatch | Place;
+				  }),
 		) =>
 			logged("refactor.references", [options], async () => {
-				const prepared = { ...options, ...refactorTarget("refactor.references", options) };
+				const { at: _at, ...rest } = options as typeof options & { at?: unknown };
+				const { member, ...target } = refactorTarget("refactor.references", options);
+				const prepared = { ...rest, ...target };
 				const { references } = await import("../refactor/typescript-refactors.ts");
 				return referenceMatches(
 					await references(repositoryRoot, prepared as ReferencesOptions),
-					String(prepared.symbol).includes("."),
+					member || String(prepared.symbol).includes("."),
 				);
 			}),
 		move: (options: { file: string | GraphNode; symbol?: string; to: string }) =>

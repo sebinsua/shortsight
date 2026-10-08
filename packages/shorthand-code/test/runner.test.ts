@@ -513,6 +513,64 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(await Bun.file(path.join(repo, "src/box.ts")).text()).toContain("take(new Crate<number>(1));");
 		});
 
+		test("a parameter is renamed through its function, or by a place from sg or grep", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/users.ts": [
+					"export function load(id: string) { return fetch(id); }",
+					"export const other = (id: number) => id + 1;",
+					"export function save(user: { id: string }) { const id = user.id; return id; }",
+					"export function parse(input: string) { return input.trim(); }",
+					"",
+				].join("\n"),
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ file: "src/users.ts", symbol: "load.id", to: "userId" });
+await refactor.rename({ at: { file: "src/users.ts", line: 2, column: 23 }, to: "count" });
+await refactor.rename({ at: grep("function parse", "src/users.ts")[0], symbol: "input", to: "text" });
+await refactor.rename({ at: sg.one("export function save($$$P) { $$$B }", "src/users.ts"), to: "store" });
+const refs = await refactor.references({ file: "src/users.ts", symbol: "store.id", includeDeclaration: true });
+console.log(refs.map((ref) => ref.line).join(","));`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/users.ts")).text()).toBe(
+				[
+					"export function load(userId: string) { return fetch(userId); }",
+					"export const other = (count: number) => count + 1;",
+					"export function store(user: { id: string }) { const id = user.id; return id; }",
+					"export function parse(text: string) { return text.trim(); }",
+					"",
+				].join("\n"),
+			);
+			expect(result.output.trim()).toBe("3,3");
+			await Bun.write(
+				path.join(repo, "src/twice.ts"),
+				"export function twice(x: number) { return [1].map((x) => x * 2); }\n",
+			);
+			const ambiguous = await run(
+				repo,
+				`await refactor.rename({ file: "src/twice.ts", symbol: "twice.x", to: "n" });`,
+				{
+					timeoutMs: 20_000,
+				},
+			);
+			expect(ambiguous.exitCode).toBe(1);
+			expect(ambiguous.output).toContain(
+				'"twice.x" is declared more than once, at src/twice.ts:1:23, src/twice.ts:1:52',
+			);
+			const missing = await run(
+				repo,
+				`await refactor.rename({ file: "src/users.ts", symbol: "load.missing", to: "x" });`,
+				{
+					timeoutMs: 20_000,
+				},
+			);
+			expect(missing.exitCode).toBe(1);
+			expect(missing.output).toContain('found no declaration named "load.missing"');
+		});
+
 		test("without a tsconfig, a captured rename is refused and a clean one applies", async () => {
 			const repo = await makeRepo({
 				"a.js":

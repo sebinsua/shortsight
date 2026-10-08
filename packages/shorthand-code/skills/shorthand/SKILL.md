@@ -33,8 +33,13 @@ await refactor.move({ file: "src/api.ts", symbol: "parseUser", to: "src/users/pa
 
 `refactor.rename` leaves unrelated symbols alone. Use a qualified `symbol` such as `Session.refresh` when a
 file has several declarations named `refresh`; an unqualified name works when it identifies one
-declaration. `rename`, `move` and `references` also accept a graph node as `file` and use its name
-when `symbol` is omitted. `refactor.renameFile` moves the file and updates imports and exports that
+declaration. A parameter or local is named through its function, as `load.id`. `rename` and
+`references` also take a place with `at` instead: an `sg` match (a declaration's match acts on its
+name, so `sg.one("function load($$$P) { $$$B }")` is `load`) or `{ file, line, column }`; without a
+column, give the name to find on that line as `symbol`, as for a `grep` result. Each refactor checks
+its result with TypeScript and, if it would add a type error or make a renamed name mean something
+else, puts the files back and says why. `rename`, `move` and `references` also accept a graph node as
+`file` and use its name when `symbol` is omitted. `refactor.renameFile` moves the file and updates imports and exports that
 resolve to it. Read
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection
 rules, updated paths and failure conditions.
