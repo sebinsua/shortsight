@@ -1546,7 +1546,7 @@ const globals = {
 					member || String(prepared.symbol).includes("."),
 				);
 			}),
-		move: (options: { file: string | GraphNode; symbol?: string; to: string }) =>
+		move: (options: { file: string | GraphNode; symbol?: string; to: string; dryRun?: boolean }) =>
 			logged("refactor.move", [options], async () => {
 				const target = refactorTarget("refactor.move", options);
 				const from = explicitPath(target.file);
@@ -1556,12 +1556,18 @@ const globals = {
 				if (target.symbol.includes("."))
 					throw new Error(`refactor.move only moves top-level declarations; ${target.symbol} names a member`);
 				const { moveSymbol } = await import("../refactor/typescript-refactors.ts");
-				await moveSymbol(from, target.symbol, to, {
-					root: repositoryRoot,
-					scripts: scriptFiles,
-					loadingModules: filesLoadingModules,
-					reexportingAll: filesReexportingAll,
-				});
+				return moveSymbol(
+					from,
+					target.symbol,
+					to,
+					{
+						root: repositoryRoot,
+						scripts: scriptFiles,
+						loadingModules: filesLoadingModules,
+						reexportingAll: filesReexportingAll,
+					},
+					options.dryRun === true,
+				);
 			}),
 		renameFile: (options: RenameFileOptions) =>
 			logged("refactor.renameFile", [options], () => {
@@ -1569,6 +1575,7 @@ const globals = {
 				const prepared = {
 					from: gitPath(pathArgument("refactor.renameFile", options.from)),
 					to: gitPath(pathArgument("refactor.renameFile", options.to)),
+					dryRun: options.dryRun === true,
 				};
 				return import("../refactor/typescript-refactors.ts").then(({ renameFile }) =>
 					renameFile(repositoryRoot, prepared),

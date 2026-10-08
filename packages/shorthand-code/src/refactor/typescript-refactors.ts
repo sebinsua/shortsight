@@ -14,6 +14,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
+import { createTwoFilesPatch } from "diff";
 import { SymbolFlags } from "typescript/unstable/async";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -51,6 +52,14 @@ export interface Target<File = string> {
 
 export interface RenameOptions<File = string> extends Target<File> {
 	to: string;
+	/** Check the refactor and return its diff, but put the files back. */
+	dryRun?: boolean;
+}
+
+/** What a refactor changed, as paths from the repository root; for a dry run, also the diff it would make. */
+export interface RefactorResult {
+	files: string[];
+	diff?: string;
 }
 
 export interface ReferencesOptions<File = string> extends Target<File> {
@@ -65,6 +74,7 @@ export interface ReferenceLocation {
 export interface RenameFileOptions<File = string> {
 	from: File;
 	to: File;
+	dryRun?: boolean;
 }
 
 interface DocumentSymbol {
@@ -79,11 +89,11 @@ interface SymbolInformation {
 	location: { range: Range };
 }
 
-export async function rename(root: string, options: RenameOptions): Promise<void> {
+export async function rename(root: string, options: RenameOptions): Promise<RefactorResult> {
 	validateRename(options);
 	const file = existingProjectFile(root, options.file);
 	const { to } = options;
-	await withTypeScriptServer(root, async (server) => {
+	return withTypeScriptServer(root, async (server) => {
 		const { position, name: from, label } = await targetPosition(server, file, options, "refactor.rename");
 		const checked = checkedEdits(server, root);
 		// Where the new name was written, as offsets in each file's current contents, and each file's edits in turn.
@@ -151,6 +161,7 @@ export async function rename(root: string, options: RenameOptions): Promise<void
 				await capturedPlaces(server, checked.root, sites, to),
 				(changed, offset) => (history.get(changed) ?? []).reduce(shiftedOffset, offset),
 			);
+			return await checked.finish(options.dryRun);
 		} catch (error) {
 			await checked.restore();
 			throw error;
@@ -257,6 +268,31 @@ function checkedEdits(
 			});
 			await notify([...changes.keys()]);
 		},
+		/** What changed, from the files' contents before; for a dry run, the diff too, and the files put back. */
+		async finish(dryRun = false): Promise<RefactorResult> {
+			const changed = [...originals]
+				.filter(([file, source]) => now(file) !== source)
+				.toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+			const result: RefactorResult = { files: changed.map(([file]) => relative(root, file)) };
+			if (!dryRun) return result;
+			result.diff = changed
+				.map(([file, source]) => {
+					const path = relative(root, file);
+					const after = now(file);
+					return createTwoFilesPatch(
+						source === undefined ? "/dev/null" : `a/${path}`,
+						after === undefined ? "/dev/null" : `b/${path}`,
+						source ?? "",
+						after ?? "",
+						undefined,
+						undefined,
+						{ context: 3 },
+					).replace(/^=+\n/, "");
+				})
+				.join("");
+			await checked.restore();
+			return result;
+		},
 		async restore() {
 			if (!originals.size) return;
 			const files = [...originals.keys()];
@@ -320,19 +356,29 @@ const byPlace = (
 	offset = offsetOf(source, diagnostic.range.start),
 ) => `${file}:${offset}:${diagnostic.code}`;
 
+/** A file's contents now, or undefined when it doesn't exist. */
+const now = (file: string) => (existsSync(file) ? readFileSync(file, "utf8") : undefined);
+
 /**
  * refactor.move, checked: moves the declaration with moveDeclaration, then refuses and puts everything back if
  * the source, the target or a file importing either has a type error it didn't have before, such as an import
  * the moved code now assigns to, or a barrel that would export a name twice.
  */
-export async function moveSymbol(from: string, symbol: string, to: string, files: MoveFiles): Promise<void> {
-	await withTypeScriptServer(files.root, async (server) => {
+export async function moveSymbol(
+	from: string,
+	symbol: string,
+	to: string,
+	files: MoveFiles,
+	dryRun = false,
+): Promise<RefactorResult> {
+	return withTypeScriptServer(files.root, async (server) => {
 		const checked = checkedEdits(server, files.root, files.scripts);
 		// The importers of the source are the files the move may repoint.
 		await checked.track([from, to, ...(await importersOf(server, [from], files.scripts()))]);
 		try {
 			await moveDeclaration(from, symbol, to, files);
 			await checked.verify(`refactor.move of ${symbol} to ${relative(files.root, to)}`);
+			return await checked.finish(dryRun);
 		} catch (error) {
 			await checked.restore();
 			throw error;
@@ -596,7 +642,7 @@ function relativeImporters(root: string, target: string, destination: string, ed
 		});
 }
 
-export async function renameFile(root: string, options: RenameFileOptions): Promise<void> {
+export async function renameFile(root: string, options: RenameFileOptions): Promise<RefactorResult> {
 	validateRenameFile(options);
 	const from = existingProjectFile(root, options.from);
 	const to = projectPath(root, options.to);
@@ -613,7 +659,7 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 			`refactor.renameFile moves JavaScript and TypeScript modules; move ${JSON.stringify(options.from)} with Bun and update the paths to it with sg.rewrite`,
 		);
 
-	await withTypeScriptServer(root, async (server) => {
+	return withTypeScriptServer(root, async (server) => {
 		const files = [{ oldUri: pathToFileURL(from).href, newUri: pathToFileURL(to).href }];
 		const edit = await server.sendRequest<WorkspaceEdit | null>("workspace/willRenameFiles", { files });
 		const changes = planWorkspaceEdit(root, edit);
@@ -638,6 +684,7 @@ export async function renameFile(root: string, options: RenameFileOptions): Prom
 			});
 			await notifyTypeScriptServer(server, "workspace/didRenameFiles", { files });
 			await checked.verify(`refactor.renameFile of ${options.from} to ${options.to}`);
+			return await checked.finish(options.dryRun);
 		} catch (error) {
 			await checked.restore();
 			throw error;

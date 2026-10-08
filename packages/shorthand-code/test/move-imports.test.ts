@@ -69,7 +69,7 @@ const read = (root: string, path: string) => readFileSync(join(root, path), "utf
  * The error a move rejects with. Awaited directly: Bun's `expect(promise).rejects` services the TypeScript
  * API's pipe only about once a second, which makes each request take that long.
  */
-const rejection = (moving: Promise<void>) =>
+const rejection = (moving: Promise<unknown>) =>
 	moving.then(
 		() => undefined,
 		(error: unknown) => error,

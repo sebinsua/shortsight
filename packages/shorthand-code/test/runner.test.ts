@@ -513,6 +513,35 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 			expect(await Bun.file(path.join(repo, "src/box.ts")).text()).toContain("take(new Crate<number>(1));");
 		});
 
+		test("refactors say which files they changed, and a dry run shows its diff and changes nothing", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/parse.ts": "export function parseUser(s: string) { return s; }\n",
+				"src/use.ts": 'import { parseUser } from "./parse";\nexport const u = parseUser("a");\n',
+			});
+			const result = await run(
+				repo,
+				`const preview = await refactor.rename({ file: "src/parse.ts", symbol: "parseUser", to: "decodeUser", dryRun: true });
+console.log(JSON.stringify(preview.files));
+console.log(preview.diff);
+const moved = await refactor.renameFile({ from: "src/use.ts", to: "src/users/use.ts", dryRun: true });
+console.log(JSON.stringify(moved.files));
+const done = await refactor.rename({ file: "src/parse.ts", symbol: "parseUser", to: "decodeUser" });
+console.log(JSON.stringify(done));`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			const lines = result.output.trim().split("\n");
+			expect(lines[0]).toBe('["src/parse.ts","src/use.ts"]');
+			expect(result.output).toContain("--- a/src/use.ts\n+++ b/src/use.ts\n");
+			expect(result.output).toContain('-import { parseUser } from "./parse";\n');
+			expect(result.output).toContain('+import { decodeUser } from "./parse";\n');
+			expect(result.output).toContain('["src/use.ts","src/users/use.ts"]');
+			expect(lines.at(-1)).toBe('{"files":["src/parse.ts","src/use.ts"]}');
+			expect(result.changes.map((change) => change.path).toSorted()).toEqual(["src/parse.ts", "src/use.ts"]);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).exists()).toBe(true);
+		});
+
 		test("a parameter is renamed through its function, or by a place from sg or grep", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),

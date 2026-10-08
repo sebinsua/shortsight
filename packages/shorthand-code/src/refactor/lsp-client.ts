@@ -81,7 +81,14 @@ export function recordTypeScriptFiles(connection: MessageConnection, files: stri
 	for (const file of files) {
 		const value = fingerprint(file);
 		const pending = current.checker?.pending;
-		if (pending) (value ? (current.files.has(file) ? pending.changed : pending.created) : pending.deleted).add(file);
+		if (pending) {
+			// A file's latest change replaces an earlier one not yet passed on, such as a file moved and put back.
+			const created = pending.created.has(file) || (value !== undefined && pending.deleted.has(file));
+			for (const kind of [pending.changed, pending.created, pending.deleted]) kind.delete(file);
+			if (!value) pending.deleted.add(file);
+			else if (created || !current.files.has(file)) pending.created.add(file);
+			else pending.changed.add(file);
+		}
 		if (value) current.files.set(file, value);
 		else current.files.delete(file);
 		const version = current.opened.get(file);

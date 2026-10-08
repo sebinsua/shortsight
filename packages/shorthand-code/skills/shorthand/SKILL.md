@@ -38,7 +38,9 @@ declaration. A parameter or local is named through its function, as `load.id`. `
 name, so `sg.one("function load($$$P) { $$$B }")` is `load`) or `{ file, line, column }`; without a
 column, give the name to find on that line as `symbol`, as for a `grep` result. Each refactor checks
 its result with TypeScript and, if it would add a type error or make a renamed name mean something
-else, puts the files back and says why. `rename`, `move` and `references` also accept a graph node as
+else, puts the files back and says why. `rename`, `move` and `renameFile` return the files they
+changed as `{ files }`; with `dryRun: true` they also return the `diff` they would make and leave the
+files as they were. `rename`, `move` and `references` also accept a graph node as
 `file` and use its name when `symbol` is omitted. `refactor.renameFile` moves the file and updates imports and exports that
 resolve to it. Read
 [Semantic TypeScript refactors](advanced-refactors.md#semantic-typescript-refactors) for selection

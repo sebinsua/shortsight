@@ -33,6 +33,7 @@ Common operations:
 - await refactor.rename({ file, symbol, to }) renames one resolved TypeScript symbol across the project without changing unrelated names; a parameter is named through its function ("load.id"), or give a place with { at: match | { file, line, column }, to }.
 - await refactor.references({ file, symbol } | { at }) returns resolved identifier matches that pass straight to sg.rewrite(matches, callback).
 - await refactor.renameFile({ from, to }) moves a TypeScript file and updates module paths that resolve to it.
+- rename, move and renameFile check the result with TypeScript, refuse what would break it, and return { files }; pass dryRun: true to get { files, diff } and change nothing.
 - await refactor.move({ file, symbol, to }) moves a top-level declaration to another file and updates the imports that follow it.
 
 See the shorthand skill for renames, moves and call-site migrations. Read its advanced-refactors.md guide only to extract code, move syntax or use rule objects. The default timeout is five seconds; request more for longer programs. Time spent inside the helpers above does not count toward it, up to 60 extra seconds.`;
