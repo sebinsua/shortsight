@@ -1,6 +1,6 @@
 /** Syntax placement for file-backed JS/TS matches. All offsets refer to one source snapshot. */
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { editingFiles } from "../program/file-outcomes.ts";
 import { analyzeMove, type MoveAnalysis } from "./move-analysis.ts";
@@ -54,16 +54,69 @@ const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 /** Thrown for a file that isn't valid UTF-8: decoding and writing it back would replace those bytes. */
 export class NotUtf8Error extends Error {}
 
-/** A file's text, refusing files that aren't UTF-8, such as Latin-1 sources, so they aren't corrupted. */
-export function readUtf8(path: string): string {
+/**
+ * The files a program has read, and their syntax trees, kept while each is unchanged: reading a file is a round
+ * trip to the workspace, and a program's helpers read the same files again and again. A file is known unchanged
+ * by its modification time, size and inode, so writes by any means, a shell command's too, are seen.
+ */
+const documents = new Map<string, { stamp: string; text: string; trees: Map<Lang, SgNode> }>();
+
+function stampOf(path: string): string | undefined {
+	const stats = statSync(path, { bigint: true, throwIfNoEntry: false });
+	return stats?.isFile() ? `${stats.mtimeNs}:${stats.size}:${stats.ino}` : undefined;
+}
+
+function documentOf(path: string, checked?: string) {
+	const absolute = resolve(path);
+	const stamp = checked ?? stampOf(absolute);
+	const known = stamp && documents.get(absolute);
+	if (known && known.stamp === stamp) return known;
+	let text: string;
 	try {
-		return utf8.decode(readFileSync(path));
+		text = utf8.decode(readFileSync(absolute));
 	} catch (error) {
 		if (!(error instanceof TypeError)) throw error;
 		throw new NotUtf8Error(
 			`${JSON.stringify(path)} isn't valid UTF-8, and editing it here would corrupt it; change it another way`,
 		);
 	}
+	const document = { stamp: stamp ?? "", text, trees: new Map<Lang, SgNode>() };
+	if (stamp) documents.set(absolute, document);
+	return document;
+}
+
+/** A file's text, refusing files that aren't UTF-8, such as Latin-1 sources, so they aren't corrupted. */
+export function readUtf8(path: string): string {
+	return documentOf(path).text;
+}
+
+/** A file's text and syntax tree, parsed once while the file is unchanged; `stamp`, if the caller just checked it. */
+export function parsedFile(path: string, lang: Lang, stamp?: string): { source: string; root: SgNode } {
+	const document = documentOf(path, stamp);
+	let root = document.trees.get(lang);
+	if (!root) {
+		root = parse(lang, document.text).root();
+		document.trees.set(lang, root);
+	}
+	return { source: document.text, root };
+}
+
+const realDirectories = new Map<string, string>();
+
+/**
+ * A path with its symbolic links resolved, as realpathSync gives it, in one round trip for a file that isn't a
+ * link: its directory's real path is kept.
+ */
+export function realPath(path: string, link?: boolean): string {
+	const absolute = resolve(path);
+	if (link ?? lstatSync(absolute).isSymbolicLink()) return realpathSync(absolute);
+	const directory = dirname(absolute);
+	let real = realDirectories.get(directory);
+	if (real === undefined) {
+		real = realpathSync(directory);
+		realDirectories.set(directory, real);
+	}
+	return join(real, basename(absolute));
 }
 
 /** A script's text with its comments blanked out (same offsets), so a commented-out import isn't read as one. */
@@ -87,8 +140,15 @@ export function scriptLanguage(filename: string): Lang | undefined {
 	return languages[filename.split(".").pop()!];
 }
 
-export function remember<T extends Match>(match: T, source: string, existed = true, sourceFile = match.file): T {
-	const filename = existed ? realpathSync(sourceFile) : resolve(sourceFile);
+/** Records the source a match was found in, so an edit can tell it's stale. `real`, if the caller resolved it already. */
+export function remember<T extends Match>(
+	match: T,
+	source: string,
+	existed = true,
+	sourceFile = match.file,
+	real?: string,
+): T {
+	const filename = existed ? (real ?? realPath(sourceFile)) : resolve(sourceFile);
 	snapshots.set(match, { file: filename, displayFile: match.file, source, existed, node: match.node });
 	return match;
 }

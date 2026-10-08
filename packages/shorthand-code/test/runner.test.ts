@@ -3459,6 +3459,20 @@ sg.rewrite("request($A, $B)", "request($A, $B, {})", "a.js");`,
 		);
 	});
 
+	test("sg sees a file the program changed itself, even to the same length", async () => {
+		const repo = await makeRepo({ "a.ts": "oldName();\n" });
+		const result = await run(
+			repo,
+			`console.log(sg.find("oldName()", "a.ts").length);
+require("node:fs").writeFileSync("a.ts", "newName();\\n");
+console.log(sg.find("oldName()", "a.ts").length, sg.find("newName()", "a.ts").length);
+await $\`printf 'oldName();\\n' > a.ts\`;
+console.log(sg.find("oldName()", "a.ts").length);`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["1", "0 1", "1"]);
+	});
+
 	test("sg.rewrite refuses a bare $$$ in its template", async () => {
 		const repo = await makeRepo({ "a.ts": 'console.log("a", 1);\n' });
 		const result = await run(repo, `sg.rewrite("console.log($$$)", "logger.info($$$)", "a.ts");`);

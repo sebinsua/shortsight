@@ -29,7 +29,9 @@ import {
 	move,
 	remember,
 	NotUtf8Error,
+	parsedFile,
 	readUtf8,
+	realPath,
 	remove,
 	syntaxErrorAt,
 	type FileTarget,
@@ -354,11 +356,6 @@ function existing(files: string[]): string[] {
 	return files.filter((file) => lstatSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })).toSorted();
 }
 
-/** Existing tracked or non-ignored untracked files, always named relative to the repository root. */
-function gitFiles(pathspec = "."): string[] {
-	return existing(listGitFiles(pathspec));
-}
-
 // Starting git costs tens of milliseconds inside the sandbox. While set, one listing serves every
 // input of a selection, so a list of 80 paths runs git once rather than 80 times.
 let sharedListing: { files?: string[] } | undefined;
@@ -405,25 +402,26 @@ function literalDirectories(pattern: string): string {
 	].join("/");
 }
 
-function selectFiles(input: string): string[] {
+/** The files a path or glob selects. `present` keeps those that exist; a caller checking them itself can skip it. */
+function selectFiles(input: string, present: (files: string[]) => string[] = existing): string[] {
 	const normalized = gitPath(input);
 	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
 	const pathspec = stats?.isFile() || stats?.isDirectory();
 	if (!sharedListing) {
 		// A program often names files one at a time; a tracked one needs no git process to be selected.
 		if (stats?.isFile() && trackedFiles().has(normalized)) return [normalized];
-		if (pathspec) return gitFiles(normalized);
+		if (pathspec) return present(listGitFiles(normalized));
 		const matcher = new Glob(literalDirectories(normalized));
-		return gitFiles().filter((file) => matcher.match(file));
+		return present(listGitFiles().filter((file) => matcher.match(file)));
 	}
 	const files = (sharedListing.files ??= listGitFiles());
 	if (pathspec)
 		// A pathspec matches the path itself and everything beneath it.
-		return existing(
+		return present(
 			normalized === "." ? files : files.filter((file) => file === normalized || file.startsWith(`${normalized}/`)),
 		);
 	const matcher = new Glob(literalDirectories(normalized));
-	return existing(files.filter((file) => matcher.match(file)));
+	return present(files.filter((file) => matcher.match(file)));
 }
 
 // ── ast-grep ──────────────────────────────────────────────────────────────────────
@@ -619,30 +617,49 @@ function describeScope(scope: FileScope): string {
  * The supported syntax files to search. `files` is a Git-visible file, directory, glob, or a list
  * of any of those. Warns if there are none, since that's almost always a mistake.
  */
-function sourceFiles(helper: string, files: FileScope): string[] {
-	const found = scopeFiles(helper, files, selectFiles);
-	const parseable = found.filter(
-		(file) =>
-			LANGUAGES[file.split(".").pop()!] && statSync(resolve(repositoryRoot, file), { throwIfNoEntry: false })?.isFile(),
-	);
+/**
+ * The files of a scope that sg can parse. `stamps`, given, gets each one's stamp from the one check made of it, for
+ * a caller that reads them straight away, before anything can change them.
+ */
+function sourceFiles(helper: string, files: FileScope, stamps?: Map<string, string>): string[] {
+	// Checked below, once each, rather than every listed file first.
+	const found = scopeFiles(helper, files, (input) => selectFiles(input, (listed) => listed.toSorted()));
+	const stampOf = new Map<string, string>();
+	// One round trip a file, as each is a request to the workspace: a link is followed only when it is one.
+	const links = new Set<string>();
+	const parseable = found.filter((file) => {
+		if (!LANGUAGES[file.split(".").pop()!]) return false;
+		const absolute = resolve(repositoryRoot, file);
+		const stats = lstatSync(absolute, { bigint: true, throwIfNoEntry: false });
+		if (!stats?.isSymbolicLink()) {
+			if (stats?.isFile()) stampOf.set(file, `${stats.mtimeNs}:${stats.size}:${stats.ino}`);
+			return stats?.isFile() ?? false;
+		}
+		links.add(file);
+		return statSync(absolute, { throwIfNoEntry: false })?.isFile() ?? false;
+	});
 	if (parseable.length === 0) console.error(`warning: ${helper} found no supported files in ${describeScope(files)}`);
 	// A symlink and its target are one file: reading and writing both would rewrite it twice. Keep the real path.
+	const reals = new Map(parseable.map((file) => [file, realPath(resolve(repositoryRoot, file), links.has(file))]));
 	const byRealPath = new Map<string, string>();
 	for (const file of parseable) {
-		const absolute = resolve(repositoryRoot, file);
-		const real = realpathSync(absolute);
-		if (!byRealPath.has(real) || !lstatSync(absolute).isSymbolicLink()) byRealPath.set(real, file);
+		const real = reals.get(file)!;
+		if (!byRealPath.has(real) || !links.has(file)) byRealPath.set(real, file);
 	}
-	const unique = parseable.filter((file) => byRealPath.get(realpathSync(resolve(repositoryRoot, file))) === file);
+	const unique = parseable.filter((file) => byRealPath.get(reals.get(file)!) === file);
 	// Named from the program's working directory, like every other path it reads and writes, so a program that
 	// changes directory still reads, writes and reports the file it selected. At the root this is the path itself.
 	return unique.map((file) => {
 		const absolute = resolve(repositoryRoot, file);
+		let named: string;
 		try {
-			return relative(process.cwd(), absolute);
+			named = relative(process.cwd(), absolute);
 		} catch {
-			return absolute;
+			named = absolute;
 		}
+		const stamp = stampOf.get(file);
+		if (stamps && stamp) stamps.set(named, stamp);
+		return named;
 	});
 }
 
@@ -742,11 +759,14 @@ function findMatches(helper: string, pattern: string | NapiConfig, files: FileSc
 	const matches: SgMatch[] = [];
 	const ranges = scopeRanges(helper, files);
 	const search = patternSearch(helper, pattern);
-	for (const file of sourceFiles(helper, files)) {
-		const parsed = parseFile(file);
+	// Nothing runs between listing the files and reading them, so the listing's check of each serves both.
+	const stamps = new Map<string, string>();
+	for (const file of sourceFiles(helper, files, stamps)) {
+		const parsed = parseFile(file, stamps.get(file));
 		if (!parsed) continue;
+		const real = realPath(file);
 		for (const node of search.nodes(file, parsed.root)) {
-			const match = toMatch(file, node, parsed.source, pattern);
+			const match = toMatch(file, node, parsed.source, pattern, file, undefined, real);
 			if (withinScope(match, ranges)) matches.push(match);
 		}
 	}
@@ -1295,9 +1315,10 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 		count += editingFiles([file], () => {
 			const parsed = parseFile(file);
 			if (!parsed) return 0;
+			const real = realPath(file);
 			const matches = search
 				.nodes(file, parsed.root)
-				.map((node) => toMatch(file, node, parsed.source, pattern))
+				.map((node) => toMatch(file, node, parsed.source, pattern, file, undefined, real))
 				.filter((match) => withinScope(match, ranges));
 			matched += matches.length;
 			const earlier = insideEarlierOutput(file, parsed.source, matches);
@@ -1329,12 +1350,11 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 const skippedNotUtf8 = new Set<string>();
 
 /** A JS/TS/HTML/CSS file's source and syntax tree, or null for other files and files that aren't UTF-8. */
-function parseFile(file: string) {
+function parseFile(file: string, stamp?: string) {
 	const lang = LANGUAGES[file.split(".").pop()!];
 	if (!lang) return null;
-	let source: string;
 	try {
-		source = readUtf8(file);
+		return parsedFile(file, lang, stamp);
 	} catch (error) {
 		if (!(error instanceof NotUtf8Error)) throw error;
 		if (!skippedNotUtf8.has(resolve(file))) {
@@ -1343,7 +1363,6 @@ function parseFile(file: string) {
 		}
 		return null;
 	}
-	return { source, root: parse(lang, source).root() };
 }
 
 function toMatch(
@@ -1353,6 +1372,7 @@ function toMatch(
 	pattern: string | NapiConfig,
 	sourceFile = file,
 	call?: SgNode,
+	real?: string,
 ): SgMatch {
 	const vars: Record<string, string> = {};
 	for (const [, dollars, name] of JSON.stringify(pattern).matchAll(/(\$\$\$|\$)([A-Z_][A-Z0-9_]*)/g)) {
@@ -1381,6 +1401,7 @@ function toMatch(
 		source,
 		true,
 		sourceFile,
+		real,
 	);
 }
 
