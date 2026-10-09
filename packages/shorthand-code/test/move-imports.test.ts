@@ -525,9 +525,9 @@ test("a move that would leave a module variable assigned through an import is re
 	});
 
 	for (const [symbol, message] of [
-		["bump", "Cannot assign to 'count' because it is an import"],
-		["load", "Cannot assign to 'cache' because it is an import"],
-		["count", "Cannot assign to 'count' because it is an import"],
+		["bump", "would leave count assigned through an import"],
+		["load", "would leave cache assigned through an import"],
+		["count", "would leave count assigned through an import"],
 	])
 		expect(
 			String(await rejection(moveSymbol(join(root, "src/a.ts"), symbol, join(root, "src/b.ts"), everyFile(root)))),

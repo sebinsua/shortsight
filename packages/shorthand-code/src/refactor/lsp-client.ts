@@ -165,9 +165,12 @@ export async function checkerProject(connection: MessageConnection, file: string
 	const { changed, created, deleted } = checker.pending;
 	if (changed.size || created.size || deleted.size) {
 		checker.pending = { changed: new Set(), created: new Set(), deleted: new Set() };
+		const previous = checker.snapshot;
 		checker.snapshot = await checker.api.updateSnapshot({
 			fileChanges: { changed: [...changed], created: [...created], deleted: [...deleted] },
 		});
+		// The API keeps every snapshot until it's disposed.
+		await previous.dispose().catch(() => {});
 	}
 	for (const project of checker.snapshot.getProjects())
 		if (await project.program.getSourceFile(file).catch(() => undefined)) return project;

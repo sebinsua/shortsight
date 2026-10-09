@@ -13,7 +13,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { Lang, parse, type SgNode } from "@ast-grep/napi";
+import { parse, type SgNode } from "@ast-grep/napi";
 import { createTwoFilesPatch } from "diff";
 import { SymbolFlags } from "typescript/unstable/async";
 import { basename, dirname, relative, resolve } from "node:path";
@@ -28,7 +28,7 @@ import {
 	type Diagnostic,
 } from "./lsp-client.ts";
 import { relativeCandidates, resolveModule } from "./move-imports.ts";
-import { moveDeclaration, scriptLanguage, withoutComments, type MoveFiles } from "./placement.ts";
+import { kindsIn, moveDeclaration, scriptLanguage, withoutComments, type MoveFiles } from "./placement.ts";
 import {
 	existingProjectFile,
 	planWorkspaceEdit,
@@ -251,6 +251,10 @@ function checkedEdits(
 		);
 	const checked = {
 		root,
+		/** Notes what a file held before a write that wasn't announced, so it's put back and reported all the same. */
+		saw(file: string, previous: string | undefined) {
+			if (!originals.has(file)) originals.set(file, previous);
+		},
 		/** Notes the contents and errors of files about to change, and of the files that import them. */
 		async track(files: string[]) {
 			const fresh = files.filter((file) => !originals.has(file));
@@ -373,10 +377,13 @@ export async function moveSymbol(
 ): Promise<RefactorResult> {
 	return withTypeScriptServer(files.root, async (server) => {
 		const checked = checkedEdits(server, files.root, files.scripts);
-		// The importers of the source are the files the move may repoint.
-		await checked.track([from, to, ...(await importersOf(server, [from], files.scripts()))]);
 		try {
-			await moveDeclaration(from, symbol, to, files);
+			await moveDeclaration(from, symbol, to, {
+				...files,
+				// The move knows the files it will write once it has analysed them, before it writes any.
+				beforeWriting: (planned) => checked.track(planned.map((file) => resolve(file))),
+				writing: (file, before) => checked.saw(resolve(file), before),
+			});
 			await checked.verify(`refactor.move of ${symbol} to ${relative(files.root, to)}`);
 			return await checked.finish(dryRun);
 		} catch (error) {
@@ -420,17 +427,21 @@ async function capturedPlaces(
 		);
 		for (const [index, found] of symbols.entries()) {
 			if (!found) continue;
-			const symbol = found.flags & SymbolFlags.Alias ? await project.checker.getAliasedSymbol(found) : found;
-			const declared = await Promise.all(
-				symbol.declarations.map(async (handle) => {
+			// A declaration that isn't a renamed place; every one counts, as a type renamed into an existing
+			// interface merges with it and keeps both.
+			const elsewhere = async (symbol: typeof found) => {
+				for (const handle of symbol.declarations) {
 					const node = (await handle.resolve(project)) as { name?: { end: number } } | undefined;
-					return node?.name ? { handle, end: node.name.end } : undefined;
-				}),
-			);
-			// Every declaration: renamed into an existing interface, a symbol merges with it and keeps both.
-			const other = declared.find(
-				(declaration) => declaration && !renamedEnds.has(`${declaration.handle.path.toLowerCase()}:${declaration.end}`),
-			);
+					if (node?.name && !renamedEnds.has(`${handle.path.toLowerCase()}:${node.name.end}`))
+						return { handle, end: node.name.end };
+				}
+				return undefined;
+			};
+			// An import that was renamed itself, as the local `fmt` of `{ formatAmount as fmt }`, is the renamed
+			// symbol there; otherwise, what it imports must be.
+			let other = await elsewhere(found);
+			if (other && found.flags & SymbolFlags.Alias)
+				other = await elsewhere(await project.checker.getAliasedSymbol(found));
 			if (!other) continue;
 			const otherFile = other && (await project.program.getSourceFile(other.handle.path));
 			const position = positionOf(source, offsets[index]!);
@@ -498,19 +509,46 @@ function positionOf(source: string, offset: number): Position {
 }
 
 /** Compiler-resolved reference spans, kept as LSP locations for the caller to turn into sg matches. */
-export async function references(root: string, options: ReferencesOptions): Promise<ReferenceLocation[]> {
+/** Without the checker: whether the name at `position` is a property's, as `id` in `{ id: 1 }` or `class { id }` is. */
+function declaresProperty(file: string, source: string, position: Position): boolean {
+	const lang = scriptLanguage(file);
+	if (!lang) return false;
+	const offset = offsetOf(source, position);
+	return parse(lang, source)
+		.root()
+		.findAll({ rule: { any: [{ kind: "property_identifier" }, { kind: "private_property_identifier" }] } })
+		.some((node) => node.range().start.index === offset);
+}
+
+/** A symbol's references, and whether it's a member, such as a property or method, as the checker knows it. */
+export interface References {
+	locations: ReferenceLocation[];
+	member: boolean;
+}
+
+const MEMBER = SymbolFlags.Property | SymbolFlags.Method | SymbolFlags.Accessor | SymbolFlags.EnumMember;
+
+export async function references(root: string, options: ReferencesOptions): Promise<References> {
 	validateTarget(options, "refactor.references");
 	const file = existingProjectFile(root, options.file);
 	const uri = pathToFileURL(file).href;
 	return withTypeScriptServer(root, async (server) => {
 		const { position } = await targetPosition(server, file, options, "refactor.references");
-		return (
+		const locations =
 			(await server.sendRequest<ReferenceLocation[] | null>("textDocument/references", {
 				textDocument: { uri },
 				position,
 				context: { includeDeclaration: options.includeDeclaration === true },
-			})) ?? []
-		);
+			})) ?? [];
+		// The checker counts UTF-16 units after a byte order mark, as the server does by line.
+		const source = readFileSync(file, "utf8");
+		const project = await checkerProject(server, file);
+		const [symbol] = project
+			? await project.checker.getSymbolAtPosition(file, [
+					offsetOf(source, position) - (source.startsWith("\uFEFF") ? 1 : 0),
+				])
+			: [];
+		return { locations, member: symbol ? (symbol.flags & MEMBER) !== 0 : declaresProperty(file, source, position) };
 	});
 }
 
@@ -766,23 +804,69 @@ async function targetPosition(
 	};
 }
 
-const BINDINGS = new Set([
-	"required_parameter",
-	"optional_parameter",
-	"variable_declarator",
-	"catch_clause",
-	"rest_pattern",
-	"array_pattern",
-	"pair_pattern",
-	"assignment_pattern",
-	"object_assignment_pattern",
-	"formal_parameters",
+/** Document symbol kinds whose dotted names are members: class, interface, enum, module, namespace, struct. */
+const MEMBER_HOLDERS = new Set([5, 11, 10, 2, 3, 23]);
+
+const FUNCTIONS = new Set([
+	"function_declaration",
+	"function_expression",
+	"function",
+	"arrow_function",
+	"method_definition",
+	"generator_function_declaration",
+	"generator_function",
 ]);
 
+/** Destructuring patterns, through which a name can be declared. */
+const PATTERNS = new Set([
+	"object_pattern",
+	"array_pattern",
+	"pair_pattern",
+	"rest_pattern",
+	"assignment_pattern",
+	"object_assignment_pattern",
+]);
+
+/** A node's field by name, for a node whose kind isn't known to the type. */
+const fieldOf = (node: SgNode | null, key: string) =>
+	(node?.field as ((key: string) => SgNode | null) | undefined)?.call(node, key);
+
 /**
- * The parameters and locals named `name` inside the declaration of `owner` at `position`, `id` of `load.id`:
- * the server's document symbols leave out parameters. An identifier declares one when its parent binds names: a
- * parameter, a variable, a destructuring pattern or a catch clause.
+ * Whether a name declares a binding: its outermost pattern is what a variable, parameter, catch clause or `for`
+ * declares, rather than the target of an assignment such as `({ name } = json)`. A default value is a use.
+ */
+function declares(name: SgNode): boolean {
+	let node = name;
+	let parent = node.parent();
+	while (parent && PATTERNS.has(String(parent.kind()))) {
+		if (parent.kind() === "pair_pattern" && parent.field("value")?.id() !== node.id()) return false;
+		if (String(parent.kind()).endsWith("assignment_pattern") && parent.field("left")?.id() !== node.id()) return false;
+		node = parent;
+		parent = node.parent();
+	}
+	const is = (key: string) => fieldOf(parent, key)?.id() === node.id();
+	switch (String(parent?.kind())) {
+		case "variable_declarator":
+			return is("name");
+		case "required_parameter":
+		case "optional_parameter":
+			return is("pattern");
+		case "formal_parameters":
+			return true;
+		case "arrow_function":
+			return is("parameter");
+		case "catch_clause":
+			return is("parameter");
+		case "for_in_statement":
+			return is("left") && Boolean(fieldOf(parent, "kind"));
+		default:
+			return false;
+	}
+}
+
+/**
+ * The parameters and locals named `name` of the declaration of `owner` at `position`, `id` of `load.id`: the
+ * server's document symbols leave out parameters.
  */
 function localBindings(file: string, source: string, position: Position, owner: string, name: string): Position[] {
 	const lang = scriptLanguage(file);
@@ -791,24 +875,24 @@ function localBindings(file: string, source: string, position: Position, owner: 
 	const offset = offsetOf(source, position);
 	const root = parse(lang, source).root();
 	const declaration = root
-		.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "property_identifier" }, { kind: "type_identifier" }] } })
+		.findAll({
+			rule: { any: kindsIn(lang, ["identifier", "property_identifier", "type_identifier"]).map((kind) => ({ kind })) },
+		})
 		.find((node) => node.range().start.index >= offset && node.text() === owner)
 		?.parent();
 	if (!declaration) return [];
+	// Its own: a callback's parameters inside it are the callback's.
+	const value = declaration.kind() === "variable_declarator" ? declaration.field("value") : null;
+	const own = FUNCTIONS.has(String(value?.kind())) ? value! : declaration;
+	const enclosing = (node: SgNode) => node.ancestors().find((ancestor) => FUNCTIONS.has(String(ancestor.kind())));
 	return declaration
 		.findAll({ rule: { any: [{ kind: "identifier" }, { kind: "shorthand_property_identifier_pattern" }] } })
-		.filter((node) => {
-			if (node.text() !== name) return false;
-			if (node.kind() === "shorthand_property_identifier_pattern") return true;
-			const parent = node.parent();
-			if (parent?.kind() === "arrow_function") return parent.field("parameter")?.id() === node.id();
-			if (!parent || !BINDINGS.has(String(parent.kind()))) return false;
-			// In `{ key: value }` and `x = default` only one side is bound.
-			if (parent.kind() === "pair_pattern") return parent.field("value")?.id() === node.id();
-			if (parent.kind() === "variable_declarator") return parent.field("name")?.id() === node.id();
-			if (parent.kind().toString().includes("assignment_pattern")) return parent.field("left")?.id() === node.id();
-			return true;
-		})
+		.filter(
+			(node) =>
+				node.text() === name &&
+				(!FUNCTIONS.has(String(own.kind())) || enclosing(node)?.id() === own.id()) &&
+				declares(node),
+		)
 		.map((node) => positionOf(source, node.range().start.index));
 }
 
@@ -820,8 +904,8 @@ const samePosition = (a: Position, b: Position) => a.line === b.line && a.charac
  */
 function typeAliasMembers(file: string, source: string): { name: string; position: Position }[] {
 	const lang = scriptLanguage(file);
-	// JavaScript has no type aliases, and its grammar no kind for them.
-	if (!lang || lang === Lang.JavaScript || !source) return [];
+	// JavaScript has no type aliases.
+	if (!lang || !source || !kindsIn(lang, ["type_alias_declaration"]).length) return [];
 	const members: { name: string; position: Position }[] = [];
 	for (const alias of parse(lang, source)
 		.root()
@@ -854,7 +938,7 @@ function symbolPosition(
 	helper: string,
 	source = "",
 ): Position {
-	const entries: { name: string; position: Position }[] = [];
+	const entries: { name: string; position: Position; kind?: number }[] = [];
 	const visit = (items: Array<DocumentSymbol | SymbolInformation>, container = "") => {
 		for (const item of items) {
 			const parent = "containerName" in item ? item.containerName || container : container;
@@ -863,6 +947,7 @@ function symbolPosition(
 			entries.push({
 				name: qualified,
 				position: "selectionRange" in item ? item.selectionRange.start : item.location.range.start,
+				kind: (item as { kind?: number }).kind,
 			});
 			if ("children" in item && item.children) visit(item.children, qualified);
 		}
@@ -873,24 +958,29 @@ function symbolPosition(
 			(member) => !entries.some((entry) => samePosition(entry.position, member.position)),
 		),
 	);
-	const found = entries.filter((entry) =>
-		name.includes(".") ? entry.name === name : entry.name.split(".").at(-1) === name,
-	);
-	if (found.length === 0) {
-		// `load.id`: a parameter or local of a declaration the server does list.
-		const parentName = name.split(".").slice(0, -1).join(".");
-		const parents = parentName ? entries.filter((entry) => entry.name === parentName) : [];
-		const locals =
-			parents.length === 1
-				? localBindings(file, source, parents[0]!.position, parentName.split(".").at(-1)!, name.split(".").at(-1)!)
-				: [];
+	// `load.id` of a function or variable is its own parameter or local, before any member the server lists
+	// under it, such as a property of an object literal it returns.
+	const parentName = name.split(".").slice(0, -1).join(".");
+	const parents = parentName ? entries.filter((entry) => entry.name === parentName) : [];
+	if (parents.length === 1 && !MEMBER_HOLDERS.has(parents[0]!.kind ?? 0)) {
+		const locals = localBindings(
+			file,
+			source,
+			parents[0]!.position,
+			parentName.split(".").at(-1)!,
+			name.split(".").at(-1)!,
+		);
 		if (locals.length === 1) return locals[0]!;
 		if (locals.length > 1)
 			throw new Error(
 				`${helper}: ${JSON.stringify(name)} is declared more than once, at ${locals.map((local) => `${file}:${local.line + 1}:${local.character + 1}`).join(", ")}; give the place with { at: { file, line, column } }`,
 			);
-		throw new Error(`${helper} found no declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`);
 	}
+	const found = entries.filter((entry) =>
+		name.includes(".") ? entry.name === name : entry.name.split(".").at(-1) === name,
+	);
+	if (found.length === 0)
+		throw new Error(`${helper} found no declaration named ${JSON.stringify(name)} in ${JSON.stringify(file)}`);
 	// A bare name means the top-level declaration when there is one, not also members and locals named like it:
 	// otherwise `parseUser`, offered below as a choice, would be just as ambiguous.
 	const topLevel = found.filter((entry) => entry.name === name);

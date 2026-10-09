@@ -5,8 +5,17 @@
  */
 import { realpathSync } from "node:fs";
 import type { SgNode } from "@ast-grep/napi";
+import { kindsIn, scriptLanguage } from "./placement.ts";
 import { API, SymbolFlags, type Project, type Symbol } from "typescript/unstable/async";
-import { getTouchingPropertyName, SyntaxKind, type Node, type SourceFile } from "typescript/unstable/ast";
+import {
+	getTouchingPropertyName,
+	SyntaxKind,
+	type BinaryExpression,
+	type Node,
+	type PostfixUnaryExpression,
+	type PrefixUnaryExpression,
+	type SourceFile,
+} from "typescript/unstable/ast";
 
 export interface MoveAnalysis {
 	/** Names the declaration refers to that are bound outside it: imports, the file's other declarations and globals. */
@@ -19,6 +28,11 @@ export interface MoveAnalysis {
 	referencing: string[];
 	/** Files that use the declaration as a property of the module object: `ns.name`, `ns["name"]`, `{ name } = ns`. */
 	usedThroughModule: string[];
+	/**
+	 * Variables a move would make imports where they're assigned, which an import can't be: the source's that the
+	 * declaration assigns, and the declaration's that the source still assigns.
+	 */
+	assignedThroughImport: string[];
 }
 
 export interface MoveAnalysisInput {
@@ -55,9 +69,12 @@ export async function analyzeMove({ root, file, node, names, files }: MoveAnalys
 		const projects: Project[] = [];
 		for (const project of snapshot.getProjects())
 			if (await project.program.getSourceFile(file).catch(() => undefined)) projects.push(project);
+		const used = await dependencies(home, sourceFile, node);
+		const { assignedInSource, ...referenced } = await references(projects, sourceFile, node, names);
 		return {
-			...(await dependencies(home, sourceFile, node)),
-			...(await references(projects, sourceFile, node, names)),
+			...used,
+			...referenced,
+			assignedThroughImport: [...new Set([...used.assignedThroughImport, ...assignedInSource])],
 		};
 	} finally {
 		await api.close();
@@ -72,7 +89,7 @@ async function dependencies(
 	project: Project,
 	sourceFile: SourceFile,
 	node: SgNode,
-): Promise<Pick<MoveAnalysis, "dependencies" | "importsOnlyItUses">> {
+): Promise<Pick<MoveAnalysis, "dependencies" | "importsOnlyItUses" | "assignedThroughImport">> {
 	const { start, end } = node.range();
 	const inside = (reference: Node) => reference.getStart(sourceFile) >= start.index && reference.end <= end.index;
 	const onlyUsedInside = async (symbol: Symbol) => {
@@ -91,15 +108,26 @@ async function dependencies(
 		}
 		return true;
 	};
-	const identifiers = node.findAll({ rule: { any: REFERENCES.map((kind) => ({ kind })) } });
+	const lang = scriptLanguage(sourceFile.fileName)!;
+	const identifiers = node.findAll({ rule: { any: kindsIn(lang, REFERENCES).map((kind) => ({ kind })) } });
 	const symbols = await project.checker.getSymbolAtPosition(
 		sourceFile.fileName,
 		identifiers.map((identifier) => identifier.range().start.index),
 	);
 	const names = new Set<string>();
 	const importsOnlyItUses = new Set<string>();
+	const assignedThroughImport = new Set<string>();
 	for (const [index, identifier] of identifiers.entries()) {
 		const name = identifier.text();
+		const variable = symbols[index];
+		if (
+			variable &&
+			variable.flags & VARIABLE &&
+			assigns(getTouchingPropertyName(sourceFile, identifier.range().start.index)) &&
+			!(await within(variable)) &&
+			variable.declarations.every((declaration) => declaration.path === sourceFile.path)
+		)
+			assignedThroughImport.add(name);
 		if (names.has(name)) continue;
 		// `{ name }` declares a property; the value it reads is whatever `name` means there.
 		const symbol =
@@ -118,7 +146,7 @@ async function dependencies(
 			symbol.declarations.every((declaration) => declaration.path === sourceFile.path);
 		if (imported && (await onlyUsedInside(symbol))) importsOnlyItUses.add(name);
 	}
-	return { dependencies: names, importsOnlyItUses };
+	return { dependencies: names, importsOnlyItUses, assignedThroughImport: [...assignedThroughImport] };
 }
 
 /** A node inside an import declaration, such as the binding an import introduces. */
@@ -134,19 +162,25 @@ async function references(
 	sourceFile: SourceFile,
 	node: SgNode,
 	names: string[],
-): Promise<Pick<MoveAnalysis, "usedInSource" | "referencing" | "usedThroughModule">> {
+): Promise<Pick<MoveAnalysis, "usedInSource" | "referencing" | "usedThroughModule"> & { assignedInSource: string[] }> {
 	const { start, end } = node.range();
 	const source = real(sourceFile.fileName);
 	const seen = new Set<string>();
 	const referencing = new Set<string>();
 	const usedThroughModule = new Set<string>();
 	let usedInSource = false;
+	const assignedInSource = new Set<string>();
 	for (const project of projects) {
 		const own = (await project.program.getSourceFile(sourceFile.fileName))!;
 		for (const name of names) {
 			// The first mention of a declared name in its declaration is where it is declared.
 			const declared = node.find({
-				rule: { any: DECLARED.map((kind) => ({ kind, regex: `^${name.replaceAll("$", "\\$")}$` })) },
+				rule: {
+					any: kindsIn(scriptLanguage(sourceFile.fileName)!, DECLARED).map((kind) => ({
+						kind,
+						regex: `^${name.replaceAll("$", "\\$")}$`,
+					})),
+				},
 			});
 			if (!declared) continue;
 			const position = declared.range().start.index;
@@ -162,7 +196,10 @@ async function references(
 				if (!reference) continue;
 				const file = real(reference.getSourceFile().fileName);
 				if (file === source) {
-					if (reference.end <= start.index || reference.getStart() >= end.index) usedInSource = true;
+					if (reference.end <= start.index || reference.getStart() >= end.index) {
+						usedInSource = true;
+						if (assigns(reference)) assignedInSource.add(name);
+					}
 					continue;
 				}
 				referencing.add(file);
@@ -170,7 +207,12 @@ async function references(
 			}
 		}
 	}
-	return { usedInSource, referencing: [...referencing], usedThroughModule: [...usedThroughModule] };
+	return {
+		usedInSource,
+		referencing: [...referencing],
+		usedThroughModule: [...usedThroughModule],
+		assignedInSource: [...assignedInSource],
+	};
 }
 
 /** A reference that reads the declaration off a module object rather than binding it by name. */
@@ -193,4 +235,24 @@ function throughModule(reference: Node): boolean {
 		default:
 			return false;
 	}
+}
+
+const VARIABLE = SymbolFlags.FunctionScopedVariable | SymbolFlags.BlockScopedVariable;
+
+/** Whether a reference is assigned: the target of `=`, `+=` and the like, or of `++` or `--`. */
+function assigns(reference: Node): boolean {
+	const parent = reference.parent;
+	if (parent?.kind === SyntaxKind.BinaryExpression) {
+		const { left, operatorToken } = parent as BinaryExpression;
+		return (
+			left === reference &&
+			operatorToken.kind >= SyntaxKind.FirstAssignment &&
+			operatorToken.kind <= SyntaxKind.LastAssignment
+		);
+	}
+	if (parent?.kind === SyntaxKind.PrefixUnaryExpression || parent?.kind === SyntaxKind.PostfixUnaryExpression) {
+		const { operator } = parent as PrefixUnaryExpression | PostfixUnaryExpression;
+		return operator === SyntaxKind.PlusPlusToken || operator === SyntaxKind.MinusMinusToken;
+	}
+	return false;
 }

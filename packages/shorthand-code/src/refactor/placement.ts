@@ -136,6 +136,28 @@ export function withoutComments(path: string, text: string): string {
 	return output;
 }
 
+const kinds = new Map<Lang, Map<string, boolean>>();
+
+/**
+ * Those of `wanted` that the language's grammar has, as ast-grep refuses a rule naming a kind it lacks:
+ * JavaScript has no `type_identifier`, as it has no types. Each kind is asked about once.
+ */
+export function kindsIn(lang: Lang, wanted: readonly string[]): string[] {
+	let known = kinds.get(lang);
+	if (!known) kinds.set(lang, (known = new Map()));
+	const empty = parse(lang, "").root();
+	return wanted.filter((kind) => {
+		if (!known.has(kind))
+			try {
+				empty.find({ rule: { kind } });
+				known.set(kind, true);
+			} catch {
+				known.set(kind, false);
+			}
+		return known.get(kind)!;
+	});
+}
+
 export function scriptLanguage(filename: string): Lang | undefined {
 	return languages[filename.split(".").pop()!];
 }
@@ -482,7 +504,7 @@ export function syntaxErrorAt(node: SgNode): SgNode | undefined {
 	return undefined;
 }
 
-function apply(plans: { saved: Snapshot; edits: Edit[] }[]) {
+function apply(plans: { saved: Snapshot; edits: Edit[] }[], writing?: MoveFiles["writing"]) {
 	const outputs = plans.map(({ saved, edits }) => {
 		const ordered = edits.toSorted((a, b) => a.start - b.start || a.end - b.end);
 		for (let index = 1; index < ordered.length; index++) {
@@ -505,6 +527,7 @@ function apply(plans: { saved: Snapshot; edits: Edit[] }[]) {
 		return { saved, output };
 	});
 	for (const { saved, output } of outputs) {
+		writing?.(saved.file, saved.existed ? saved.source : undefined);
 		mkdirSync(dirname(saved.file), { recursive: true });
 		writeFileSync(saved.file, output);
 	}
@@ -536,6 +559,10 @@ export interface MoveFiles {
 	loadingModules: () => string[];
 	/** Files that may re-export a module wholesale, with `export *`. */
 	reexportingAll: () => string[];
+	/** Told the files a move will write, once it knows them and before it writes any. */
+	beforeWriting?: (files: string[]) => Promise<void>;
+	/** Told each file a move writes, with what it held before (undefined for a new file). */
+	writing?: (file: string, before: string | undefined) => void;
 }
 
 /**
@@ -556,6 +583,13 @@ export async function moveDeclaration(from: string, symbol: string, to: string, 
 		names: declaredNames(node),
 		files: files.scripts(),
 	});
+	// An import can't be assigned, and a type check of plain JavaScript may not say so.
+	if (analysis.assignedThroughImport.length)
+		throw new Error(
+			`refactor.move of ${symbol} would leave ${analysis.assignedThroughImport.join(", ")} assigned through an import, which can't be assigned; move ${symbol} together with what it assigns, or what assigns it`,
+		);
+	// The files it will write: the source, the target, and those that import or re-export the declaration.
+	await files.beforeWriting?.([from, to, ...analysis.referencing, ...files.reexportingAll()]);
 	const match = remember({ file: from, text: node.text(), node }, source);
 	return editingFiles([from, to], () =>
 		moveNodes(
@@ -602,7 +636,11 @@ function destinationIn(to: string, names: string[], dependencies: Set<string>): 
 	const uses = (candidate: SgNode) =>
 		candidate
 			.findAll({
-				rule: { any: ["identifier", "type_identifier", "shorthand_property_identifier"].map((kind) => ({ kind })) },
+				rule: {
+					any: kindsIn(lang, ["identifier", "type_identifier", "shorthand_property_identifier"]).map((kind) => ({
+						kind,
+					})),
+				},
 			})
 			.filter((node) => wanted.has(node.text()));
 	const firstUse = statements.findIndex((candidate) => uses(candidate).length > 0);
@@ -663,7 +701,7 @@ function moveNodes(
 		if (overlaps) {
 			throw new Error("Cannot move overlapping source and destination nodes");
 		}
-		apply([{ saved: source, edits: [deletion, target.edit] }]);
+		apply([{ saved: source, edits: [deletion, target.edit] }], files?.writing);
 	} else {
 		const sourceRoot = source.node.getRoot().root();
 		const targetRoot = target.saved.node.getRoot().root();
@@ -695,23 +733,26 @@ function moveNodes(
 		editingFiles(
 			importers.map((importer) => importer.file),
 			() =>
-				apply([
-					{
-						saved: source,
-						edits: [deletion, ...(plan?.source ?? []).map((edit) => ({ ...edit, parent: sourceRoot }))],
-					},
-					{ saved: target.saved, edits: [placed, ...targetEdits] },
-					...importers.map((importer) => ({
-						saved: {
-							file: importer.file,
-							displayFile: importer.file,
-							source: importer.source,
-							existed: true,
-							node: importer.root,
+				apply(
+					[
+						{
+							saved: source,
+							edits: [deletion, ...(plan?.source ?? []).map((edit) => ({ ...edit, parent: sourceRoot }))],
 						},
-						edits: importer.edits.map((edit) => ({ ...edit, parent: importer.root })),
-					})),
-				]),
+						{ saved: target.saved, edits: [placed, ...targetEdits] },
+						...importers.map((importer) => ({
+							saved: {
+								file: importer.file,
+								displayFile: importer.file,
+								source: importer.source,
+								existed: true,
+								node: importer.root,
+							},
+							edits: importer.edits.map((edit) => ({ ...edit, parent: importer.root })),
+						})),
+					],
+					files?.writing,
+				),
 		);
 	}
 }

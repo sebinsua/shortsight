@@ -319,7 +319,7 @@ await refactor.rename({ file: "src/a.ts", symbol: "User.name", to: "fullName" })
 				{ timeoutMs: 15_000 },
 			);
 
-			expect(result.exitCode).toBe(0);
+			expect(result.exitCode, result.output).toBe(0);
 			expect(await Bun.file(path.join(repo, "src/a.ts")).text()).toBe(
 				'export function readName(json: string) { let displayName = "anonymous"; ({ name: displayName } = JSON.parse(json)); return displayName; }\nexport class User { constructor(public fullName: string) {} }\nexport function make(name: string): User { return { fullName: name }; }\n',
 			);
@@ -542,6 +542,39 @@ console.log(JSON.stringify(done));`,
 			expect(await Bun.file(path.join(repo, "src/use.ts")).exists()).toBe(true);
 		});
 
+		test("an import's local alias renames by place", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/money.ts": "export function formatAmount(n: number) { return String(n); }\n",
+				"src/use.ts": 'import { formatAmount as fmt } from "./money";\nexport const s = fmt(1);\n',
+			});
+			const result = await run(
+				repo,
+				`await refactor.rename({ at: { file: "src/use.ts", line: 1 }, symbol: "fmt", to: "render" });`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/use.ts")).text()).toBe(
+				'import { formatAmount as render } from "./money";\nexport const s = render(1);\n',
+			);
+		});
+
+		test("rewriting a parameter's references keeps an object key that names it", async () => {
+			const repo = await makeRepo({
+				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+				"src/load.ts": "export function load(id: number) { return { id }; }\n",
+			});
+			const result = await run(
+				repo,
+				`sg.rewrite(await refactor.references({ file: "src/load.ts", symbol: "load.id", includeDeclaration: true }), () => "userId");`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/load.ts")).text()).toBe(
+				"export function load(userId: number) { return { id: userId }; }\n",
+			);
+		});
+
 		test("a parameter is renamed through its function, or by a place from sg or grep", async () => {
 			const repo = await makeRepo({
 				"tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
@@ -576,7 +609,7 @@ console.log(refs.map((ref) => ref.line).join(","));`,
 			expect(result.output.trim()).toBe("3,3");
 			await Bun.write(
 				path.join(repo, "src/twice.ts"),
-				"export function twice(x: number) { return [1].map((x) => x * 2); }\n",
+				"export function twice(x: number) { if (x) { const x = 2; return x; } return [1].map((x) => x * 2); }\n",
 			);
 			const ambiguous = await run(
 				repo,
@@ -587,7 +620,18 @@ console.log(refs.map((ref) => ref.line).join(","));`,
 			);
 			expect(ambiguous.exitCode).toBe(1);
 			expect(ambiguous.output).toContain(
-				'"twice.x" is declared more than once, at src/twice.ts:1:23, src/twice.ts:1:52',
+				'"twice.x" is declared more than once, at src/twice.ts:1:23, src/twice.ts:1:51',
+			);
+			await Bun.write(
+				path.join(repo, "src/once.ts"),
+				"export function once(x: number) { return [1].map((x) => x + 1); }\n",
+			);
+			const outer = await run(repo, `await refactor.rename({ file: "src/once.ts", symbol: "once.x", to: "n" });`, {
+				timeoutMs: 20_000,
+			});
+			expect(outer.exitCode, outer.output).toBe(0);
+			expect(await Bun.file(path.join(repo, "src/once.ts")).text()).toBe(
+				"export function once(n: number) { return [1].map((x) => x + 1); }\n",
 			);
 			const missing = await run(
 				repo,
@@ -598,6 +642,53 @@ console.log(refs.map((ref) => ref.line).join(","));`,
 			);
 			expect(missing.exitCode).toBe(1);
 			expect(missing.output).toContain('found no declaration named "load.missing"');
+		});
+
+		test("a dry-run move puts back an importer that reaches the source through an alias", async () => {
+			const files = {
+				"tsconfig.json": JSON.stringify({
+					compilerOptions: {
+						strict: true,
+						module: "esnext",
+						moduleResolution: "bundler",
+						paths: { "@core": ["./src/implementation.ts"] },
+					},
+				}),
+				"src/implementation.ts": "export function helper() { return 1; }\nexport const other = 2;\n",
+				"src/app.ts": 'import { helper } from "@core";\nexport const x = helper();\n',
+			};
+			const repo = await makeRepo(files);
+			const result = await run(
+				repo,
+				`console.log(JSON.stringify((await refactor.move({ file: "src/implementation.ts", symbol: "helper", to: "src/helpers.ts", dryRun: true })).files));`,
+				{ timeoutMs: 20_000 },
+			);
+			expect(result.exitCode, result.output).toBe(0);
+			expect(result.output).toContain('"src/app.ts"');
+			expect(result.changes).toEqual([]);
+			for (const [file, text] of Object.entries(files)) expect(await Bun.file(path.join(repo, file)).text()).toBe(text);
+		});
+
+		test("in plain JavaScript, a move that would assign through an import is refused", async () => {
+			const repo = await makeRepo({
+				"counter.js":
+					"let count = 0;\nexport function increment() { count++; }\nexport function read() { return count; }\nexport function local() { let count = 1; count += 1; return count; }\n",
+			});
+			for (const symbol of ["increment", "count"]) {
+				const result = await run(
+					repo,
+					`await refactor.move({ file: "counter.js", symbol: "${symbol}", to: "moved.js" });`,
+					{
+						timeoutMs: 20_000,
+					},
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.output).toContain("would leave count assigned through an import");
+			}
+			const local = await run(repo, `await refactor.move({ file: "counter.js", symbol: "local", to: "moved.js" });`, {
+				timeoutMs: 20_000,
+			});
+			expect(local.exitCode, local.output).toBe(0);
 		});
 
 		test("without a tsconfig, a captured rename is refused and a clean one applies", async () => {
@@ -615,6 +706,17 @@ console.log(refs.map((ref) => ref.line).join(","));`,
 			});
 			expect(renamed.exitCode, renamed.output).toBe(0);
 			expect(await Bun.file(path.join(repo, "a.js")).text()).toContain("Math.min(n, ceiling, max)");
+			const placed = await run(
+				repo,
+				`console.log((await refactor.references({ at: sg.one("export function clamp($$$P) { $$$B }", "a.js"), includeDeclaration: true })).length);
+await refactor.rename({ file: "a.js", symbol: "clamp.n", to: "value" });`,
+				{ timeoutMs: 15_000 },
+			);
+			expect(placed.exitCode, placed.output).toBe(0);
+			expect(placed.output.trim()).toBe("1");
+			expect(await Bun.file(path.join(repo, "a.js")).text()).toContain(
+				"function clamp(value) { const max = 5; return Math.min(value, ceiling, max); }",
+			);
 		});
 
 		test("a barrel collision is refused when the barrel re-exports through a paths alias", async () => {
@@ -3038,6 +3140,18 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		);
 	});
 
+	test("a batch says when it skips what an earlier rewrite produced", async () => {
+		const repo = await makeRepo({ "src/a.ts": "old(1);\n" });
+		const result = await run(
+			repo,
+			`sg.rewrite("old($A)", "next($A, { from: $A })", "src");
+console.log(sg.rewrite([["next($A, $B)", "last($A)"]], "src"));`,
+		);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output).toMatch(/0\n/);
+		expect(result.output).toContain("warning: sg.rewrite skipped 1 place inside text an earlier sg.rewrite produced");
+	});
+
 	test("sg.rewrite does not treat an unchanged replacement as earlier output", async () => {
 		const repo = await makeRepo({ "src/a.ts": "f(1);\nf(2);\n" });
 		const result = await run(
@@ -3481,6 +3595,22 @@ sg.rewrite("request($A, $B)", "request($A, $B, {})", "a.js");`,
 		expect(await Bun.file(path.join(repo, "a.js")).text()).toBe(
 			"async function load(u) { return await fetch(u); }\nrequest(u, { timeoutMs: t });\n",
 		);
+	});
+
+	test("a statement rewritten to end in an object literal keeps its semicolon", async () => {
+		const repo = await makeRepo({
+			"a.ts": "function f() {\n  if (cached) return readCache();\n  [1, 2].forEach(log);\n}\n",
+		});
+		const result = await run(repo, `sg.rewrite("return readCache()", "return { cached: true }", "a.ts");`);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(await Bun.file(path.join(repo, "a.ts")).text()).toContain("if (cached) return { cached: true };\n");
+	});
+
+	test("a $$$ capture of only comments is those comments", async () => {
+		const repo = await makeRepo({ "a.ts": "before();\nf( // explanation\n);\n" });
+		const result = await run(repo, `console.log(JSON.stringify(sg.one("f($$$ARGS)", "a.ts").vars.ARGS));`);
+		expect(result.exitCode, result.output).toBe(0);
+		expect(result.output.trim()).toBe('"// explanation"');
 	});
 
 	test("sg sees a file the program changed itself, even to the same length", async () => {

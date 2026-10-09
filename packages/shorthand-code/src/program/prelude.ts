@@ -29,6 +29,7 @@ import {
 	move,
 	remember,
 	NotUtf8Error,
+	kindsIn,
 	parsedFile,
 	readUtf8,
 	realPath,
@@ -134,12 +135,14 @@ function queryGraph(
 	});
 }
 
-/** A file in the graph's answer whose contents now differ from what the graph read. */
+/**
+ * Whether a file in the graph's answer now differs from what the graph read. Its contents decide when the graph
+ * gave their hash, as a file edited and put back, by a dry run, is the same file again.
+ */
 function editedSinceGraph(file: string): boolean {
 	const expected = graphSources.get(file);
 	const absolute = resolve(repositoryRoot, file);
-	if (wasEdited(absolute)) return true;
-	if (expected === undefined) return false;
+	if (expected === undefined) return wasEdited(absolute);
 	try {
 		return createHash("sha256").update(readFileSync(absolute)).digest("hex") !== expected;
 	} catch {
@@ -525,14 +528,7 @@ function scopedPath(value: unknown, helper = "sg.find"): string {
 	if (typeof value === "string") return checkedPath(value);
 	if (isGraphNode(value) || isGraphSite(value)) {
 		const file = resolve(repositoryRoot, value.file);
-		const expected = graphSources.get(value.file);
-		let current: string | undefined;
-		try {
-			current = createHash("sha256").update(readFileSync(file)).digest("hex");
-		} catch {
-			// The file disappeared after the graph snapshot.
-		}
-		if (wasEdited(file) || (expected !== undefined && current !== expected))
+		if (editedSinceGraph(value.file))
 			throw new Error(
 				`graph ranges for ${value.file} are stale: this program already edited it. Query first, then pass every node to one sg call`,
 			);
@@ -735,19 +731,22 @@ const NAMES = new Set([
 function refactorTarget(
 	helper: string,
 	options: { file?: string | GraphNode; symbol?: string; at?: SgMatch | Place },
-): { file: string; symbol?: string; position?: { line: number; character: number }; member?: boolean } {
+): { file: string; symbol?: string; position?: { line: number; character: number } } {
 	const { at } = options;
 	if (at && "node" in at) {
 		const named = NAMES.has(String(at.node.kind()))
 			? at.node
 			: ((at.node.field("name" as never) as SgNode | null) ??
-				at.node.find({ rule: { any: [...NAMES].map((kind) => ({ kind })) } }));
+				at.node.find({
+					rule: {
+						any: kindsIn(LANGUAGES[at.file.split(".").pop()!] ?? Lang.Tsx, [...NAMES]).map((kind) => ({ kind })),
+					},
+				}));
 		if (!named) throw new Error(`${helper}: the match at ${at.file}:${at.line} has no name to act on`);
 		const source = at.node.getRoot().root().text();
 		return {
 			file: gitPath(explicitPath(at.file)),
 			position: serverPosition(source, named.range().start.index),
-			member: ["property_identifier", "private_property_identifier"].includes(String(named.kind())),
 		};
 	}
 	if (at) {
@@ -942,6 +941,21 @@ function trailingLineComment(text: string, file: string): number {
 }
 
 /**
+ * Whether code is complete without a `;` after it, as a block or declaration ending in `}` is, as the grammar
+ * tells: given one more `;`, that `;` is a statement of its own rather than the code's end.
+ */
+function endsInBlock(code: string, file: string): boolean {
+	const lang = LANGUAGES[file.split(".").pop()!];
+	if (!lang) return false;
+	const last = parse(lang, `${code};`)
+		.root()
+		.children()
+		.filter((child) => child.kind() !== "comment")
+		.at(-1);
+	return last?.kind() === "empty_statement";
+}
+
+/**
  * Text in place of a whole match, fitted to the code around it as ast-grep's fix does with expandEnd, so the match
  * is replaced as the pattern spelled it: a comment after it that the text doesn't carry stays, a statement keeps
  * the `;` the pattern left out (`const $X = load()` matches `const x = load();`), a shorthand property keeps its
@@ -961,7 +975,7 @@ function fitted(edit: Edit, match: SgMatch, file: string): Edit {
 		insertedText = memberReferences.has(match) ? `${insertedText}: ${node.text()}` : `${node.text()}: ${insertedText}`;
 	const comment = trailingLineComment(insertedText, file);
 	const code = (comment >= 0 ? insertedText.slice(0, comment) : insertedText).trimEnd();
-	const block = code.endsWith("}") && String(node.kind()).endsWith("statement");
+	const block = endsInBlock(code, file);
 	// The statement's own `;`, its last token other than a comment.
 	const semicolon = node
 		.children()
@@ -1313,6 +1327,17 @@ function explainNested(nested: readonly SgMatch[]): void {
 }
 
 /** Rewrites patterns or existing selections; returns matches producing edits, not individual edits. */
+/** Says once per program that a rewrite skipped places inside text an earlier one wrote: it applies to every later one. */
+function explainSkipped(skipped: SgMatch[]): void {
+	if (skipped.length > 0 && !explainedSkips) {
+		explainedSkips = true;
+		const example = skipped[0]!;
+		console.error(
+			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite; to apply related rules to the original code together, pass them as one batch: sg.rewrite([[pattern, replacement], ...], files).`,
+		);
+	}
+}
+
 /**
  * Several rules applied together, as ast-grep's CLI applies a rule file: each to the text as it was before any of
  * them, so one can't rewrite what another wrote. A node two rules match is the earlier rule's; where matches
@@ -1332,6 +1357,7 @@ function rewriteRules(rules: readonly RewriteRule[], files: FileScope = "."): nu
 	const searches = rules.map(([pattern]) => patternSearch("sg.rewrite", pattern));
 	const matched = rules.map(() => 0);
 	const nested: SgMatch[] = [];
+	const skipped: SgMatch[] = [];
 	let count = 0;
 	for (const file of sourceFiles("sg.rewrite", files)) {
 		count += editingFiles([file], () => {
@@ -1355,6 +1381,7 @@ function rewriteRules(rules: readonly RewriteRule[], files: FileScope = "."): nu
 			}
 			const all = [...replacements.keys()];
 			const earlier = insideEarlierOutput(file, parsed.source, all);
+			skipped.push(...earlier);
 			return applyRewrites(
 				all.filter((match) => !earlier.has(match)),
 				replacements,
@@ -1365,6 +1392,7 @@ function rewriteRules(rules: readonly RewriteRule[], files: FileScope = "."): nu
 	}
 	for (const search of searches) search.finish();
 	explainNested(nested);
+	explainSkipped(skipped);
 	for (const [index, [pattern]] of rules.entries())
 		if (matched[index] === 0)
 			console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(files)}`);
@@ -1437,14 +1465,7 @@ function rewrite(...[target, replacement, files]: RewriteArgs): number {
 	if (matched === 0) {
 		console.error(`warning: sg.rewrite matched nothing for ${JSON.stringify(pattern)} in ${describeScope(scope)}`);
 	}
-	// The explanation applies to every later rewrite too, so it is given once per program.
-	if (skipped.length > 0 && !explainedSkips) {
-		explainedSkips = true;
-		const example = skipped[0]!;
-		console.error(
-			`warning: sg.rewrite skipped ${skipped.length} place${skipped.length === 1 ? "" : "s"} inside text an earlier sg.rewrite produced, e.g. ${gitPath(example.file)}:${example.line} ${example.text.split("\n")[0]}. Rewrites apply one after another, so this pattern would have rewritten that output a second time. To rewrite those places anyway, select them with sg.find and pass the matches to sg.rewrite; to apply related rules to the original code together, pass them as one batch: sg.rewrite([[pattern, replacement], ...], files).`,
-		);
-	}
+	explainSkipped(skipped);
 	return count;
 }
 
@@ -1486,7 +1507,7 @@ function toMatch(
 			const lastItem = nodes.findLastIndex((item) => item.isNamed() && item.kind() !== "comment");
 			let text =
 				first && lastItem >= 0 ? source.slice(first.range().start.index, nodes[lastItem]!.range().end.index) : "";
-			let cursor = lastItem >= 0 ? nodes[lastItem]!.range().end.index : 0;
+			let cursor = lastItem >= 0 ? nodes[lastItem]!.range().end.index : (first?.range().start.index ?? 0);
 			for (const item of nodes.slice(lastItem + 1)) {
 				if (item.kind() === "comment") text += source.slice(cursor, item.range().end.index);
 				cursor = item.range().end.index;
@@ -1547,7 +1568,7 @@ function referenceMatchesIn(locations: ReferenceLocation[]): SgMatch[] {
 		const node = document.root
 			.findAll({
 				rule: {
-					any: [
+					any: kindsIn(LANGUAGES[file.split(".").pop()!] ?? Lang.Tsx, [
 						"identifier",
 						"type_identifier",
 						"property_identifier",
@@ -1555,7 +1576,7 @@ function referenceMatchesIn(locations: ReferenceLocation[]): SgMatch[] {
 						"shorthand_property_identifier",
 						"shorthand_property_identifier_pattern",
 						"string_fragment",
-					].map((kind) => ({ kind })),
+					]).map((kind) => ({ kind })),
 				},
 			})
 			.find((candidate) => {
@@ -1660,13 +1681,10 @@ const globals = {
 		) =>
 			logged("refactor.references", [options], async () => {
 				const { at: _at, ...rest } = options as typeof options & { at?: unknown };
-				const { member, ...target } = refactorTarget("refactor.references", options);
-				const prepared = { ...rest, ...target };
+				const prepared = { ...rest, ...refactorTarget("refactor.references", options) };
 				const { references } = await import("../refactor/typescript-refactors.ts");
-				return referenceMatches(
-					await references(repositoryRoot, prepared as ReferencesOptions),
-					member || String(prepared.symbol).includes("."),
-				);
+				const found = await references(repositoryRoot, prepared as ReferencesOptions);
+				return referenceMatches(found.locations, found.member);
 			}),
 		move: (options: { file: string | GraphNode; symbol?: string; to: string; dryRun?: boolean }) =>
 			logged("refactor.move", [options], async () => {

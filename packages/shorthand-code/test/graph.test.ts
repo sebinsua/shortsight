@@ -193,6 +193,22 @@ await graph.query({ type: "lookup", query: "use" });
 	);
 }, 45_000);
 
+test("a dry run leaves the graph's answers current, and its nodes usable as a scope", async () => {
+	const { cwd } = await fixture();
+	const outcome = await run(
+		cwd,
+		`
+const node = (await graph.query({ type: "lookup", query: "use" })).nodes.find(n => n.name === "use");
+await refactor.rename({ file: "src/callers.ts", symbol: "use", to: "consume", dryRun: true });
+await graph.query({ type: "lookup", query: "use" });
+console.log("matches", sg.find("service.run($N)", node).length);
+`,
+	);
+	expect(outcome.exitCode, outcome.output).toBe(0);
+	expect(outcome.output).not.toContain("warning: graph.query");
+	expect(outcome.output).toContain("matches 2");
+}, 45_000);
+
 test("wrong graph structures explain the usable scope", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(
