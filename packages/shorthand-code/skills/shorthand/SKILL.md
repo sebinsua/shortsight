@@ -98,7 +98,8 @@ const [found, callers] = await graph.query([
 Each result has `nodes`, symbols with `file` and line `ranges`, and `edges`, with `from`, `to`,
 `kind` and `at` for where each relationship happens. `lookup` finds symbols by name, `trace` follows
 callers (`direction: "reverse"`) or callees (`"forward"`), and `details` shows what a symbol uses.
-`sightread --help` lists every field.
+`sightread --help` lists every field. The graph shows the code as it was before the program ran, so
+query it before editing.
 
 Pass nodes to `sg` as its scope to search only those symbols' lines:
 

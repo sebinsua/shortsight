@@ -127,7 +127,45 @@ function queryGraph(request: Record<string, unknown>[]): Promise<GraphResult[]>;
 function queryGraph(
 	request: Record<string, unknown> | Record<string, unknown>[],
 ): Promise<GraphResult | GraphResult[]> {
-	return logged("graph.query", [request], () => (Array.isArray(request) ? graphQuery(request) : graphQuery(request)));
+	return logged("graph.query", [request], async () => {
+		const result = Array.isArray(request) ? await graphQuery(request) : await graphQuery(request);
+		warnEditedSinceGraph([result].flat());
+		return result;
+	});
+}
+
+/** A file in the graph's answer whose contents now differ from what the graph read. */
+function editedSinceGraph(file: string): boolean {
+	const expected = graphSources.get(file);
+	const absolute = resolve(repositoryRoot, file);
+	if (wasEdited(absolute)) return true;
+	if (expected === undefined) return false;
+	try {
+		return createHash("sha256").update(readFileSync(absolute)).digest("hex") !== expected;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * The graph reads the repository as it was before the program ran, not the program's own edits: say so when an
+ * answer includes a file the program has edited.
+ */
+function warnEditedSinceGraph(results: GraphResult[]): void {
+	const files = new Set<string>();
+	for (const result of results) {
+		for (const node of result.nodes ?? []) if (node.file) files.add(node.file);
+		for (const edge of result.edges ?? []) if (edge.at?.file) files.add(edge.at.file);
+	}
+	const edited = [...files].filter(editedSinceGraph).toSorted();
+	if (!edited.length) return;
+	const named =
+		edited.length === 1
+			? edited[0]
+			: `${edited[0]} and ${edited.length - 1} other file${edited.length === 2 ? "" : "s"}`;
+	console.error(
+		`warning: graph.query: ${named} ${edited.length === 1 ? "was" : "were"} edited by this program, and the graph shows ${edited.length === 1 ? "it" : "them"} as before the run. For the current code, use refactor.references or sg.`,
+	);
 }
 
 function report(event: Record<string, unknown>) {

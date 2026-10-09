@@ -175,6 +175,24 @@ try { sg.find("service.run($N)", node); } catch (error) { console.log(error.mess
 	);
 }, 45_000);
 
+test("a graph answer that includes a file the program edited says it shows the file as before the run", async () => {
+	const { cwd } = await fixture();
+	const outcome = await run(
+		cwd,
+		`
+await graph.query({ type: "lookup", query: "use" });
+const source = await Bun.file("src/callers.ts").text();
+await Bun.write("src/callers.ts", source.replace("service.run(1)", "service.run(10)"));
+await graph.query({ type: "lookup", query: "use" });
+`,
+	);
+	expect(outcome.exitCode).toBe(0);
+	expect(outcome.output.match(/warning: graph\.query/g)).toHaveLength(1);
+	expect(outcome.output).toContain(
+		"warning: graph.query: client/src/callers.ts was edited by this program, and the graph shows it as before the run. For the current code, use refactor.references or sg.",
+	);
+}, 45_000);
+
 test("wrong graph structures explain the usable scope", async () => {
 	const { cwd } = await fixture();
 	const outcome = await run(

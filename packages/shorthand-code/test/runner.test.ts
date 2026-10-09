@@ -867,7 +867,8 @@ console.log((await graph.query({ type: "lookup", query: "Session.refresh" })).no
 				{ timeoutMs: 20_000 },
 			);
 			expect(result.exitCode, result.output).toBe(0);
-			expect(result.output.trim()).toBe("Session.refresh");
+			expect(result.output).toContain("warning: graph.query: src/a.ts was edited by this program");
+			expect(result.output.trim().split("\n").at(-1)).toBe("Session.refresh");
 			const text = await Bun.file(path.join(repo, "src/a.ts")).text();
 			expect(text).toContain("export enum Perm { View = 1, Write = 2, ReadWrite = View | Write }");
 			expect(text).toContain("constructor(private readonly database: number) { register({ db: database }); }");
