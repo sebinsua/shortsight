@@ -40,8 +40,8 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "1.30.1",
-		"@ttsc/graph": "0.33.1",
-		"ttsc": "0.33.1",
+		"@ttsc/graph": "0.34.0",
+		"ttsc": "0.34.0",
 		"typescript": "7.0.2"
 	},
 	"engines": {
