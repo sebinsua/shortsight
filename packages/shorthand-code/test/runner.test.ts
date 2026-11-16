@@ -4034,7 +4034,7 @@ sg.rewrite({ rule: { kind: "property_identifier", regex: "^B$", inside: { kind: 
 		]);
 	});
 
-	test("a single named file is selected as Git sees it", async () => {
+	test("a single named file is selected if it exists, even when Git ignores it", async () => {
 		const repo = await makeRepo({
 			".gitignore": "src/ignored.ts\n",
 			"src/tracked.ts": "oldApi(1);\n",
@@ -4048,7 +4048,7 @@ const files = ["src/tracked.ts", "src/deleted.ts", "src/ignored.ts"];
 console.log(JSON.stringify(files.map((file) => sg.find("oldApi($A)", file).length)));`,
 		);
 
-		expect(JSON.parse(result.output.trim().split("\n").at(-1)!)).toEqual([1, 0, 0]);
+		expect(JSON.parse(result.output.trim().split("\n").at(-1)!)).toEqual([1, 0, 1]);
 	});
 
 	test("a list of scopes selects the same files as each scope on its own", async () => {
@@ -4071,7 +4071,7 @@ console.log(JSON.stringify([files(scopes), [...new Set(scopes.flatMap(files))].t
 
 		const [together, separately] = JSON.parse(result.output.trim().split("\n").at(-1)!);
 		expect(together.toSorted()).toEqual(separately);
-		expect(separately).toEqual(["lib/three.js", "lib/two.ts", "src/a/one.ts"]);
+		expect(separately).toEqual(["lib/three.js", "lib/two.ts", "src/a/one.ts", "src/ignored.ts"]);
 	});
 
 	test("sg warns when the files it's given contain no JS/TS files", async () => {
