@@ -314,13 +314,14 @@ test("a member with no graph node starts from its references, then follows each 
 	}
 });
 
+const neighbour = (id: string, relation: string, line: number) => ({
+	...symbol(id),
+	file: id.split("#")[0],
+	relation,
+	evidence: { file: id.split("#")[0], startLine: line, startCol: 1, endLine: line, endCol: 2 },
+});
+
 test("--in keeps each details neighbour list pointing at its own edges", async () => {
-	const neighbour = (id: string, relation: string, line: number) => ({
-		...symbol(id),
-		file: id.split("#")[0],
-		relation,
-		evidence: { file: id.split("#")[0], startLine: line, startCol: 1, endLine: line, endCol: 2 },
-	});
 	const detailsClient: GraphClient = {
 		...client,
 		query: async () => ({
@@ -355,8 +356,9 @@ test("--in keeps each details neighbour list pointing at its own edges", async (
 	expect(named("dependedOnBy")).toEqual(["src/a.ts#inside:function → src/a.ts#get:function"]);
 });
 
+const tourSeed = (id: string, line: number) => ({ ...symbol(id), file: id.split("#")[0], line });
+
 test("--in keeps a tour's steps pointing at its own edges", async () => {
-	const seed = (id: string, line: number) => ({ ...symbol(id), file: id.split("#")[0], line });
 	const tourClient: GraphClient = {
 		...client,
 		query: async () => ({
@@ -364,9 +366,9 @@ test("--in keeps a tour's steps pointing at its own edges", async () => {
 				result: {
 					type: "tour",
 					seeds: [
-						seed("src/b.ts#outside:function", 3),
-						seed("src/a.ts#inside:function", 4),
-						seed("src/a.ts#target:function", 1),
+						tourSeed("src/b.ts#outside:function", 3),
+						tourSeed("src/a.ts#inside:function", 4),
+						tourSeed("src/a.ts#target:function", 1),
 					],
 					primaryFlow: {
 						steps: ["outside -[calls at src/b.ts:3]-> target", "inside -[calls at src/a.ts:4]-> target"],
@@ -522,6 +524,16 @@ test("a member with no node follows focus from its first hop", async () => {
 	}
 });
 
+const usedBy = (dependents: unknown[]): GraphClient => ({
+	...client,
+	query: async (request) => ({
+		value: {
+			result: { type: request.type, nodes: [{ ...symbol("a.ts#first:function"), dependedOnBy: dependents }] },
+		},
+		isError: false,
+	}),
+});
+
 test("a member with no node, traced one level, says when its users have users of their own", async () => {
 	const root = mkdtempSync(join(realpathSync("/tmp"), "sr-nodeless-depth-"));
 	writeFileSync(join(root, "a.ts"), "export function first() { return box.prop; }\n");
@@ -542,20 +554,13 @@ test("a member with no node, traced one level, says when its users have users of
 		reexport: async () => undefined,
 		close: async () => {},
 	} as unknown as ReferenceIndex;
-	const used = (dependents: unknown[]): GraphClient => ({
-		...client,
-		query: async (request) => ({
-			value: {
-				result: { type: request.type, nodes: [{ ...symbol("a.ts#first:function"), dependedOnBy: dependents }] },
-			},
-			isError: false,
-		}),
-	});
 	try {
 		const trace = (graph: GraphClient) =>
 			traceWith({ client: graph, ranges: nodeless, references, root }, { from: "a.ts#Box.prop:variable", maxDepth: 1 });
-		expect((await trace(used([{ ...symbol("a.ts#outer:function"), relation: "calls" }]))).raise).toBe("trace.maxDepth");
-		expect((await trace(used([]))).raise).toBeUndefined();
+		expect((await trace(usedBy([{ ...symbol("a.ts#outer:function"), relation: "calls" }]))).raise).toBe(
+			"trace.maxDepth",
+		);
+		expect((await trace(usedBy([]))).raise).toBeUndefined();
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

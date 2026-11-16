@@ -5,7 +5,6 @@
 
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type Theme, truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 import { type Component, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -21,6 +20,14 @@ import {
 	textForModel,
 } from "shorthand-code";
 import { callLine, resultLines, unstructuredResultText } from "./display.ts";
+
+/**
+ * A string enum as a plain `{ type: "string", enum }`, which every provider accepts. Pi's own StringEnum no
+ * longer returns a TypeBox schema, so Type.Object can't infer a parameter's type from it.
+ */
+function StringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+}
 
 const DESCRIPTION = `Edit repository files with a TypeScript program run by Bun. Best for changes across many files, repeated edits and semantic TypeScript renames or moves; a small change to one file is quicker as a direct edit. Top-level await and ordinary Bun/Node APIs work. Use repository-relative paths. Only edits files inside a git repository; use edit or write for anything else. Set cwd to a checkout path when Pi's working directory is outside the repository, such as a child worktree in a bare worktree container. The program runs in an isolated workspace; changes apply on successful exit by default and the tool reports the diff. Tests, type-checks and builds belong outside the program: in a shell call, or, when a codemode script calls shorthand, later in that script.
 

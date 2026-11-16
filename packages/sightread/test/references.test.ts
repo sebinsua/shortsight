@@ -513,19 +513,20 @@ test("a nested project keeps repository handles through the complete graph walk"
 	}
 });
 
+const wideTrace = (maxNodes: number) =>
+	(
+		JSON.parse(
+			runIn(wide, "--json", JSON.stringify({ type: "trace", from: "hub", direction: "forward", maxNodes })).out,
+		) as Array<{ nodes: unknown[]; raise?: string; note?: string }>
+	)[0]!;
+
 test("a forward trace past 32 symbols gets as many as it asks for, and is told to raise maxNodes for more", () => {
-	const trace = (maxNodes: number) =>
-		(
-			JSON.parse(
-				runIn(wide, "--json", JSON.stringify({ type: "trace", from: "hub", direction: "forward", maxNodes })).out,
-			) as Array<{ nodes: unknown[]; raise?: string; note?: string }>
-		)[0]!;
 	// hub, its 40 direct callees and the target they call.
-	const all = trace(100);
+	const all = wideTrace(100);
 	expect(all.nodes.length).toBe(42);
 	expect(all.raise).toBeUndefined();
 	expect(all.note).toBeUndefined();
-	const some = trace(35);
+	const some = wideTrace(35);
 	expect(some.nodes.length).toBe(36);
 	expect(some.raise).toBe("trace.maxNodes");
 });

@@ -196,11 +196,12 @@ test("every member resolves by name, and references find each use", () => {
 	expect(found).toEqual({ ...expected, "Lit.missing": expect.stringContaining("Lit.missing not found") });
 });
 
+const containers = (symbol: string) =>
+	query<{ nodes: Array<{ in?: { handle: string } }> }>({ type: "references", symbol }).nodes.map(
+		(node) => node.in?.handle,
+	);
+
 test("a reference names the innermost declaration the graph has a node for", () => {
-	const containers = (symbol: string) =>
-		query<{ nodes: Array<{ in?: { handle: string } }> }>({ type: "references", symbol }).nodes.map(
-			(node) => node.in?.handle,
-		);
 	expect(containers("src/decl.ts#Cls.\\#priv:variable")).toEqual([
 		"src/decl.ts#Cls.acc:method",
 		"src/decl.ts#Cls.method.methodLocal:variable",

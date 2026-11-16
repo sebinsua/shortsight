@@ -1608,6 +1608,9 @@ function referenceMatchesIn(locations: ReferenceLocation[]): SgMatch[] {
 		}
 		const start = range.start;
 		const end = range.end;
+		// The server counts characters after a byte order mark; ast-grep's columns on line 0 include it.
+		const marked = document.source.startsWith("\uFEFF");
+		const bom = (line: number) => (line === 0 && marked ? 1 : 0);
 		const node = document.root
 			.findAll({
 				rule: {
@@ -1624,8 +1627,6 @@ function referenceMatchesIn(locations: ReferenceLocation[]): SgMatch[] {
 			})
 			.find((candidate) => {
 				const span = candidate.range();
-				// The server counts characters after a byte order mark; ast-grep's columns on line 0 include it.
-				const bom = (line: number) => (line === 0 && document!.source.startsWith("\uFEFF") ? 1 : 0);
 				return (
 					span.start.line === start.line &&
 					span.start.column === start.character + bom(start.line) &&

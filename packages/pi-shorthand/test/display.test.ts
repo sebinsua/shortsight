@@ -187,6 +187,15 @@ describe("the verdict", () => {
 	});
 });
 
+const modelText = (overrides: Partial<RunResult>) =>
+	textForModel(
+		result({
+			diagnostics: { spans: [], counters: {}, wallMs: 700, startupMs: 10, runnerMs: 690, responseMs: 0 },
+			...overrides,
+		}),
+		{ name: "test", truncateHead: keep, truncateTail: keep },
+	);
+
 describe("unstructured completed results", () => {
 	test("infrastructure diagnostics appear once in muted text", () => {
 		const calls: Array<{ color: string; text: string }> = [];
@@ -219,16 +228,10 @@ describe("unstructured completed results", () => {
 	});
 
 	test("the model sees timing for a timeout, but not for an ordinary error", () => {
-		const text = (overrides: Partial<RunResult>) =>
-			textForModel(
-				result({
-					diagnostics: { spans: [], counters: {}, wallMs: 700, startupMs: 10, runnerMs: 690, responseMs: 0 },
-					...overrides,
-				}),
-				{ name: "test", truncateHead: keep, truncateTail: keep },
-			);
-		expect(text({ exitCode: 1, output: "TypeError: m.text is not a function\n" })).not.toContain("runner startup/IPC");
-		expect(text({ exitCode: 1, timedOut: true })).toContain("runner startup/IPC");
+		expect(modelText({ exitCode: 1, output: "TypeError: m.text is not a function\n" })).not.toContain(
+			"runner startup/IPC",
+		);
+		expect(modelText({ exitCode: 1, timedOut: true })).toContain("runner startup/IPC");
 	});
 
 	test("slow startup prints diagnostics even when the runner itself was quick", () => {

@@ -195,9 +195,9 @@ export class NfsObserver {
 				this.journal.refuse(
 					`renaming the directory ${JSON.stringify(from[0])} isn't supported on macOS, since its files would be lost; move them one at a time instead`,
 				);
+			const moved = (old: string) => old === from[0] || old.startsWith(`${from[0]}/`);
 			return (response) => {
 				if (response.u32() !== 0) return;
-				const moved = (old: string) => old === from[0] || old.startsWith(`${from[0]}/`);
 				for (const old of [...this.appleDouble].filter(moved)) {
 					this.appleDouble.delete(old);
 					this.appleDouble.add(to[0] + old.slice(from[0].length));

@@ -32,11 +32,11 @@
 		"./package.json": "./package.json"
 	},
 	"dependencies": {
-		"@ast-grep/cli": "^0.45.3",
-		"@ast-grep/napi": "^0.45.3",
+		"@ast-grep/cli": "^0.51.3",
+		"@ast-grep/napi": "^0.51.3",
 		"diff": "^9.0.0",
 		"typescript": "7.0.2",
-		"vscode-jsonrpc": "^9.0.2"
+		"vscode-jsonrpc": "^10.0.0"
 	},
 	"peerDependencies": {
 		"sightread": "0.18.0"

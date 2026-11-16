@@ -309,19 +309,24 @@ test("a name that is a symbol's full name doesn't also match members named its l
 	expect(preferFullName(handles.slice(1), "hashPassword")).toEqual(["src/hash.ts#Other.hashPassword:method"]);
 });
 
+const truncatedPath = (reason: string) =>
+	normalizeResult(
+		{ type: "trace", from: "a", to: "b" },
+		{ next: { action: "inspect", reason }, result: { type: "trace", path: [], truncated: true } },
+		ranges,
+	);
+
 test("a truncated path names the bound the graph says stopped it", async () => {
-	const path = (reason: string) =>
-		normalizeResult(
-			{ type: "trace", from: "a", to: "b" },
-			{ next: { action: "inspect", reason }, result: { type: "trace", path: [], truncated: true } },
-			ranges,
-		);
 	expect(
-		(await path("Re-run with a larger `maxDepth` or `complete: true` to search the entire admitted graph.")).raise,
+		(await truncatedPath("Re-run with a larger `maxDepth` or `complete: true` to search the entire admitted graph."))
+			.raise,
 	).toBe("trace.maxDepth");
 	expect(
-		(await path("No path was found, but the walk did not follow a dispatch fanout of 12 or more implementations."))
-			.raise,
+		(
+			await truncatedPath(
+				"No path was found, but the walk did not follow a dispatch fanout of 12 or more implementations.",
+			)
+		).raise,
 	).toBe("trace.complete");
 });
 
