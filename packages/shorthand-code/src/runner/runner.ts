@@ -128,7 +128,6 @@ export interface Overlay {
 	executionExcludesFile?: string; // sandbox-visible path when the host temporary path is hidden
 	environment?: Record<string, string>; // backend-specific environment inside the sandbox
 	formattingAvailable?: boolean; // populated by change discovery when the backend can inspect formatter configuration
-	ignoredPaths?: string[]; // final ignore policy for the candidates returned by changes()
 	wrap(command: string[], cwd: string): string[]; // makes a command run inside the overlay
 	terminateProcesses?(): Promise<void>; // backend lifecycle boundary for descendants outside our process group
 	stopProgram?(pid: number): void; // permit the observer to reap tracees and finish its journal
@@ -947,20 +946,14 @@ async function filesOpenForWriting(dir: string, forceFailure: boolean): Promise<
 
 // ── Finding, describing and applying changes ──────────────────────────────────────
 
-/** Compares what the overlay reports with the originals. Only files git sees count. */
+/** Compares what the overlay reports with the originals. Git's ignore rules don't matter here: they only narrow searches. */
 async function findChanges(overlay: Overlay): Promise<Change[]> {
 	const candidates = (await overlay.changes()).filter(({ file }) => path.basename(file) !== PROGRAM_FILE);
-	const ignored = overlay.ignoredPaths
-		? new Set(overlay.ignoredPaths)
-		: await gitIgnored(
-				overlay,
-				candidates.map(({ file }) => file),
-			);
 
 	const changes: Change[] = [];
 	const seen = new Set<string>(); // an overlay may report a file twice, e.g. a deleted directory and the files in it
 	for (const { file, entry: after } of candidates) {
-		if (ignored.has(file) || seen.has(file)) continue;
+		if (seen.has(file)) continue;
 		seen.add(file);
 		const before = await overlay.original(file);
 		if (!before && !after) continue;
@@ -968,18 +961,6 @@ async function findChanges(overlay: Overlay): Promise<Change[]> {
 		changes.push({ file, before, after });
 	}
 	return changes.toSorted((a, b) => a.file.localeCompare(b.file));
-}
-
-/** Apply the final overlay's ignore policy; Git itself preserves every path already in the index. */
-async function gitIgnored(overlay: Overlay, files: string[]): Promise<Set<string>> {
-	if (files.length === 0) return new Set();
-	const input = new Response(`${files.join("\0")}\0`);
-	const command = overlay.wrap(["git", "check-ignore", "-z", "--stdin"], overlay.executionDir);
-	const result = await $`${command} < ${input}`.cwd(overlay.executionDir).nothrow().quiet();
-	if (result.exitCode > 1) {
-		throw new Error(`Could not evaluate final ignore rules: ${result.stderr.toString().trim()}`);
-	}
-	return new Set(result.stdout.toString().split("\0").filter(Boolean));
 }
 
 interface PreparedChange {

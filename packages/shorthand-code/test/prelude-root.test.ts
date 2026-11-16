@@ -61,3 +61,50 @@ test("standalone prelude still discovers the Git root from a nested directory", 
 	expect(result).toEqual({ stdout: "ready\n", stderr: "", exitCode: 0 });
 	expect(await fs.readFile(marker, "utf8")).toBe("rev-parse\n");
 });
+
+test("ignore rules narrow a broad search, but a scope that names an ignored path is searched", async () => {
+	const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "shorthand-prelude-ignored-")));
+	temporary.push(root);
+	const files = {
+		".gitignore": "scratch/\nnode_modules/\n",
+		"src/a.ts": "oldApi(1);\n",
+		"scratch/check.ts": "oldApi(2);\n",
+		"scratch/notes/plan.md": "oldApi in prose\n",
+		"scratch/nested/inner.ts": "oldApi(3);\n",
+		"node_modules/x/index.ts": "oldApi(4);\n",
+	};
+	for (const [file, contents] of Object.entries(files)) {
+		await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
+		await fs.writeFile(path.join(root, file), contents);
+	}
+	for (const directory of [root, path.join(root, "scratch/nested")]) {
+		expect(await Bun.spawn(["git", "init", "-q"], { cwd: directory }).exited).toBe(0);
+	}
+	const result = await runPrelude(
+		root,
+		`const files = (matches) => [...new Set(matches.map((match) => match.file))];
+		console.log(JSON.stringify({
+			broad: [glob("**/*"), files(grep("oldApi")), files(sg.find("oldApi($A)", "."))],
+			directory: [glob("**/*", "scratch"), files(grep("oldApi", "scratch")), files(sg.find("oldApi($A)", "scratch"))],
+			pattern: [glob("scratch/**/*.md"), files(grep(/oldApi/, "scratch/*.ts"))],
+			file: [glob("scratch/check.ts"), files(sg.find("oldApi($A)", "scratch/check.ts"))],
+			mixed: files(grep("oldApi", ["src", "scratch/check.ts"])),
+			missing: glob("scratch/absent/*.ts"),
+		}));`,
+		{ PI_SHORTHAND_EXECUTION_ROOT: "" },
+	);
+	expect(result.stderr).toBe("");
+	expect(JSON.parse(result.stdout)).toEqual({
+		broad: [[".gitignore", "src/a.ts"], ["src/a.ts"], ["src/a.ts"]],
+		// A nested repository's files are its own.
+		directory: [
+			["scratch/check.ts", "scratch/notes/plan.md"],
+			["scratch/check.ts", "scratch/notes/plan.md"],
+			["scratch/check.ts"],
+		],
+		pattern: [["scratch/notes/plan.md"], ["scratch/check.ts"]],
+		file: [["scratch/check.ts"], ["scratch/check.ts"]],
+		mixed: ["src/a.ts", "scratch/check.ts"],
+		missing: [],
+	});
+});

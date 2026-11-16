@@ -2289,18 +2289,22 @@ await Bun.sleep(30_000);`,
 			expect(await Bun.file(path.join(repo, "tracked.tmp")).text()).toBe("after\n");
 		});
 
-		test("adding an ignore rule omits a file created by the same transaction", async () => {
-			const repo = await makeRepo({ ".gitignore": "" });
+		test("applies changes to files Git ignores, new and existing", async () => {
+			const repo = await makeRepo({ ".gitignore": "scratch/\n", "scratch/plan.md": "old\n" });
 
 			const result = await run(
 				repo,
-				`await Bun.write(".gitignore", "new.txt\\n");
-			await Bun.write("new.txt", "ignored\\n");`,
+				`await Bun.write("scratch/plan.md", "new\\n");
+			await Bun.write("scratch/notes.md", "notes\\n");
+			await Bun.write(".gitignore", "scratch/\\nlate.txt\\n");
+			await Bun.write("late.txt", "late\\n");`,
 			);
 
-			expect(result.applied).toEqual([".gitignore"]);
-			expect(result.changes.map((change) => change.path)).toEqual([".gitignore"]);
-			expect(await Bun.file(path.join(repo, "new.txt")).exists()).toBe(false);
+			expect(result.applied).toEqual([".gitignore", "late.txt", "scratch/notes.md", "scratch/plan.md"]);
+			expect(result.changes.map((change) => change.path)).toEqual(result.applied);
+			expect(await Bun.file(path.join(repo, "scratch/plan.md")).text()).toBe("new\n");
+			expect(await Bun.file(path.join(repo, "scratch/notes.md")).text()).toBe("notes\n");
+			expect(await Bun.file(path.join(repo, "late.txt")).text()).toBe("late\n");
 		});
 	});
 
@@ -2996,7 +3000,7 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		expect(await Bun.file(path.join(repo, "b.ts")).text()).toBe("newApi(2);\n");
 	});
 
-	test("sg file targets explicitly select ignored files without changing apply eligibility", async () => {
+	test("sg file targets select ignored files, and their edits are applied", async () => {
 		const repo = await makeRepo({ ".gitignore": "ignored.ts\n", "a.ts": "oldApi(1);\n", "ignored.ts": "oldApi(2);\n" });
 		const result = await run(
 			repo,
@@ -3010,8 +3014,8 @@ describe.skipIf(!hasOverlay)("prelude", () => {
 		);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim().split("\n")).toEqual(["1", "2", "1", "newApi(2);"]);
-		expect(result.applied).toEqual([]);
-		expect(await Bun.file(path.join(repo, "ignored.ts")).text()).toBe("oldApi(2);\n");
+		expect(result.applied).toEqual(["ignored.ts"]);
+		expect(await Bun.file(path.join(repo, "ignored.ts")).text()).toBe("newApi(2);\n");
 	});
 
 	test("sg rejects missing or escaped targets before rewriting any file", async () => {
@@ -4000,7 +4004,7 @@ sg.rewrite({ rule: { kind: "property_identifier", regex: "^B$", inside: { kind: 
 		expect(JSON.parse(result.output)).toEqual([["src/a.ts"], ["src/a.ts"]]);
 	});
 
-	test("glob and sg normalize scopes and exclude explicitly named ignored files", async () => {
+	test("glob and sg normalize scopes and search an ignored file only when a scope names it", async () => {
 		const repo = await makeRepo({
 			".gitignore": "src/ignored.ts\n",
 			"src/a.ts": "oldApi(1);\n",
@@ -4016,7 +4020,7 @@ sg.rewrite({ rule: { kind: "property_identifier", regex: "^B$", inside: { kind: 
 				sg.find("<p>$A</p>", "./src").map((match) => match.file),
 				sg.find("<p>$A</p>", absolute).map((match) => match.file),
 				sg.find("oldApi($A)", "src/a.ts").map((match) => match.file),
-				sg.find("oldApi($A)", "src/ignored.ts").length,
+				sg.find("oldApi($A)", "src/ignored.ts").map((match) => match.file),
 			]));`,
 		);
 
@@ -4026,7 +4030,7 @@ sg.rewrite({ rule: { kind: "property_identifier", regex: "^B$", inside: { kind: 
 			["src/a.html"],
 			["src/a.html"],
 			["src/a.ts"],
-			0,
+			["src/ignored.ts"],
 		]);
 	});
 

@@ -52,8 +52,9 @@ an empty selection returns zero. Syntax fields and node kinds depend on the lang
 
 `sg.find` and `sg.rewrite` handle JS, TS, TSX, HTML and CSS. Scopes accept files, directories,
 globs or arrays. Paths may be relative or absolute within the editing workspace; results use
-repository-relative paths. String scopes use Git's tracked and non-ignored files. An explicit
-`sg.file()` target can also select an ignored JS/TS file; only files Git sees are applied afterward.
+repository-relative paths. Git's ignore rules only narrow a broad search: a scope such as `"."` or
+`"src"` skips ignored files, while a scope that names an ignored file or directory (`"scratch/plan.ts"`,
+`"scratch/**/*.ts"`) is searched. Every change the program makes is applied, ignored or not.
 
 ## Inserting, moving and removing syntax
 
@@ -120,6 +121,7 @@ The bundled TypeScript 7 package does not expose the legacy compiler API (`creat
 
 ```ts
 glob("src/**/*.ts"); // sorted paths Git sees
+glob("scratch/**/*.md"); // naming an ignored directory lists its files; grep does the same
 grep("oldApi(", "src"); // [{ file, line, text }]; accepts a RegExp too
 const files = await $`git ls-files`.text();
 ```

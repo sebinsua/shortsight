@@ -7,7 +7,8 @@
  *
  * Most helpers are synchronous; semantic TypeScript refactors return promises.
  * File lists come from git (tracked, plus untracked files that aren't ignored), so node_modules
- * and build output are left out on every platform.
+ * and build output are left out on every platform. Ignore rules only narrow a search: a scope that
+ * names an ignored path is searched, and every change the program makes is applied.
  *
  * Each $ command and helper call is reported to the runner while the program is active.
  */
@@ -302,22 +303,31 @@ function grep(pattern: string | RegExp, scope: string | string[] = ".") {
 	// Git runs from the root, with paths relative to it, and its files are named from here again below: see git().
 	// Git's own pathspecs differ from glob and sg scopes: `*` crosses directories and `[id]` is a character class.
 	// An existing path is taken literally and anything else as a glob, as glob() reads it.
-	const fromRoot = paths
-		.map((path): string[] => {
-			const rooted = relative(repositoryRoot, resolve(path)) || ".";
-			if (statSync(resolve(path), { throwIfNoEntry: false })) return [`:(literal)${rooted}`];
+	const rootedScopes = paths.map((path) => relative(repositoryRoot, resolve(path)) || ".");
+	// A scope that names an ignored path is searched too, file by file, so the others still skip ignored files.
+	const namingIgnored = scopesNamingIgnored(rootedScopes);
+	const ignored = rootedScopes
+		.filter((rooted) => namingIgnored.has(rooted))
+		.flatMap((rooted) => selectFiles(rooted))
+		.map((file) => `:(literal)${file}`);
+	const fromRoot = rootedScopes
+		.filter((rooted) => !namingIgnored.has(rooted))
+		.flatMap((rooted): string[] => {
+			if (statSync(resolve(repositoryRoot, rooted), { throwIfNoEntry: false })) return [`:(literal)${rooted}`];
 			// Git doesn't expand braces (`*.{ts,tsx}`): select those files as glob() does.
 			if (/\{[^}]*,[^}]*\}/.test(rooted)) return selectFiles(rooted).map((file) => `:(literal)${file}`);
 			return [`:(glob)${literalDirectories(rooted)}`];
-		})
-		.flat();
+		});
 	// A scope that selects nothing matches nothing: no pathspec at all would search every file.
-	if (fromRoot.length === 0) return [];
-	const output = git(
-		["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", "-I", ...flags, "--", ...fromRoot],
-		[1],
-		utf8Locale(),
-	);
+	const search = (pathspecs: string[], ...options: string[]) =>
+		pathspecs.length === 0
+			? ""
+			: git(
+					["-C", repositoryRoot, "grep", "-n", "--null", "--untracked", ...options, "-I", ...flags, "--", ...pathspecs],
+					[1],
+					utf8Locale(),
+				);
+	const output = search(fromRoot) + search(ignored, "--no-exclude-standard");
 
 	const matches = [];
 	let offset = 0;
@@ -347,10 +357,14 @@ function utf8Locale(): Record<string, string | undefined> {
 	return { ...process.env, LC_ALL: "C.UTF-8" };
 }
 
-function git(args: string[], allowedExitCodes: number[] = [], env = process.env): string {
+function git(args: string[], allowedExitCodes: number[] = [], env = process.env, stdin?: string): string {
 	// `-C <dir>` calls start in that directory: Git reads its starting directory itself, and on macOS that fails in a
 	// subdirectory of the AgentFS mount once a file has been read there (see start-directory.ts).
-	const result = Bun.spawnSync(["git", ...args], { env, ...(args[0] === "-C" ? { cwd: args[1] } : {}) });
+	const result = Bun.spawnSync(["git", ...args], {
+		env,
+		...(args[0] === "-C" ? { cwd: args[1] } : {}),
+		...(stdin === undefined ? {} : { stdin: Buffer.from(stdin) }),
+	});
 	if (result.exitCode !== 0 && !allowedExitCodes.includes(result.exitCode)) {
 		const diagnostic = result.stderr.toString().trim() || result.stdout.toString().trim();
 		const command = args[0] === "-C" ? args[2] : args[0]; // named after the subcommand, not its directory
@@ -448,21 +462,50 @@ function selectFiles(input: string, present: (files: string[]) => string[] = exi
 	const normalized = gitPath(input);
 	const stats = statSync(resolve(repositoryRoot, normalized), { throwIfNoEntry: false });
 	const pathspec = stats?.isFile() || stats?.isDirectory();
-	if (!sharedListing) {
-		// A program often names files one at a time; a tracked one needs no git process to be selected.
-		if (stats?.isFile() && trackedFiles().has(normalized)) return [normalized];
-		if (pathspec) return present(listGitFiles(normalized));
-		const matcher = new Glob(literalDirectories(normalized));
-		return present(listGitFiles().filter((file) => matcher.match(file)));
-	}
-	const files = (sharedListing.files ??= listGitFiles());
-	if (pathspec)
-		// A pathspec matches the path itself and everything beneath it.
-		return present(
-			normalized === "." ? files : files.filter((file) => file === normalized || file.startsWith(`${normalized}/`)),
-		);
-	const matcher = new Glob(literalDirectories(normalized));
-	return present(files.filter((file) => matcher.match(file)));
+	const matcher = pathspec ? undefined : new Glob(literalDirectories(normalized));
+	// A pathspec matches the path itself and everything beneath it.
+	const selects = (file: string) =>
+		matcher ? matcher.match(file) : normalized === "." || file === normalized || file.startsWith(`${normalized}/`);
+	let files: string[];
+	if (sharedListing) files = (sharedListing.files ??= listGitFiles()).filter(selects);
+	// A program often names files one at a time; a tracked one needs no git process to be selected.
+	else if (stats?.isFile() && trackedFiles().has(normalized)) return [normalized];
+	else files = pathspec ? listGitFiles(normalized) : listGitFiles().filter(selects);
+	if (files.length === 0) files = ignoredFilesNamedBy(normalized).filter(selects);
+	return present(files);
+}
+
+/** The directory or file a path or glob names before any wildcard: `notes/**\/*.md` names `notes`. */
+function namedPath(normalized: string): string {
+	const segments = normalized.split("/");
+	let index = 0;
+	for (; index < segments.length; index++)
+		if (!lstatSync(resolve(repositoryRoot, ...segments.slice(0, index + 1)), { throwIfNoEntry: false })) break;
+	return segments.slice(0, index).join("/") || ".";
+}
+
+/**
+ * The scopes among these that name a path Git ignores. Ignore rules keep a broad search out of node_modules and
+ * build output, but a scope that names an ignored path asked for it, as with ripgrep.
+ */
+function scopesNamingIgnored(scopes: string[]): Set<string> {
+	const named = scopes
+		.map((scope) => [scope, namedPath(scope)] as const)
+		.filter(([, path]) => path !== "." && !trackedFiles().has(path));
+	if (named.length === 0) return new Set();
+	const paths = [...new Set(named.map(([, path]) => path))];
+	const listed = git(["-C", repositoryRoot, "check-ignore", "-z", "--stdin"], [1], process.env, paths.join("\0"));
+	const ignored = new Set(listed.split("\0"));
+	return new Set(named.filter(([, path]) => ignored.has(path)).map(([scope]) => scope));
+}
+
+/** Every file under the ignored path a scope names. A nested repository is listed as a directory: its files are its own. */
+function ignoredFilesNamedBy(normalized: string): string[] {
+	if (!scopesNamingIgnored([normalized]).has(normalized)) return [];
+	const pathspec = `:(literal)${namedPath(normalized)}`;
+	return git(["-C", repositoryRoot, "ls-files", "-z", "--cached", "--others", "--", pathspec])
+		.split("\0")
+		.filter((file) => file && !file.endsWith("/"));
 }
 
 // ── ast-grep ──────────────────────────────────────────────────────────────────────

@@ -439,7 +439,7 @@ test("sg.file enforces the repository boundary but accepts missing and ignored d
 		assert.equal(existsSync("nested"), false);
 		sg.insert("created();", { endOf: destination });
 		assert.equal(sg.one("created();", "nested/new.ts").text, "created();");
-		assert.equal(sg.find("ignored();", "ignored.ts").length, 0);
+		assert.equal(sg.find("ignored();", "ignored.ts").length, 1);
 		sg.insert("added();", { endOf: sg.file("internal.ts") });
 		sg.insert("linked();", { endOf: sg.file("internal/linked/new.ts") });
 	`;

@@ -90,7 +90,6 @@ export async function openLinuxOverlay(repo: string, tempDir: string): Promise<O
 			);
 			const inspected = await inspectChanges(observed, written, repo, wrap);
 			overlay.formattingAvailable = inspected.formattingAvailable;
-			overlay.ignoredPaths = inspected.ignoredPaths;
 			return [...written, ...inspected.deleted];
 		},
 		close: async () => {
@@ -163,8 +162,7 @@ async function writtenEntries(upper: string, journal: TransactionJournal) {
 
 /**
  * Observed files that are gone from the final overlay. Check the directory entries themselves:
- * staging a file or changing an ignore rule changes Git's classification without deleting the file.
- * Overlayfs's own records aren't enough either: deleting a directory leaves one whiteout for all of
+ * overlayfs's own records aren't enough, since deleting a directory leaves one whiteout for all of
  * it, and recreating a directory hides everything that was in it.
  */
 async function inspectChanges(
@@ -176,53 +174,27 @@ async function inspectChanges(
 	// Inspect only observed files plus private writes, never an untouched lower tree.
 	const script = `
 import { lstatSync } from "node:fs";
-const { observed, files, writtenPaths } = await Bun.stdin.json();
+const { observed, files } = await Bun.stdin.json();
 const missing = new Set(observed.filter(file => !lstatSync(file, { throwIfNoEntry: false })));
-const candidates = [...new Set([...writtenPaths, ...missing])];
-let ignoredPaths = [];
-if (candidates.length) {
-  const git = Bun.spawn(["git", "check-ignore", "-z", "--stdin"], {
-    stdin: new Response(candidates.join("\\0") + "\\0"), stdout: "pipe", stderr: "pipe",
-  });
-  const [code, output, error] = await Promise.all([git.exited, new Response(git.stdout).text(), new Response(git.stderr).text()]);
-  if (code !== 0 && code !== 1) throw new Error("Could not evaluate final ignore rules: " + error.trim());
-  ignoredPaths = output.split("\\0").filter(Boolean);
-}
-const ignored = new Set(ignoredPaths);
 let formattingAvailable = false;
-if (process.env.PI_SHORTHAND_FORMAT !== "0" && files.some(file => !ignored.has(file))) {
+if (process.env.PI_SHORTHAND_FORMAT !== "0" && files.length) {
   try {
     const { formatterFor } = await import(${JSON.stringify(path.join(import.meta.dir, "../runner/format.ts"))});
-    formattingAvailable = files.some(file => !ignored.has(file) && formatterFor(file, process.cwd()) !== null);
+    formattingAvailable = files.some(file => formatterFor(file, process.cwd()) !== null);
   } catch {
     // Discovery is only an optimization. Let the best-effort formatting pass report its own error.
     formattingAvailable = true;
   }
 }
-console.log(JSON.stringify({ deleted: [...missing], ignoredPaths, formattingAvailable }));
+console.log(JSON.stringify({ deleted: [...missing], formattingAvailable }));
 `;
 	const filesToFormat = written.filter(({ entry }) => entry.type === "file").map(({ file }) => file);
-	const input = new Response(
-		JSON.stringify({
-			observed,
-			files: filesToFormat,
-			writtenPaths: written.map(({ file }) => file),
-		}),
-	);
+	const input = new Response(JSON.stringify({ observed, files: filesToFormat }));
 	// Inside the overlay, one mount at a time: overlayfs won't let two mounts share a work directory.
 	const output = await $`${wrap([process.execPath, "-e", script], repo)} < ${input}`.text();
-	const {
-		deleted: files,
-		formattingAvailable,
-		ignoredPaths,
-	} = JSON.parse(output) as {
+	const { deleted: files, formattingAvailable } = JSON.parse(output) as {
 		deleted: string[];
 		formattingAvailable: boolean;
-		ignoredPaths: string[];
 	};
-	return {
-		deleted: files.map((file) => ({ file, entry: null })),
-		formattingAvailable,
-		ignoredPaths,
-	};
+	return { deleted: files.map((file) => ({ file, entry: null })), formattingAvailable };
 }

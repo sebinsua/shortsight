@@ -289,7 +289,7 @@ async function catchUp(server: TypeScriptServer, files: Map<string, string>): Pr
 }
 
 function projectFiles(root: string): Map<string, string> {
-	// The runner only applies Git-visible files, so ignored build output cannot make reuse stale.
+	// Refactors cover the files Git sees, so a change to an ignored one, such as build output, needn't reach the server.
 	const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
 		cwd: root,
 		encoding: "utf8",
